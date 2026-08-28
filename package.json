@@ -1,0 +1,54 @@
+{
+  "name": "dsh-mobile-plugin",
+  "version": "0.0.1",
+  "description": "dsh-mobile bridge: NATS outbound bridge plugin for deepseek-harness (mobile client transport, pairing, device tokens)",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-settings-plugins"]
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "nats": "^2.29.3",
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.1.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
