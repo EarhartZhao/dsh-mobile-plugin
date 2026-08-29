@@ -10,8 +10,13 @@ import type { TokenStore } from './tokens.js'
 /** Methods forwarded to the host ApiProxy (docs/00 whitelist). */
 const ALLOWED_METHODS = new Set([
   'host.describe',
+  'host.listDirectory',
+  'host.createDirectory',
   'workspace.list',
   'workspace.create',
+  'workspace.rename',
+  'workspace.delete',
+  'workspace.archiveSession',
   'session.list',
   'session.create',
   'session.history',
@@ -26,6 +31,19 @@ const ALLOWED_METHODS = new Set([
   'command.list',
   'command.execute',
   'skill.list',
+  'goal.create',
+  'goal.edit',
+  'goal.pause',
+  'goal.resume',
+  'goal.complete',
+  'goal.clear',
+  'subagent.list',
+  'subagent.history',
+  'subagent.interrupt',
+  'subagent.prompt',
+  'agentPreset.list',
+  'agentPreset.select',
+  'agentPreset.read',
   'respond',
 ])
 
