@@ -229,8 +229,19 @@ export class MobileBridge extends Service {
       tokenTtlDays: this.current.tokenTtlDays,
       maxDevices: this.current.maxDevices,
       onHello: () => this.eventBridge?.replayPending(),
+      onInventory: () => this.pluginInventorySnapshot(),
     })
     this.rpcBridge.start()
+  }
+
+  /** Optional host service; its absence only disables the read-only inventory view. */
+  private pluginInventorySnapshot(): unknown {
+    try {
+      const inventory = this.ctx.get('pluginInventory') as { list?: () => unknown } | undefined | null
+      return typeof inventory?.list === 'function' ? inventory.list() : null
+    } catch {
+      return null
+    }
   }
 
   private async stop(): Promise<void> {

@@ -54,15 +54,17 @@ const ALLOWED_METHODS = new Set([
 export const PAIR_METHOD = 'pair'
 export const HELLO_METHOD = 'hello'
 export const MOBILE_INFO_METHOD = 'mobile.info'
+export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.1.0'
+export const PLUGIN_VERSION = '0.2.0'
 export const PLUGIN_MOBILE_API = 1
 export const PLUGIN_FEATURES = [
   'plus-menu',
   'command-directory',
   'multi-image',
   'durable-attachment-order',
+  'plugin-inventory',
 ] as const
 
 export const TOKEN_HEADER = 'x-dsh-token'
@@ -80,6 +82,8 @@ export interface BridgeOptions {
   maxDevices: number
   /** Re-publish pending answerable frames to a reconnecting app. */
   onHello: () => void
+  /** Optional read-only Loader snapshot; absent on hosts without the inventory plugin. */
+  onInventory?: () => unknown
 }
 
 function gateFailure(rpcId: unknown, reason: 'mobile-unauthenticated' | 'mobile-forbidden'): string {
@@ -177,6 +181,14 @@ export class RpcBridge {
         mobileApi: PLUGIN_MOBILE_API,
         features: PLUGIN_FEATURES,
       })))
+      return
+    }
+
+    if (method === MOBILE_INVENTORY_METHOD) {
+      const inventory = this.options.onInventory?.()
+      msg.respond(new TextEncoder().encode(inventory === undefined || inventory === null
+        ? gateFailure(rpcId, 'mobile-forbidden')
+        : pairResult(rpcId, inventory)))
       return
     }
 

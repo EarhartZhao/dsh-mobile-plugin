@@ -52,6 +52,7 @@ describe('RpcBridge', () => {
   let carrierCalls: { url: string, body: string }[]
   let carrier: FetchCarrier
   let helloCount: number
+  let inventoryValue: unknown
   let bridge: RpcBridge
 
   const PREFIX = 'svc.dsh.test.'
@@ -76,6 +77,7 @@ describe('RpcBridge', () => {
       }) as typeof fetch,
     }
     helloCount = 0
+    inventoryValue = null
 
     const nc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(nc, {
@@ -85,6 +87,7 @@ describe('RpcBridge', () => {
       tokenTtlDays: 90,
       maxDevices: 10,
       onHello: () => { helloCount += 1 },
+      onInventory: () => inventoryValue,
     })
   })
 
@@ -177,11 +180,25 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.1.0',
+      pluginVersion: '0.2.0',
       mobileApi: 1,
-      features: ['plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order'],
+      features: ['plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order', 'plugin-inventory'],
     })
     expect(carrierCalls).toHaveLength(0)
+  })
+
+  it('serves the read-only inventory and reports an absent host service', async () => {
+    const snapshot = { entries: [{ entryId: 'entry', moduleName: 'mobile', enabled: true, fiberPhase: 'active' }] }
+    inventoryValue = snapshot
+    let msg = makeMsg(`${PREFIX}mobile.inventory`, { type: 'client-request', rpcId: 'r-inv', method: 'mobile.inventory', payload: {} }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual(snapshot)
+    expect(carrierCalls).toHaveLength(0)
+
+    inventoryValue = null
+    msg = makeMsg(`${PREFIX}mobile.inventory`, { type: 'client-request', rpcId: 'r-inv-missing', method: 'mobile.inventory', payload: {} }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.error.message).toBe('mobile-forbidden')
   })
 
   it('malformed payloads get a gate-shaped error instead of a hang', async () => {
