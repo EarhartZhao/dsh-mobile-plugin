@@ -147,6 +147,17 @@ describe('RpcBridge', () => {
     expect(reply.result.value.echoed).toBe(true)
   })
 
+  it('allows the three RPC methods used by durable images and ordering', async () => {
+    for (const method of ['session.attachment', 'workspace.insertBefore', 'workspace.insertSessionBefore']) {
+      const envelope = { type: 'client-request', rpcId: `r-${method}`, method, payload: {} }
+      const msg = makeMsg(`${PREFIX}${method}`, envelope, validToken)
+      await drive(msg)
+      expect(carrierCalls.at(-1)?.url).toBe(`http://mobile.internal/api/${method}`)
+      expect(JSON.parse(carrierCalls.at(-1)?.body ?? '{}')).toEqual(envelope)
+      expect(replyJson(msg).result.value.echoed).toBe(true)
+    }
+  })
+
   it('routes respond to /api/respond', async () => {
     const msg = makeMsg(`${PREFIX}respond`, { type: 'client-response', rpcId: 'r6', result: { ok: true, value: {} } }, validToken)
     await drive(msg)
