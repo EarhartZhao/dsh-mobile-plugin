@@ -172,6 +172,18 @@ describe('RpcBridge', () => {
     expect(carrierCalls).toHaveLength(0)
   })
 
+  it('serves the plugin compatibility manifest after token auth', async () => {
+    const msg = makeMsg(`${PREFIX}mobile.info`, { type: 'client-request', rpcId: 'r-info', method: 'mobile.info', payload: {} }, validToken)
+    await drive(msg)
+    const reply = replyJson(msg)
+    expect(reply.result.value).toEqual({
+      pluginVersion: '0.1.0',
+      mobileApi: 1,
+      features: ['plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order'],
+    })
+    expect(carrierCalls).toHaveLength(0)
+  })
+
   it('malformed payloads get a gate-shaped error instead of a hang', async () => {
     const replies: Uint8Array[] = []
     const msg: FakeMsg = {

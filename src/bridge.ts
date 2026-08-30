@@ -53,6 +53,17 @@ const ALLOWED_METHODS = new Set([
 /** Plugin-owned methods (never reach the ApiProxy). */
 export const PAIR_METHOD = 'pair'
 export const HELLO_METHOD = 'hello'
+export const MOBILE_INFO_METHOD = 'mobile.info'
+
+/** Compatibility manifest consumed by App 0.1.x. */
+export const PLUGIN_VERSION = '0.1.0'
+export const PLUGIN_MOBILE_API = 1
+export const PLUGIN_FEATURES = [
+  'plus-menu',
+  'command-directory',
+  'multi-image',
+  'durable-attachment-order',
+] as const
 
 export const TOKEN_HEADER = 'x-dsh-token'
 
@@ -157,6 +168,15 @@ export class RpcBridge {
     if (method === HELLO_METHOD) {
       this.options.onHello()
       msg.respond(new TextEncoder().encode(pairResult(rpcId, { ok: true })))
+      return
+    }
+
+    if (method === MOBILE_INFO_METHOD) {
+      msg.respond(new TextEncoder().encode(pairResult(rpcId, {
+        pluginVersion: PLUGIN_VERSION,
+        mobileApi: PLUGIN_MOBILE_API,
+        features: PLUGIN_FEATURES,
+      })))
       return
     }
 
