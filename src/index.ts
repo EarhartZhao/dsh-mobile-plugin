@@ -12,11 +12,12 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { connect, type NatsConnection } from 'nats'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { toFetchHandler, type HostApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { Config } from './config.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { RpcBridge } from './bridge.js'
-import { EventBridge, type EventStreams } from './events.js'
+import { EventBridge, GatewayEventAdapter } from './events.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
 
 declare module '@deepseek-ai/cordis' {
@@ -60,7 +61,7 @@ function dshHome(): string {
 
 export class MobileBridge extends Service {
   static Config = Config
-  static inject = ['apiProxy']
+  static inject = ['connection', 'typertGateway']
 
   private nc: NatsConnection | null = null
   private rpcBridge: RpcBridge | null = null
@@ -212,11 +213,13 @@ export class MobileBridge extends Service {
     this.connectionStatus = 'connected'
     void this.trackStatus(nc)
 
-    // The apiProxy service is guaranteed by static inject.
-    const apiProxy = this.ctx.get('apiProxy') as unknown as HostApiProxy
-    const carrier = toFetchHandler(apiProxy)
+    // Both services are guaranteed by static inject.
+    const connection = this.ctx.get('connection') as unknown as HostConnectionHandle
+    const gateway = this.ctx.get('typertGateway') as unknown as TypertGateway
+    const sharedHandler = connection.createSharedFetchHandler('/api')
+    const carrier = { fetch: (request: Request) => sharedHandler.fetch(request) }
 
-    this.eventBridge = new EventBridge(nc, apiProxy as EventStreams, {
+    this.eventBridge = new EventBridge(nc, new GatewayEventAdapter(gateway), {
       instanceId: this.current.instanceId,
       coalesceMs: this.current.chunkCoalesceMs,
     })

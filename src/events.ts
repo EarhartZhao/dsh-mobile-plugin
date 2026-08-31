@@ -36,6 +36,57 @@ export interface EventBridgeOptions {
   coalesceMs: number
 }
 
+/**
+ * Adapts the dsh 0.1.2-alpha.2 Typert Gateway `$events` stream to the legacy
+ * `EventStreams` interface (mux + host). The wire format on NATS stays the
+ * same, so the mobile app protocol layer needs no changes.
+ */
+export class GatewayEventAdapter {
+  constructor(private readonly gateway: { wireStream: { open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> } }) {}
+
+  readonly events = {
+    mux: async function* (this: GatewayEventAdapter, _request: { rpcId: string }, signal: AbortSignal): AsyncGenerator<StreamFrame> {
+      yield* this.openAndAdapt(signal)
+    }.bind(this),
+    host: async function* (this: GatewayEventAdapter, _request: { rpcId: string }, signal: AbortSignal): AsyncGenerator<StreamFrame> {
+      // Host-level events are currently merged into the mux stream; the
+      // mobile app listens on the mux subject for all actionable frames.
+      yield* []
+    },
+  }
+
+  private async *openAndAdapt(signal: AbortSignal): AsyncGenerator<StreamFrame> {
+    const stream = await this.gateway.wireStream.open('$events', { args: {} }, signal)
+    for await (const item of stream) {
+      const frame = adaptFrame(item)
+      if (frame !== null) yield frame
+    }
+  }
+}
+
+/** Convert one gateway downlink item to the legacy StreamFrame, or null to skip. */
+function adaptFrame(item: unknown): StreamFrame | null {
+  if (typeof item !== 'object' || item === null) return null
+  const record = item as Record<string, unknown>
+  const type = record['type']
+  if (type === 'emit') {
+    return {
+      rpcId: randomUUID(),
+      payload: { type: String(record['event'] ?? ''), ...(typeof record['args'] === 'object' && record['args'] !== null && Array.isArray(record['args']) && record['args'].length > 0 && typeof record['args'][0] === 'object' ? record['args'][0] as Record<string, unknown> : {}) },
+    }
+  }
+  if (type === 'waterfall') {
+    const event = String(record['event'] ?? '')
+    if (event === 'approval/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'approval/requested', ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
+    if (event === 'user-questions/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'question/requested', ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
+    return null
+  }
+  if (type === 'cancel') {
+    return { rpcId: String(record['eventId'] ?? ''), payload: { type: 'approval/resolved', approvalId: record['eventId'] } }
+  }
+  return null
+}
+
 function serverRequest(frame: StreamFrame): string {
   return JSON.stringify({
     type: 'server-request',

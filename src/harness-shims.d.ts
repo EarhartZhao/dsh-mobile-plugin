@@ -1,21 +1,37 @@
 /**
- * Compile-time shim for the host ApiProxy package.
+ * Compile-time shims for the host packages this plugin consumes.
  *
- * The published `@deepseek-ai/dsh-host-apiproxy@0.0.1-rc.1` is uninstallable
- * (depends on unpublished packages), and the local fork builds types only
- * after a full repo build. The plugin's runtime usage is exactly one function
- * (`toFetchHandler`), so we declare it here against a structural type.
- * At runtime inside dsh the import resolves to the real built package.
+ * dsh 0.1.2-alpha.2 removed `@deepseek-ai/dsh-host-apiproxy`; the equivalent
+ * surface is now split across `@deepseek-ai/dsh-client-connection` (unary RPC
+ * dispatch via `ctx.connection`) and `@deepseek-ai/dsh-api-gateway` (event
+ * streaming via `ctx.typertGateway`). We declare structural views here so the
+ * plugin compiles without a full host build; at runtime inside dsh the imports
+ * resolve to the real services through the cordis service registry.
  */
-declare module '@deepseek-ai/dsh-host-apiproxy' {
-  /** Structural view of the host ApiProxy face this plugin consumes. */
-  export interface HostApiProxy {
-    events: {
-      mux(request: { rpcId: string, payload: Record<string, never> }, signal: AbortSignal): AsyncIterable<{ rpcId: string, payload: { type: string } & Record<string, unknown> }>
-      host(request: { rpcId: string, payload: Record<string, never> }, signal: AbortSignal): AsyncIterable<{ rpcId: string, payload: { type: string } & Record<string, unknown> }>
-    }
+
+/** Host Connection service: registers fetch routes and shared-channel RPC. */
+declare module '@deepseek-ai/dsh-client-connection' {
+  /** Transport-independent Fetch handler dispatched after auth. */
+  export interface ConnectionFetchHandler {
+    fetch(request: Request): Promise<Response>
   }
 
-  /** Wraps the host API surface into a WHATWG fetch carrier (see apiproxy src/fetch/handler). */
-  export function toFetchHandler(api: HostApiProxy): { fetch: typeof fetch }
+  /** Shape exposed as `ctx.connection`. */
+  export interface HostConnectionHandle {
+    createSharedFetchHandler(channel: '/api'): ConnectionFetchHandler
+  }
+}
+
+/** Typert Gateway: opens live Remote event and stream channels. */
+declare module '@deepseek-ai/dsh-api-gateway' {
+  /** Carrier-facing access to decoded Remote streams. */
+  export interface TypertGatewayWireStream {
+    open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>
+    failure(error: unknown): { code: string, message: string, details: object }
+  }
+
+  /** Shape exposed as `ctx.typertGateway`. */
+  export interface TypertGateway {
+    wireStream: TypertGatewayWireStream
+  }
 }

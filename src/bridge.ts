@@ -69,9 +69,9 @@ export const PLUGIN_FEATURES = [
 
 export const TOKEN_HEADER = 'x-dsh-token'
 
-/** Fetch carrier for the host ApiProxy (toFetchHandler shape). */
+/** Fetch carrier for the host connection shared handler. */
 export interface FetchCarrier {
-  fetch: typeof fetch
+  fetch(request: Request): Promise<Response>
 }
 
 export interface BridgeOptions {
