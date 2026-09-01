@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { RpcBridge, TOKEN_HEADER, type FetchCarrier } from '../src/bridge.js'
+import { RpcBridge, TOKEN_HEADER, type FetchCarrier, type GatewayCarrier } from '../src/bridge.js'
 import { TokenStore } from '../src/tokens.js'
 
 interface FakeMsg {
@@ -100,6 +100,33 @@ describe('RpcBridge', () => {
     await (bridge as any).handle(msg)
   }
 
+  function useGateway(options: {
+    value?: unknown
+    stream?: unknown[]
+    host?: unknown
+    workspaces?: unknown
+  } = {}): { calls: any[] } {
+    const calls: any[] = []
+    const gateway: GatewayCarrier = {
+      invoke: async request => { calls.push(request); return options.value ?? { accepted: true } },
+      stream: async request => {
+        calls.push(request)
+        const values = options.stream ?? []
+        return (async function* () { yield* values })()
+      },
+      wireStream: { failure: error => ({ code: 'gateway/internal', message: String(error), details: {} }) },
+    }
+    const nc = { subscribe: () => fakeSubscription([]) } as never
+    bridge = new RpcBridge(nc, {
+      instanceId: 'test', carrier, gateway, tokens,
+      tokenTtlDays: 90, maxDevices: 10,
+      onHello: () => { helloCount += 1 },
+      onHostDescribe: () => options.host,
+      onWorkspaceList: () => options.workspaces,
+    })
+    return { calls }
+  }
+
   it('redeems a pairing code without a token', async () => {
     const store = tokens
     const { code } = store.createPairingCode(120)
@@ -148,6 +175,61 @@ describe('RpcBridge', () => {
     const reply = replyJson(msg)
     expect(reply.rpcId).toBe('r5')
     expect(reply.result.value.echoed).toBe(true)
+  })
+
+  it('adapts legacy session calls to current Gateway endpoints and named args', async () => {
+    const gateway = useGateway({ value: { items: [] } })
+    let msg = makeMsg(`${PREFIX}session.list`, {
+      type: 'client-request', rpcId: 'g-list', method: 'session.list', payload: {},
+    }, validToken)
+    await drive(msg)
+    expect(gateway.calls[0]).toEqual({ namespace: 'session', method: 'list', args: { _request: {} } })
+    expect(replyJson(msg).result.value).toEqual({ items: [] })
+
+    msg = makeMsg(`${PREFIX}session.prompt`, {
+      type: 'client-request', rpcId: 'g-prompt', method: 'session.prompt',
+      payload: { sessionId: 's1', mode: 'queue', content: [{ type: 'text', text: 'hi' }] },
+    }, validToken)
+    await drive(msg)
+    expect(gateway.calls[1]).toEqual({
+      namespace: 'session', method: 'prompt',
+      args: { request: { requestId: 'g-prompt', sessionId: 's1', mode: 'queue', content: [{ type: 'text', text: 'hi' }] } },
+    })
+  })
+
+  it('serves removed host/workspace baselines and converts session follow snapshots', async () => {
+    const host = { version: 'dev', cwd: 'C:\\repo', attachedSessions: 0, home: 'C:\\Users\\test', canOpenPath: false }
+    const workspaces = { items: [], archivedSessionIds: [] }
+    const gateway = useGateway({
+      host, workspaces,
+      stream: [{
+        type: 'snapshot', cursor: 2,
+        records: [{ type: 'event', event: { type: 'user/message', seq: 2, time: 1, data: {} } }],
+        hasMore: false, projections: { asOfSeq: 2, values: {} },
+      }],
+    })
+    let msg = makeMsg(`${PREFIX}host.describe`, { type: 'client-request', rpcId: 'g-host', method: 'host.describe', payload: {} }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual(host)
+
+    msg = makeMsg(`${PREFIX}workspace.list`, { type: 'client-request', rpcId: 'g-ws', method: 'workspace.list', payload: {} }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual(workspaces)
+
+    msg = makeMsg(`${PREFIX}session.history`, {
+      type: 'client-request', rpcId: 'g-history', method: 'session.history',
+      payload: { sessionId: 's1', maxMessages: 50 },
+    }, validToken)
+    await drive(msg)
+    expect(gateway.calls[0]).toEqual({
+      namespace: 'session', method: 'follow',
+      args: { request: { address: { kind: 'session', sessionId: 's1' }, maxMessages: 50 } },
+    })
+    expect(replyJson(msg).result.value).toEqual({
+      events: [{ event: { type: 'user/message', seq: 2, time: 1, data: {} } }],
+      hasMore: false,
+      projections: { asOfSeq: 2, values: {} },
+    })
   })
 
   it('allows the three RPC methods used by durable images and ordering', async () => {

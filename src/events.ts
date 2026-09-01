@@ -42,7 +42,22 @@ export interface EventBridgeOptions {
  * same, so the mobile app protocol layer needs no changes.
  */
 export class GatewayEventAdapter {
-  constructor(private readonly gateway: { wireStream: { open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> } }) {}
+  private sink: ((frame: StreamFrame) => void) | undefined
+  private lifetime: AbortSignal | undefined
+  private readonly wantedSessions = new Set<string>()
+  private readonly sessionWatchers = new Map<string, AbortController>()
+
+  constructor(private readonly gateway: {
+    wireStream: { open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> }
+    stream(request: { namespace: string, method: string, args: Record<string, unknown>, signal?: AbortSignal }): Promise<AsyncIterable<unknown>>
+  }) {}
+
+  /** Ensure live events for a Session continue after its history snapshot. */
+  watchSession(sessionId: string): void {
+    if (sessionId.length === 0) return
+    this.wantedSessions.add(sessionId)
+    if (this.sink !== undefined && this.lifetime !== undefined) this.startSessionWatcher(sessionId)
+  }
 
   readonly events = {
     mux: async function* (this: GatewayEventAdapter, _request: { rpcId: string }, signal: AbortSignal): AsyncGenerator<StreamFrame> {
@@ -56,10 +71,96 @@ export class GatewayEventAdapter {
   }
 
   private async *openAndAdapt(signal: AbortSignal): AsyncGenerator<StreamFrame> {
+    const queue = new FrameQueue()
+    this.sink = frame => queue.push(frame)
+    this.lifetime = signal
+    for (const sessionId of this.wantedSessions) this.startSessionWatcher(sessionId)
+    const remoteEvents = void this.pumpRemoteEvents(signal).finally(() => queue.close())
+    try {
+      yield* queue.read(signal)
+    } finally {
+      void remoteEvents
+      this.sink = undefined
+      this.lifetime = undefined
+      for (const watcher of this.sessionWatchers.values()) watcher.abort()
+      this.sessionWatchers.clear()
+    }
+  }
+
+  private async pumpRemoteEvents(signal: AbortSignal): Promise<void> {
     const stream = await this.gateway.wireStream.open('$events', { args: {} }, signal)
     for await (const item of stream) {
       const frame = adaptFrame(item)
-      if (frame !== null) yield frame
+      if (frame !== null) this.sink?.(frame)
+    }
+  }
+
+  private startSessionWatcher(sessionId: string): void {
+    if (this.sessionWatchers.has(sessionId) || this.lifetime === undefined) return
+    const controller = new AbortController()
+    this.sessionWatchers.set(sessionId, controller)
+    const signal = AbortSignal.any([this.lifetime, controller.signal])
+    void (async () => {
+      try {
+        const stream = await this.gateway.stream({
+          namespace: 'session', method: 'follow',
+          args: { request: { address: { kind: 'session', sessionId }, maxMessages: 1 } },
+          signal,
+        })
+        for await (const item of stream) {
+          if (typeof item !== 'object' || item === null) continue
+          const record = item as Record<string, unknown>
+          if (record['type'] === 'snapshot') {
+            this.sink?.({
+              rpcId: randomUUID(),
+              payload: { type: 'session/subscribed', sessionId, lastSeq: Number(record['cursor'] ?? -1) },
+            })
+          } else if (record['type'] === 'event' && typeof record['event'] === 'object' && record['event'] !== null) {
+            this.sink?.({
+              rpcId: randomUUID(),
+              payload: { type: 'session/event', sessionId, event: record['event'] },
+            })
+          }
+        }
+      } catch {
+        // A later history/list call can re-arm the watcher. The NATS bridge
+        // remains usable for bounded RPCs if one Session disappears.
+      } finally {
+        this.sessionWatchers.delete(sessionId)
+      }
+    })()
+  }
+}
+
+class FrameQueue {
+  private readonly frames: StreamFrame[] = []
+  private wake: (() => void) | undefined
+  private closed = false
+
+  push(frame: StreamFrame): void {
+    if (this.closed) return
+    this.frames.push(frame)
+    this.wake?.()
+    this.wake = undefined
+  }
+
+  close(): void {
+    this.closed = true
+    this.wake?.()
+    this.wake = undefined
+  }
+
+  async *read(signal: AbortSignal): AsyncGenerator<StreamFrame> {
+    const abort = (): void => this.close()
+    signal.addEventListener('abort', abort, { once: true })
+    try {
+      while (!this.closed || this.frames.length > 0) {
+        const frame = this.frames.shift()
+        if (frame !== undefined) yield frame
+        else await new Promise<void>(resolve => { this.wake = resolve })
+      }
+    } finally {
+      signal.removeEventListener('abort', abort)
     }
   }
 }
@@ -70,15 +171,15 @@ function adaptFrame(item: unknown): StreamFrame | null {
   const record = item as Record<string, unknown>
   const type = record['type']
   if (type === 'emit') {
-    return {
-      rpcId: randomUUID(),
-      payload: { type: String(record['event'] ?? ''), ...(typeof record['args'] === 'object' && record['args'] !== null && Array.isArray(record['args']) && record['args'].length > 0 && typeof record['args'][0] === 'object' ? record['args'][0] as Record<string, unknown> : {}) },
-    }
+    // Current forwarded Cordis notifications use a different vocabulary from
+    // the legacy mux frames. Baselines cover them; never publish malformed
+    // frames that the mobile schema must drop.
+    return null
   }
   if (type === 'waterfall') {
     const event = String(record['event'] ?? '')
-    if (event === 'approval/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'approval/requested', ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
-    if (event === 'user-questions/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'question/requested', ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
+    if (event === 'approval/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'approval/requested', sessionId: record['agentId'], approvalId: record['eventId'], ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
+    if (event === 'user-questions/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'question/requested', sessionId: record['agentId'], ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
     return null
   }
   if (type === 'cancel') {

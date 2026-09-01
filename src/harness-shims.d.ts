@@ -33,5 +33,17 @@ declare module '@deepseek-ai/dsh-api-gateway' {
   /** Shape exposed as `ctx.typertGateway`. */
   export interface TypertGateway {
     wireStream: TypertGatewayWireStream
+    invoke(request: {
+      namespace: string
+      method: string
+      args: Record<string, unknown>
+      signal?: AbortSignal
+    }): Promise<unknown>
+    stream(request: {
+      namespace: string
+      method: string
+      args: Record<string, unknown>
+      signal?: AbortSignal
+    }): Promise<AsyncIterable<unknown>>
   }
 }

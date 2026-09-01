@@ -218,8 +218,33 @@ export class MobileBridge extends Service {
     const gateway = this.ctx.get('typertGateway') as unknown as TypertGateway
     const sharedHandler = connection.createSharedFetchHandler('/api')
     const carrier = { fetch: (request: Request) => sharedHandler.fetch(request) }
+    const workspaceList = (): unknown => {
+      try {
+        const registry = this.ctx.get('workspaceRegistry') as {
+          list?: () => readonly {
+            id: string, path: string, title: string, sessionIds: readonly string[],
+            createdAt: string, updatedAt: string,
+          }[]
+          archivedSessionIds?: readonly string[]
+        } | undefined
+        const items = typeof registry?.list === 'function'
+          ? registry.list().map(workspace => ({
+            workspaceId: workspace.id,
+            path: workspace.path,
+            title: workspace.title,
+            sessionIds: [...workspace.sessionIds],
+            createdAt: workspace.createdAt,
+            updatedAt: workspace.updatedAt,
+          }))
+          : []
+        return { items, archivedSessionIds: [...registry?.archivedSessionIds ?? []] }
+      } catch {
+        return { items: [], archivedSessionIds: [] }
+      }
+    }
 
-    this.eventBridge = new EventBridge(nc, new GatewayEventAdapter(gateway), {
+    const eventAdapter = new GatewayEventAdapter(gateway)
+    this.eventBridge = new EventBridge(nc, eventAdapter, {
       instanceId: this.current.instanceId,
       coalesceMs: this.current.chunkCoalesceMs,
     })
@@ -228,11 +253,26 @@ export class MobileBridge extends Service {
     this.rpcBridge = new RpcBridge(nc, {
       instanceId: this.current.instanceId,
       carrier,
+      gateway,
       tokens: this.tokens,
       tokenTtlDays: this.current.tokenTtlDays,
       maxDevices: this.current.maxDevices,
       onHello: () => this.eventBridge?.replayPending(),
       onInventory: () => this.pluginInventorySnapshot(),
+      onHostDescribe: () => ({
+        version: process.env.npm_package_version ?? 'dev',
+        cwd: process.cwd(),
+        attachedSessions: (() => {
+          try {
+            const agents = this.ctx.get('agents') as { list?: () => readonly unknown[] } | undefined
+            return typeof agents?.list === 'function' ? agents.list().length : 0
+          } catch { return 0 }
+        })(),
+        home: homedir(),
+        canOpenPath: false,
+      }),
+      onWorkspaceList: workspaceList,
+      onSessionSeen: sessionId => eventAdapter.watchSession(sessionId),
     })
     this.rpcBridge.start()
   }

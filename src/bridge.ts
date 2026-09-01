@@ -7,6 +7,25 @@
 import type { Msg, NatsConnection } from 'nats'
 import type { TokenStore } from './tokens.js'
 
+/** Direct in-process view of the current Typert Gateway. */
+export interface GatewayCarrier {
+  invoke(request: {
+    namespace: string
+    method: string
+    args: Record<string, unknown>
+    signal?: AbortSignal
+  }): Promise<unknown>
+  stream(request: {
+    namespace: string
+    method: string
+    args: Record<string, unknown>
+    signal?: AbortSignal
+  }): Promise<AsyncIterable<unknown>>
+  wireStream: {
+    failure(error: unknown): { code: string, message: string, details: object }
+  }
+}
+
 /** Methods forwarded to the host ApiProxy (docs/00 whitelist). */
 const ALLOWED_METHODS = new Set([
   'host.describe',
@@ -76,7 +95,9 @@ export interface FetchCarrier {
 
 export interface BridgeOptions {
   instanceId: string
-  carrier: FetchCarrier
+  /** Legacy carrier retained for old dsh builds; current dev uses gateway. */
+  carrier?: FetchCarrier
+  gateway?: GatewayCarrier
   tokens: TokenStore
   tokenTtlDays: number
   maxDevices: number
@@ -84,6 +105,105 @@ export interface BridgeOptions {
   onHello: () => void
   /** Optional read-only Loader snapshot; absent on hosts without the inventory plugin. */
   onInventory?: () => unknown
+  /** Host facts removed from the current unary Remote surface. */
+  onHostDescribe?: () => unknown | Promise<unknown>
+  onWorkspaceList?: () => unknown | Promise<unknown>
+  /** Called when an ordinary Session becomes relevant to the mobile client. */
+  onSessionSeen?: (sessionId: string) => void
+}
+
+interface ClientEnvelope {
+  type?: unknown
+  rpcId?: unknown
+  method?: unknown
+  payload?: unknown
+  result?: unknown
+}
+
+interface RemoteCall {
+  namespace: string
+  method: string
+  args: Record<string, unknown>
+}
+
+const DIRECT_REQUEST_METHODS = new Set([
+  'session.create', 'session.search', 'session.selectModel', 'session.rename',
+  'session.fork', 'session.attachment', 'session.updateQueue', 'session.cancel',
+  'workspace.create', 'workspace.rename', 'workspace.delete',
+  'workspace.insertBefore', 'workspace.insertSessionBefore', 'workspace.archiveSession',
+  'skill.list',
+])
+
+/** Translate the frozen mobile v1 method/payload vocabulary to current Remote args. */
+function remoteCall(method: string, payload: unknown, rpcId: string): RemoteCall | null {
+  const request = isRecord(payload) ? payload : {}
+  if (method === 'session.list') return { namespace: 'session', method: 'list', args: { _request: request } }
+  if (method === 'session.prompt') {
+    return { namespace: 'session', method: 'prompt', args: { request: { requestId: rpcId, ...request } } }
+  }
+  if (method === 'session.models') return { namespace: 'session', method: 'modelCatalog', args: {} }
+  if (method === 'agentPreset.list') return { namespace: 'agentPresets', method: 'list', args: {} }
+  if (method === 'agentPreset.read') return { namespace: 'agentPresets', method: 'read', args: request }
+  if (method === 'agentPreset.select') {
+    return { namespace: 'agentPresets', method: 'select', args: request }
+  }
+  if (method === 'subagent.list') return { namespace: 'subagents', method: 'list', args: request }
+  if (method === 'subagent.prompt') {
+    return { namespace: 'subagents', method: 'prompt', args: { request: { requestId: rpcId, ...request } } }
+  }
+  if (method === 'subagent.interrupt') {
+    return { namespace: 'subagents', method: 'interruptByParent', args: request }
+  }
+  if (method.startsWith('goal.')) {
+    return { namespace: 'goals', method: method.slice('goal.'.length), args: request }
+  }
+  if (DIRECT_REQUEST_METHODS.has(method)) {
+    const [namespace, name] = method.split('.') as [string, string]
+    const actualNamespace = namespace === 'skill' ? 'skills' : namespace
+    return { namespace: actualNamespace, method: name, args: { request } }
+  }
+  return null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function serverResult(rpcId: string, value: unknown): string {
+  return JSON.stringify({ type: 'server-response', rpcId, result: { ok: true, value } })
+}
+
+function serverFailure(
+  rpcId: string,
+  error: { code: string, message: string, details: object },
+): string {
+  return JSON.stringify({ type: 'server-response', rpcId, result: { ok: false, error } })
+}
+
+function historyValue(snapshot: unknown): unknown {
+  if (!isRecord(snapshot) || snapshot.type !== 'snapshot') {
+    throw new Error('session follow did not begin with a snapshot')
+  }
+  const records = Array.isArray(snapshot.records) ? snapshot.records : []
+  return {
+    events: records.flatMap((record) => {
+      if (!isRecord(record) || !isRecord(record.event)) return []
+      return [{ event: record.event }]
+    }),
+    hasMore: snapshot.hasMore === true,
+    ...(isRecord(snapshot.projections) ? { projections: snapshot.projections } : {}),
+  }
+}
+
+async function firstValue(stream: AsyncIterable<unknown>): Promise<unknown> {
+  const iterator = stream[Symbol.asyncIterator]()
+  try {
+    const item = await iterator.next()
+    if (item.done) throw new Error('Remote stream ended before its baseline')
+    return item.value
+  } finally {
+    await iterator.return?.()
+  }
 }
 
 function gateFailure(rpcId: unknown, reason: 'mobile-unauthenticated' | 'mobile-forbidden'): string {
@@ -193,6 +313,77 @@ export class RpcBridge {
     }
 
     if (!ALLOWED_METHODS.has(method)) {
+      msg.respond(new TextEncoder().encode(gateFailure(rpcId, 'mobile-forbidden')))
+      return
+    }
+
+    const envelope = JSON.parse(new TextDecoder().decode(body)) as ClientEnvelope
+    const id = typeof rpcId === 'string' ? rpcId : 'unknown'
+    // Current dev Hosts expose Typert Remote endpoints rather than the legacy
+    // dot-separated Fetch routes. Adapt after authentication so the mobile
+    // wire remains stable while the call still traverses NATS and Gateway.
+    if (this.options.gateway !== undefined) {
+      if (method === 'host.describe' && this.options.onHostDescribe !== undefined) {
+        const value = await this.options.onHostDescribe()
+        msg.respond(new TextEncoder().encode(serverResult(id, value)))
+        return
+      }
+      if (method === 'workspace.list' && this.options.onWorkspaceList !== undefined) {
+        const value = await this.options.onWorkspaceList()
+        msg.respond(new TextEncoder().encode(serverResult(id, value)))
+        return
+      }
+      const payload = envelope.payload
+      try {
+        if (method === 'session.history') {
+          const request = isRecord(payload) ? payload : {}
+          const sessionId = String(request.sessionId ?? '')
+          this.options.onSessionSeen?.(sessionId)
+          const stream = await this.options.gateway.stream({
+            namespace: 'session', method: 'follow',
+            args: { request: { address: { kind: 'session', sessionId }, maxMessages: request.maxMessages } },
+          })
+          const first = await firstValue(stream)
+          msg.respond(new TextEncoder().encode(serverResult(id, historyValue(first))))
+          return
+        }
+        if (method === 'respond') {
+          // Client responses to approval/question waterfalls are still owned by
+          // the Gateway's special $events/result endpoint; the legacy carrier
+          // knows how to preserve its exact envelope.
+          if (this.options.carrier === undefined) throw new Error('response carrier unavailable')
+        } else {
+          const call = remoteCall(method, payload, id)
+          if (call !== null) {
+            const value = await this.options.gateway.invoke(call)
+            if (method === 'session.list' && isRecord(value) && Array.isArray(value.items)) {
+              for (const item of value.items) {
+                if (isRecord(item) && typeof item.sessionId === 'string') this.options.onSessionSeen?.(item.sessionId)
+              }
+            } else if (method === 'session.create' && isRecord(value) && typeof value.sessionId === 'string') {
+              this.options.onSessionSeen?.(value.sessionId)
+            } else if (method === 'session.prompt' && isRecord(payload) && typeof payload.sessionId === 'string') {
+              this.options.onSessionSeen?.(payload.sessionId)
+            }
+            const normalized = method === 'session.models' && isRecord(value)
+              ? {
+                current: value.default,
+                routable: Array.isArray(value.routableProviders) ? value.routableProviders.length > 0 : false,
+                groups: value.groups ?? [],
+                failures: value.failures ?? [],
+              }
+              : value
+            msg.respond(new TextEncoder().encode(serverResult(id, normalized)))
+            return
+          }
+        }
+      } catch (error: unknown) {
+        msg.respond(new TextEncoder().encode(serverFailure(id, this.options.gateway.wireStream.failure(error))))
+        return
+      }
+    }
+
+    if (this.options.carrier === undefined) {
       msg.respond(new TextEncoder().encode(gateFailure(rpcId, 'mobile-forbidden')))
       return
     }
