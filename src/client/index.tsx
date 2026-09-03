@@ -86,7 +86,7 @@ function MobileBridgeCard() {
       style: {
         display: 'block',
         width: '100%',
-        minHeight: 620,
+        minHeight: 820,
         border: 'none',
         borderTop: '1px solid var(--border, #8884)',
         background: 'var(--background, transparent)',

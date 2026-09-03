@@ -96,6 +96,7 @@ phone (外网) ──wss:8443──► NATS Hub (115.159.57.137, 既有)
 - 配对 → 门控 RPC → 事件流全链路实测通过：`pair` 换 token、`host.describe` / `workspace.list`（真实工作区数据）/ `session.create` 成功，`host/session-added` 帧到达 `evt.dsh.home.host`。
 - 双端同步实测：Web 端（loopback `/api`）创建的会话经事件桥推到 NATS；NATS 端创建的会话进 `session.list`。
 - 无 token 调用被 `mobile-unauthenticated` 拒绝；设置卡浏览器半已被模块系统收编（`/plugins/dsh-mobile-plugin/client.js` 可服务，boot 图含 `?rev=` 注册行）。
+- 设置卡状态接口与经设备 token 保护的 `mobile.health` 返回同一组运行信息：插件版本、mobileApi、功能、构建 ID、真实加载路径、实例 ID、启动时间、最近连接/重连和最近错误；任何输出都不包含 Hub 密码或设备 token。
 - 踩坑记录：① 同一实例曾被挂出两个响应者——boot effect 与 settings watch 并发触发 start 导致重复 NATS 订阅，生命周期已串行化（kick/cycle 队列）；② 见上 `file:` vs `link:`。
 
 ### 追加：broker 硬重启恢复（2026-08-27，实测）

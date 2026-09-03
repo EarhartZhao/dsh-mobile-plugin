@@ -53,6 +53,7 @@ describe('RpcBridge', () => {
   let carrier: FetchCarrier
   let helloCount: number
   let inventoryValue: unknown
+  let healthValue: unknown
   let bridge: RpcBridge
 
   const PREFIX = 'svc.dsh.test.'
@@ -78,6 +79,7 @@ describe('RpcBridge', () => {
     }
     helloCount = 0
     inventoryValue = null
+    healthValue = { status: 'ok', pluginVersion: '0.2.0', instanceId: 'test' }
 
     const nc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(nc, {
@@ -88,6 +90,7 @@ describe('RpcBridge', () => {
       maxDevices: 10,
       onHello: () => { helloCount += 1 },
       onInventory: () => inventoryValue,
+      onHealth: () => healthValue,
     })
   })
 
@@ -264,8 +267,15 @@ describe('RpcBridge', () => {
     expect(reply.result.value).toEqual({
       pluginVersion: '0.2.0',
       mobileApi: 1,
-      features: ['plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order', 'plugin-inventory'],
+      features: ['plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order', 'plugin-inventory', 'health-check'],
     })
+    expect(carrierCalls).toHaveLength(0)
+  })
+
+  it('serves the authenticated mobile health snapshot without using the carrier', async () => {
+    const msg = makeMsg(`${PREFIX}mobile.health`, { type: 'client-request', rpcId: 'r-health', method: 'mobile.health', payload: {} }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual(healthValue)
     expect(carrierCalls).toHaveLength(0)
   })
 

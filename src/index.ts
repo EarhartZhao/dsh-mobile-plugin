@@ -9,14 +9,16 @@
  * onboarding wizard. See docs/00-plugin-plan.md.
  */
 import { homedir } from 'node:os'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { connect, type NatsConnection } from 'nats'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { Config } from './config.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
-import { RpcBridge } from './bridge.js'
+import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
 
@@ -34,6 +36,10 @@ export type { DeviceEntry } from './tokens.js'
 export const SETTINGS_NS = 'mobile-bridge'
 
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+
+const PLUGIN_LOADED_FROM = fileURLToPath(import.meta.url)
+const PLUGIN_BUILD_ID = process.env.DSH_MOBILE_PLUGIN_BUILD_ID
+  ?? `${PLUGIN_VERSION}-${Math.trunc(statSync(PLUGIN_LOADED_FROM).mtimeMs).toString(36)}`
 
 export interface PairingPayload {
   hub: string
@@ -68,6 +74,10 @@ export class MobileBridge extends Service {
   private eventBridge: EventBridge | null = null
   private connectionStatus: ConnectionStatus = 'disconnected'
   private reconnectWatchdog: ReturnType<typeof setTimeout> | null = null
+  private bridgeStartedAt: string | null = null
+  private lastConnectedAt: string | null = null
+  private lastReconnectAt: string | null = null
+  private lastError: string | null = null
   private readonly tokens: TokenStore
   private current: Config
   /** Serializes start/stop/restart: concurrent triggers (boot effect + settings
@@ -136,8 +146,36 @@ export class MobileBridge extends Service {
 
   // ---- service surface for the settings card / CLI ----
 
-  status(): { connection: ConnectionStatus, devices: number } {
-    return { connection: this.connectionStatus, devices: this.tokens.list().length }
+  status(): {
+    connection: ConnectionStatus
+    devices: number
+    pluginVersion: string
+    mobileApi: number
+    features: readonly string[]
+    buildId: string
+    loadedFrom: string
+    instanceId: string
+    startedAt: string | null
+    uptimeMs: number
+    lastConnectedAt: string | null
+    lastReconnectAt: string | null
+    lastError: string | null
+  } {
+    return {
+      connection: this.connectionStatus,
+      devices: this.tokens.list().length,
+      pluginVersion: PLUGIN_VERSION,
+      mobileApi: PLUGIN_MOBILE_API,
+      features: PLUGIN_FEATURES,
+      buildId: PLUGIN_BUILD_ID,
+      loadedFrom: PLUGIN_LOADED_FROM,
+      instanceId: this.current.instanceId,
+      startedAt: this.bridgeStartedAt,
+      uptimeMs: this.bridgeStartedAt === null ? 0 : Math.max(0, Date.now() - Date.parse(this.bridgeStartedAt)),
+      lastConnectedAt: this.lastConnectedAt,
+      lastReconnectAt: this.lastReconnectAt,
+      lastError: this.lastError,
+    }
   }
 
   listDevices(): Omit<DeviceEntry, 'tokenHash'>[] {
@@ -183,8 +221,10 @@ export class MobileBridge extends Service {
       } else if (!this.wantRunning) {
         await this.stop()
       }
-    } catch {
+    } catch (error) {
       this.connectionStatus = 'disconnected'
+      this.lastError = error instanceof Error ? error.message : String(error)
+      console.error('[mobile-bridge] failed to start:', this.lastError)
     }
   }
 
@@ -195,8 +235,10 @@ export class MobileBridge extends Service {
       try {
         await this.stop()
         await this.start()
-      } catch {
+      } catch (error) {
         this.connectionStatus = 'disconnected'
+        this.lastError = error instanceof Error ? error.message : String(error)
+        console.error('[mobile-bridge] failed to restart:', this.lastError)
       }
     })
     return this.lifecycle
@@ -205,12 +247,23 @@ export class MobileBridge extends Service {
   private async start(): Promise<void> {
     await this.tokens.load()
     this.connectionStatus = 'connecting'
+    this.bridgeStartedAt = new Date().toISOString()
+    this.lastError = null
 
     // waitOnFirstConnect: a missing Leaf must not reject the plugin's fiber;
     // nats.js retries in the background and the status surface reports it.
     const nc = await connect({ servers: this.current.natsUrl, waitOnFirstConnect: true })
     this.nc = nc
     this.connectionStatus = 'connected'
+    this.lastConnectedAt = new Date().toISOString()
+    console.info('[mobile-bridge] started', {
+      pluginVersion: PLUGIN_VERSION,
+      mobileApi: PLUGIN_MOBILE_API,
+      buildId: PLUGIN_BUILD_ID,
+      loadedFrom: PLUGIN_LOADED_FROM,
+      instanceId: this.current.instanceId,
+      features: PLUGIN_FEATURES,
+    })
     void this.trackStatus(nc)
 
     // Both services are guaranteed by static inject.
@@ -259,6 +312,7 @@ export class MobileBridge extends Service {
       maxDevices: this.current.maxDevices,
       onHello: () => this.eventBridge?.replayPending(),
       onInventory: () => this.pluginInventorySnapshot(),
+      onHealth: () => ({ status: 'ok', ...this.status() }),
       onHostDescribe: () => ({
         version: process.env.npm_package_version ?? 'dev',
         cwd: process.cwd(),
@@ -313,6 +367,9 @@ export class MobileBridge extends Service {
           this.armReconnectWatchdog(nc)
         } else if (status.type === 'reconnect') {
           this.connectionStatus = 'connected'
+          this.lastConnectedAt = new Date().toISOString()
+          this.lastReconnectAt = this.lastConnectedAt
+          this.lastError = null
           this.clearReconnectWatchdog()
         }
       }

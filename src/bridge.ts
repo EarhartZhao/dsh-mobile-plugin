@@ -73,6 +73,7 @@ const ALLOWED_METHODS = new Set([
 export const PAIR_METHOD = 'pair'
 export const HELLO_METHOD = 'hello'
 export const MOBILE_INFO_METHOD = 'mobile.info'
+export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
@@ -84,6 +85,7 @@ export const PLUGIN_FEATURES = [
   'multi-image',
   'durable-attachment-order',
   'plugin-inventory',
+  'health-check',
 ] as const
 
 export const TOKEN_HEADER = 'x-dsh-token'
@@ -105,6 +107,8 @@ export interface BridgeOptions {
   onHello: () => void
   /** Optional read-only Loader snapshot; absent on hosts without the inventory plugin. */
   onInventory?: () => unknown
+  /** Authenticated operational snapshot for mobile connection diagnostics. */
+  onHealth?: () => unknown
   /** Host facts removed from the current unary Remote surface. */
   onHostDescribe?: () => unknown | Promise<unknown>
   onWorkspaceList?: () => unknown | Promise<unknown>
@@ -301,6 +305,14 @@ export class RpcBridge {
         mobileApi: PLUGIN_MOBILE_API,
         features: PLUGIN_FEATURES,
       })))
+      return
+    }
+
+    if (method === MOBILE_HEALTH_METHOD) {
+      const health = this.options.onHealth?.()
+      msg.respond(new TextEncoder().encode(health === undefined || health === null
+        ? gateFailure(rpcId, 'mobile-forbidden')
+        : pairResult(rpcId, health)))
       return
     }
 

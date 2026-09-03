@@ -131,7 +131,7 @@ const CONSOLE_HTML = `<!doctype html>
 <title>dsh-mobile 桥接配置</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 32px auto; padding: 0 16px; }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px 32px; }
   h1 { font-size: 20px; } h2 { font-size: 15px; margin-top: 28px; }
   label { display: block; font-size: 13px; margin: 10px 0 4px; opacity: .8; }
   input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
@@ -140,6 +140,8 @@ const CONSOLE_HTML = `<!doctype html>
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
   #status { font-size: 13px; padding: 6px 10px; border-radius: 6px; background: #8882; }
+  .health { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 7px 14px; padding: 14px; border: 1px solid #8883; border-radius: 8px; font-size: 12px; }
+  .health dt { opacity: .65; } .health dd { margin: 0; overflow-wrap: anywhere; }
   #qr { margin-top: 16px; text-align: center; }
   #qr svg { width: 240px; height: 240px; }
   #qrExpiry { font-size: 12px; opacity: .7; }
@@ -151,6 +153,18 @@ const CONSOLE_HTML = `<!doctype html>
 <body>
 <h1>dsh-mobile 桥接配置</h1>
 <p id="statusLine">状态：<span id="status">加载中…</span></p>
+<dl class="health">
+  <dt>插件版本</dt><dd id="pluginVersion">—</dd>
+  <dt>mobileApi</dt><dd id="mobileApi">—</dd>
+  <dt>构建 ID</dt><dd id="buildId">—</dd>
+  <dt>实例 ID</dt><dd id="activeInstance">—</dd>
+  <dt>实际加载路径</dt><dd id="loadedFrom">—</dd>
+  <dt>桥启动时间</dt><dd id="startedAt">—</dd>
+  <dt>最近连接</dt><dd id="lastConnectedAt">—</dd>
+  <dt>最近重连</dt><dd id="lastReconnectAt">—</dd>
+  <dt>功能</dt><dd id="features">—</dd>
+  <dt>最近错误</dt><dd id="lastError">无</dd>
+</dl>
 
 <h2>服务器信息（NATS Hub）</h2>
 <label>Hub 地址（wss://…:8443）</label><input id="hubWssUrl" placeholder="wss://115.159.57.137:8443">
@@ -184,12 +198,33 @@ async function api(path, body) {
 }
 
 async function refreshStatus() {
-  const s = await api('status')
-  $('status').textContent = { connected: '已连接', connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection
-  $('hubWssUrl').value = s.config.hubWssUrl
-  $('hubUser').value = s.config.hubUser
-  $('instanceId').value = s.config.instanceId
-  $('hubPass').placeholder = s.config.hubPassConfigured ? '已配置（留空保持不变）' : '未配置'
+  try {
+    const s = await api('status')
+    $('status').textContent = { connected: '已连接', connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection
+    $('pluginVersion').textContent = s.pluginVersion || '—'
+    $('mobileApi').textContent = String(s.mobileApi ?? '—')
+    $('buildId').textContent = s.buildId || '—'
+    $('activeInstance').textContent = s.instanceId || '—'
+    $('loadedFrom').textContent = s.loadedFrom || '—'
+    $('startedAt').textContent = formatTime(s.startedAt)
+    $('lastConnectedAt').textContent = formatTime(s.lastConnectedAt)
+    $('lastReconnectAt').textContent = formatTime(s.lastReconnectAt)
+    $('features').textContent = Array.isArray(s.features) ? s.features.join(' · ') : '—'
+    $('lastError').textContent = s.lastError || '无'
+    $('hubWssUrl').value = s.config.hubWssUrl
+    $('hubUser').value = s.config.hubUser
+    $('instanceId').value = s.config.instanceId
+    $('hubPass').placeholder = s.config.hubPassConfigured ? '已配置（留空保持不变）' : '未配置'
+    $('pairBtn').disabled = s.connection !== 'connected'
+  } catch (error) {
+    $('status').textContent = '状态读取失败'
+    $('lastError').textContent = String(error)
+    $('pairBtn').disabled = true
+  }
+}
+
+function formatTime(value) {
+  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 }
 
 async function refreshDevices() {
