@@ -65,6 +65,19 @@ function dshHome(): string {
   return process.env.DSH_HOME ?? join(homedir(), '.dsh')
 }
 
+function sameConfig(left: Config, right: Config): boolean {
+  return left.natsUrl === right.natsUrl
+    && left.hubWssUrl === right.hubWssUrl
+    && left.hubUser === right.hubUser
+    && left.hubPass === right.hubPass
+    && left.hubCaFingerprint === right.hubCaFingerprint
+    && left.instanceId === right.instanceId
+    && left.tokenTtlDays === right.tokenTtlDays
+    && left.pairCodeTtlSec === right.pairCodeTtlSec
+    && left.maxDevices === right.maxDevices
+    && left.chunkCoalesceMs === right.chunkCoalesceMs
+}
+
 export class MobileBridge extends Service {
   static Config = Config
   static inject = ['connection', 'typertGateway']
@@ -78,6 +91,7 @@ export class MobileBridge extends Service {
   private lastConnectedAt: string | null = null
   private lastReconnectAt: string | null = null
   private lastError: string | null = null
+  private readonly streamErrors = new Map<string, string>()
   private readonly tokens: TokenStore
   private current: Config
   /** Serializes start/stop/restart: concurrent triggers (boot effect + settings
@@ -97,13 +111,11 @@ export class MobileBridge extends Service {
     ctx.inject(['settings'], (sctx) => {
       const settings = sctx.get('settings') as unknown as SettingsService
       const scope = settings.register(SETTINGS_NS, Config, { base: entryConfig })
-      scope.watch(() => {
-        this.current = scope.get()
-        void this.restart()
-      })
-      this.current = scope.get()
       this.settingsScope = scope
-      void this.restart()
+      this.applyConfig(scope.get())
+      scope.watch(() => {
+        this.applyConfig(scope.get())
+      })
     })
 
     // Loopback console routes when a webserver is in the composition (web profile).
@@ -140,8 +152,16 @@ export class MobileBridge extends Service {
       await this.settingsScope.update(patch)
       return // the scope watcher rebuilds
     }
-    this.current = { ...this.current, ...patch }
-    await this.restart()
+    const next = { ...this.current, ...patch }
+    if (sameConfig(this.current, next)) return
+    this.current = next
+    if (this.wantRunning) await this.restart()
+  }
+
+  private applyConfig(next: Config): void {
+    if (sameConfig(this.current, next)) return
+    this.current = next
+    if (this.wantRunning) void this.restart()
   }
 
   // ---- service surface for the settings card / CLI ----
@@ -163,7 +183,7 @@ export class MobileBridge extends Service {
   } {
     return {
       connection: this.connectionStatus,
-      devices: this.tokens.list().length,
+      devices: this.tokens.activeCount(),
       pluginVersion: PLUGIN_VERSION,
       mobileApi: PLUGIN_MOBILE_API,
       features: PLUGIN_FEATURES,
@@ -249,10 +269,17 @@ export class MobileBridge extends Service {
     this.connectionStatus = 'connecting'
     this.bridgeStartedAt = new Date().toISOString()
     this.lastError = null
+    this.streamErrors.clear()
 
     // waitOnFirstConnect: a missing Leaf must not reject the plugin's fiber;
     // nats.js retries in the background and the status surface reports it.
     const nc = await connect({ servers: this.current.natsUrl, waitOnFirstConnect: true })
+    try {
+      await nc.flush()
+    } catch (error) {
+      await nc.close().catch(() => undefined)
+      throw error
+    }
     this.nc = nc
     this.connectionStatus = 'connected'
     this.lastConnectedAt = new Date().toISOString()
@@ -271,32 +298,12 @@ export class MobileBridge extends Service {
     const gateway = this.ctx.get('typertGateway') as unknown as TypertGateway
     const sharedHandler = connection.createSharedFetchHandler('/api')
     const carrier = { fetch: (request: Request) => sharedHandler.fetch(request) }
-    const workspaceList = (): unknown => {
-      try {
-        const registry = this.ctx.get('workspaceRegistry') as {
-          list?: () => readonly {
-            id: string, path: string, title: string, sessionIds: readonly string[],
-            createdAt: string, updatedAt: string,
-          }[]
-          archivedSessionIds?: readonly string[]
-        } | undefined
-        const items = typeof registry?.list === 'function'
-          ? registry.list().map(workspace => ({
-            workspaceId: workspace.id,
-            path: workspace.path,
-            title: workspace.title,
-            sessionIds: [...workspace.sessionIds],
-            createdAt: workspace.createdAt,
-            updatedAt: workspace.updatedAt,
-          }))
-          : []
-        return { items, archivedSessionIds: [...registry?.archivedSessionIds ?? []] }
-      } catch {
-        return { items: [], archivedSessionIds: [] }
-      }
-    }
-
-    const eventAdapter = new GatewayEventAdapter(gateway)
+    const eventAdapter = new GatewayEventAdapter(
+      gateway,
+      carrier,
+      (name, error) => this.setStreamError(name, error),
+      name => this.clearStreamError(name),
+    )
     this.eventBridge = new EventBridge(nc, eventAdapter, {
       instanceId: this.current.instanceId,
       coalesceMs: this.current.chunkCoalesceMs,
@@ -311,34 +318,28 @@ export class MobileBridge extends Service {
       tokenTtlDays: this.current.tokenTtlDays,
       maxDevices: this.current.maxDevices,
       onHello: () => this.eventBridge?.replayPending(),
-      onInventory: () => this.pluginInventorySnapshot(),
+      onInventory: async () => gateway.invoke({ namespace: 'pluginInventory', method: 'list', args: {} }).catch(() => null),
       onHealth: () => ({ status: 'ok', ...this.status() }),
-      onHostDescribe: () => ({
-        version: process.env.npm_package_version ?? 'dev',
-        cwd: process.cwd(),
-        attachedSessions: (() => {
-          try {
-            const agents = this.ctx.get('agents') as { list?: () => readonly unknown[] } | undefined
-            return typeof agents?.list === 'function' ? agents.list().length : 0
-          } catch { return 0 }
-        })(),
-        home: homedir(),
-        canOpenPath: false,
-      }),
-      onWorkspaceList: workspaceList,
-      onSessionSeen: sessionId => eventAdapter.watchSession(sessionId),
+      onHostDescribe: async () => {
+        const sessions = await gateway.invoke({
+          namespace: 'session', method: 'list', args: { _request: {} },
+        }).catch(() => ({ items: [] }))
+        return {
+          version: process.env.npm_package_version ?? 'dev',
+          cwd: process.cwd(),
+          attachedSessions: typeof sessions === 'object' && sessions !== null
+            && Array.isArray((sessions as { items?: unknown }).items)
+            ? (sessions as { items: unknown[] }).items.length
+            : 0,
+          home: homedir(),
+          canOpenPath: false,
+        }
+      },
+      onWorkspaceList: () => eventAdapter.workspaceSnapshot(),
+      onSessionSeen: address => eventAdapter.watchSession(address),
+      onRespond: (rpcId, result) => eventAdapter.respond(rpcId, result),
     })
     this.rpcBridge.start()
-  }
-
-  /** Optional host service; its absence only disables the read-only inventory view. */
-  private pluginInventorySnapshot(): unknown {
-    try {
-      const inventory = this.ctx.get('pluginInventory') as { list?: () => unknown } | undefined | null
-      return typeof inventory?.list === 'function' ? inventory.list() : null
-    } catch {
-      return null
-    }
   }
 
   private async stop(): Promise<void> {
@@ -366,10 +367,21 @@ export class MobileBridge extends Service {
           this.connectionStatus = 'reconnecting'
           this.armReconnectWatchdog(nc)
         } else if (status.type === 'reconnect') {
+          try {
+            await nc.flush()
+          } catch (error) {
+            if (this.nc === nc) {
+              this.connectionStatus = 'reconnecting'
+              this.lastError = error instanceof Error ? error.message : String(error)
+              this.armReconnectWatchdog(nc)
+            }
+            continue
+          }
+          if (this.nc !== nc) return
           this.connectionStatus = 'connected'
           this.lastConnectedAt = new Date().toISOString()
           this.lastReconnectAt = this.lastConnectedAt
-          this.lastError = null
+          this.lastError = Array.from(this.streamErrors.values()).at(-1) ?? null
           this.clearReconnectWatchdog()
         }
       }
@@ -399,6 +411,22 @@ export class MobileBridge extends Service {
     if (this.reconnectWatchdog !== null) {
       clearTimeout(this.reconnectWatchdog)
       this.reconnectWatchdog = null
+    }
+  }
+
+  private setStreamError(name: string, error: unknown): void {
+    const message = `${name}: ${error instanceof Error ? error.message : String(error)}`
+    this.streamErrors.delete(name)
+    this.streamErrors.set(name, message)
+    this.lastError = message
+  }
+
+  private clearStreamError(name: string): void {
+    const message = this.streamErrors.get(name)
+    if (message === undefined) return
+    this.streamErrors.delete(name)
+    if (this.lastError === message) {
+      this.lastError = Array.from(this.streamErrors.values()).at(-1) ?? null
     }
   }
 }

@@ -108,6 +108,7 @@ describe('RpcBridge', () => {
     stream?: unknown[]
     host?: unknown
     workspaces?: unknown
+    onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
   } = {}): { calls: any[] } {
     const calls: any[] = []
     const gateway: GatewayCarrier = {
@@ -126,6 +127,7 @@ describe('RpcBridge', () => {
       onHello: () => { helloCount += 1 },
       onHostDescribe: () => options.host,
       onWorkspaceList: () => options.workspaces,
+      ...(options.onRespond === undefined ? {} : { onRespond: options.onRespond }),
     })
     return { calls }
   }
@@ -141,6 +143,28 @@ describe('RpcBridge', () => {
     const reply = replyJson(msg)
     expect(reply.result.ok).toBe(true)
     expect(typeof reply.result.value.token).toBe('string')
+  })
+
+  it('reports the device limit separately from an invalid pairing code', async () => {
+    const invalid = makeMsg(`${PREFIX}pair`, {
+      type: 'client-request', rpcId: 'pair-invalid', method: 'pair',
+      payload: { code: 'NOPE1234', deviceName: 'new-phone' },
+    })
+    await drive(invalid)
+    expect(replyJson(invalid).result.error.message).toBe('mobile-pair-failed')
+
+    const { code } = tokens.createPairingCode(120)
+    const limitedNc = { subscribe: () => fakeSubscription([]) } as never
+    bridge = new RpcBridge(limitedNc, {
+      instanceId: 'test', carrier, tokens, tokenTtlDays: 90, maxDevices: 1,
+      onHello: () => { helloCount += 1 },
+    })
+    const limited = makeMsg(`${PREFIX}pair`, {
+      type: 'client-request', rpcId: 'pair-limit', method: 'pair',
+      payload: { code, deviceName: 'new-phone' },
+    })
+    await drive(limited)
+    expect(replyJson(limited).result.error.message).toBe('mobile-device-limit')
   })
 
   it('rejects requests without a token', async () => {
@@ -200,6 +224,34 @@ describe('RpcBridge', () => {
     })
   })
 
+  it('maps command, reference, preset, and goal calls to alpha.5 Remote arguments', async () => {
+    const gateway = useGateway({ value: { ref: { id: 'goal-1', revision: 1 } } })
+    for (const [rpcId, method, payload] of [
+      ['command-list', 'command.list', { sessionId: 's1' }],
+      ['command-run', 'command.execute', { sessionId: 's1', line: '/plan', images: [] }],
+      ['reference-files', 'reference.files', { sessionId: 's1', query: 'src' }],
+      ['reference-sessions', 'reference.sessions', { sessionId: 's1', query: 'research' }],
+      ['preset', 'agentPreset.select', { sessionId: 's1', agentPreset: 'coding' }],
+      ['goal-create', 'goal.create', { sessionId: 's1', objective: 'ship', maxGoalRounds: 4 }],
+      ['goal-edit', 'goal.edit', { sessionId: 's1', ref: { id: 'goal-1', revision: 1 }, objective: 'land' }],
+      ['goal-pause', 'goal.pause', { sessionId: 's1', ref: { id: 'goal-1', revision: 2 } }],
+    ] as const) {
+      const msg = makeMsg(`${PREFIX}${method}`, { type: 'client-request', rpcId, method, payload }, validToken)
+      await drive(msg)
+      expect(replyJson(msg).result.ok).toBe(true)
+    }
+    expect(gateway.calls).toEqual([
+      { namespace: 'commands', method: 'list', args: { agentId: 's1' } },
+      { namespace: 'commands', method: 'execute', args: { agentId: 's1', line: '/plan', images: [] } },
+      { namespace: 'fileReferences', method: 'list', args: { agentId: 's1', query: 'src' } },
+      { namespace: 'sessionReferenceResolver', method: 'candidates', args: { agentId: 's1', query: 'research' } },
+      { namespace: 'agentPresets', method: 'select', args: { agentId: 's1', agentPreset: 'coding' } },
+      { namespace: 'goals', method: 'create', args: { agentId: 's1', request: { objective: 'ship', maxGoalRounds: 4 } } },
+      { namespace: 'goals', method: 'edit', args: { agentId: 's1', ref: { id: 'goal-1', revision: 1 }, request: { objective: 'land' } } },
+      { namespace: 'goals', method: 'pause', args: { agentId: 's1', ref: { id: 'goal-1', revision: 2 } } },
+    ])
+  })
+
   it('serves removed host/workspace baselines and converts session follow snapshots', async () => {
     const host = { version: 'dev', cwd: 'C:\\repo', attachedSessions: 0, home: 'C:\\Users\\test', canOpenPath: false }
     const workspaces = { items: [], archivedSessionIds: [] }
@@ -235,6 +287,45 @@ describe('RpcBridge', () => {
     })
   })
 
+  it('uses follow cursor for history pages and expands packed chunk records', async () => {
+    const gateway = useGateway({
+      stream: [{
+        type: 'snapshot', cursor: 9,
+        records: [{
+          type: 'chunks',
+          event: {
+            type: 'chunkrow/text-chunks', seq: 6, time: 100,
+            data: { turn: 1, step: 1, index: 0, dt: [2, 3], texts: ['a', 'b', 'c'] },
+          },
+        }],
+        hasMore: true, projections: { asOfSeq: 9, values: {} },
+      }],
+      value: {
+        records: [{ type: 'event', event: { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } } }],
+        hasMore: false,
+      },
+    })
+    let msg = makeMsg(`${PREFIX}session.history`, {
+      type: 'client-request', rpcId: 'tail', method: 'session.history', payload: { sessionId: 's1', maxMessages: 20 },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value.events.map((entry: any) => entry.event)).toEqual([
+      { type: 'assistant/chunk', seq: 6, time: 100, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } },
+      { type: 'assistant/chunk', seq: 7, time: 102, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } },
+      { type: 'assistant/chunk', seq: 8, time: 105, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'c' } } },
+    ])
+
+    msg = makeMsg(`${PREFIX}session.history`, {
+      type: 'client-request', rpcId: 'page', method: 'session.history', payload: { sessionId: 's1', beforeSeq: 6, maxMessages: 20 },
+    }, validToken)
+    await drive(msg)
+    expect(gateway.calls.at(-1)).toEqual({
+      namespace: 'session', method: 'page',
+      args: { request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: 9, beforeSeq: 6, maxMessages: 20 } },
+    })
+    expect(replyJson(msg).result.value.events[0].event.type).toBe('turn/start')
+  })
+
   it('allows the three RPC methods used by durable images and ordering', async () => {
     for (const method of ['session.attachment', 'workspace.insertBefore', 'workspace.insertSessionBefore']) {
       const envelope = { type: 'client-request', rpcId: `r-${method}`, method, payload: {} }
@@ -246,10 +337,26 @@ describe('RpcBridge', () => {
     }
   })
 
-  it('routes respond to /api/respond', async () => {
+  it('routes legacy respond to /api/respond without a Gateway', async () => {
     const msg = makeMsg(`${PREFIX}respond`, { type: 'client-response', rpcId: 'r6', result: { ok: true, value: {} } }, validToken)
     await drive(msg)
     expect(carrierCalls[0].url).toBe('http://mobile.internal/api/respond')
+  })
+
+  it('settles Gateway Remote Events and returns a legacy receipt', async () => {
+    const responses: unknown[] = []
+    useGateway({
+      onRespond: async (rpcId, result) => {
+        responses.push({ rpcId, result })
+        return true
+      },
+    })
+    const result = { ok: true, value: { sessionId: 's1', approvalId: 'a1', outcome: 'allowed-once' } }
+    const msg = makeMsg(`${PREFIX}respond`, { type: 'client-response', rpcId: 'event-1', result }, validToken)
+    await drive(msg)
+    expect(replyJson(msg)).toEqual({ accepted: true })
+    expect(responses).toEqual([{ rpcId: 'event-1', result }])
+    expect(carrierCalls).toHaveLength(0)
   })
 
   it('hello triggers the pending-frame replay without touching the carrier', async () => {
@@ -265,9 +372,13 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.0',
-      mobileApi: 1,
-      features: ['plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order', 'plugin-inventory', 'health-check'],
+      pluginVersion: '0.2.1',
+      mobileApi: 2,
+      features: [
+        'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
+        'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
+        'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates',
+      ],
     })
     expect(carrierCalls).toHaveLength(0)
   })

@@ -47,6 +47,20 @@ describe('TokenStore', () => {
     expect(await store.redeemPairingCode(second.code, 'b', 90, 1)).toBeNull()
   })
 
+  it('distinguishes an invalid code from the device limit', async () => {
+    await expect(store.redeemPairingCodeResult('NOPE1234', 'a', 90, 1)).resolves.toEqual({
+      ok: false,
+      reason: 'invalid-code',
+    })
+    const first = store.createPairingCode(120)
+    await store.redeemPairingCode(first.code, 'a', 90, 1)
+    const second = store.createPairingCode(120)
+    await expect(store.redeemPairingCodeResult(second.code, 'b', 90, 1)).resolves.toEqual({
+      ok: false,
+      reason: 'device-limit',
+    })
+  })
+
   it('revocation is immediate and persisted', async () => {
     const { code } = store.createPairingCode(120)
     const result = await store.redeemPairingCode(code, 'a', 90, 10)
@@ -58,6 +72,7 @@ describe('TokenStore', () => {
     expect(reloaded.validate(result!.token)).toBeNull()
     expect(reloaded.list()).toHaveLength(1)
     expect(reloaded.list()[0].revoked).toBe(true)
+    expect(reloaded.activeCount()).toBe(0)
   })
 
   it('persists tokens across reloads without storing plaintext', async () => {

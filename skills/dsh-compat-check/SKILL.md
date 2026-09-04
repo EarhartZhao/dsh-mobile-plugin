@@ -13,14 +13,15 @@ dsh（deepseek-harness）发版后，用本 skill 确认 dsh-mobile-plugin 是�
 
 ```bash
 cd dsh-mobile-plugin
-rg -n "ctx\.get\(|from '@deepseek-ai" src/index.ts
+rg -n "ctx\.get\(|from '@deepseek-ai" src/index.ts src/events.ts src/bridge.ts
 ```
 
 当前依赖面（截至插件 0.2.0）：
 
 | 导入 | 用途 | dsh 版本要求 |
 |------|------|-------------|
-| `@deepseek-ai/dsh-host-apiproxy` (`toFetchHandler`, `HostApiProxy`) | 将宿主 API 包装为 fetch carrier | 0.1.x |
+| `@deepseek-ai/dsh-client-connection` (`HostConnectionHandle`) | 创建 shared `/api` handler，提交 `$events/result` | 0.1.2-alpha.5 |
+| `@deepseek-ai/dsh-api-gateway` (`TypertGateway`) | 调用 unary/stream Remote 与 `$events` | 0.1.2-alpha.5 |
 | `@deepseek-ai/cordis` (`Context`, `Service`) | 插件生命周期 | ^4.0.1 |
 | `@deepseek-ai/schemastery` (`Config`) | 插件配置 schema | ^3.18.1 |
 
@@ -28,22 +29,20 @@ rg -n "ctx\.get\(|from '@deepseek-ai" src/index.ts
 
 ```bash
 cd ../deepseek-harness
-git log --oneline HEAD~10..HEAD -- packages/host/apiproxy/
-git log --oneline HEAD~10..HEAD -- packages/client/connection/
-git log --oneline HEAD~10..HEAD -- packages/api/gateway/
+git log --oneline HEAD~10..HEAD -- packages/client/connection/ packages/api/ packages/interaction/ packages/goal/ packages/preset/ packages/subagent/ packages/context/
 ```
 
-如果 `packages/host/apiproxy` 目录已被移除或重命名，需要迁移插件。
+重点检查 Typert Gateway、Remote owner、session/workspace 流和转发事件 allowlist。
 
 ## 第三步：确认 shims 仍然准确
 
 插件使用 `src/harness-shims.d.ts` 声明宿主包的类型。如果上游改了接口签名，需要更新 shim。
 
 ```bash
-rg -n "toFetchHandler|HostApiProxy" ../deepseek-harness/packages/ --glob "!node_modules" -l
+rg -n "createSharedFetchHandler|TypertGateway|wireStream" ../deepseek-harness/packages/ --glob "!node_modules" -l
 ```
 
-如果没有结果，说明宿主包已移除该 API，插件需要迁移。
+如果没有结果，说明宿主接入点已移动，插件需要迁移。
 
 ## 第四步：运行测试
 

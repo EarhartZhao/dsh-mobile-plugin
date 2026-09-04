@@ -28,6 +28,16 @@ interface PairingCode {
   failures: number
 }
 
+export interface PairedDeviceToken {
+  token: string
+  deviceId: string
+  expiresAt: string
+}
+
+export type PairingRedemption =
+  | { ok: true, value: PairedDeviceToken }
+  | { ok: false, reason: 'invalid-code' | 'device-limit' }
+
 const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // no 0/O/1/I
 const MAX_PAIRING_FAILURES = 5
 const MAX_PENDING_CODES = 3
@@ -95,14 +105,25 @@ export class TokenStore {
     deviceName: string,
     tokenTtlDays: number,
     maxDevices: number,
-  ): Promise<{ token: string, deviceId: string, expiresAt: string } | null> {
+  ): Promise<PairedDeviceToken | null> {
+    const result = await this.redeemPairingCodeResult(code, deviceName, tokenTtlDays, maxDevices)
+    return result.ok ? result.value : null
+  }
+
+  /** Redeem a pairing code while preserving the user-actionable refusal reason. */
+  async redeemPairingCodeResult(
+    code: string,
+    deviceName: string,
+    tokenTtlDays: number,
+    maxDevices: number,
+  ): Promise<PairingRedemption> {
     this.prunePairingCodes()
     const entry = this.pairingCodes.get(code)
-    if (entry === undefined) return null
+    if (entry === undefined) return { ok: false, reason: 'invalid-code' }
     this.pairingCodes.delete(code)
 
     const active = [...this.devices.values()].filter(d => !d.revoked && Date.parse(d.expiresAt) > Date.now())
-    if (active.length >= maxDevices) return null
+    if (active.length >= maxDevices) return { ok: false, reason: 'device-limit' }
 
     const token = randomBytes(32).toString('base64url')
     const now = new Date()
@@ -117,7 +138,7 @@ export class TokenStore {
     this.devices.set(device.id, device)
     this.tokenIndex.set(device.tokenHash, device.id)
     await this.save()
-    return { token, deviceId: device.id, expiresAt: device.expiresAt }
+    return { ok: true, value: { token, deviceId: device.id, expiresAt: device.expiresAt } }
   }
 
   /** Validate a bearer token; uniform null for missing/expired/revoked. */
@@ -141,6 +162,12 @@ export class TokenStore {
 
   list(): Omit<DeviceEntry, 'tokenHash'>[] {
     return [...this.devices.values()].map(({ tokenHash: _, ...rest }) => rest)
+  }
+
+  /** Number of non-revoked, non-expired devices counted against the limit. */
+  activeCount(): number {
+    const now = Date.now()
+    return [...this.devices.values()].filter(device => !device.revoked && Date.parse(device.expiresAt) > now).length
   }
 
   private prunePairingCodes(): void {

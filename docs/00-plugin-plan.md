@@ -6,13 +6,13 @@
 
 安装进本地 deepseek-harness `web` profile 的**树外 Cordis 插件**。它解决一个问题：harness 在家庭内网 NAT 后，外网手机连不进来。办法是插件在 harness 进程内连接本机 NATS Leaf 节点（订阅路由经 Leaf 自动同步到公网 Hub），把 harness 已有的 `/api` 协议（一元 RPC + 下行事件帧）原样桥接到 NATS subject 上。
 
-业务协议零重写：信封、Zod schema、快照/重放语义全部复用 harness 现有契约（映射见 dsh-mobile/docs/02-protocol.md）。插件只做传输搬运 + 认证 + 配对。
+App wire 保持稳定，但宿主接入已迁移到 dsh 0.1.2-alpha.5 的 Typert Remote。插件负责 Remote 参数映射、follow/control/workspace 流适配、事件回答、传输、认证与配对（映射见 dsh-mobile/docs/02-protocol.md）。
 
 ## 职责
 
 1. **NATS 连接**：连本机 Leaf（`nats://127.0.0.1:4222`），常驻自动重连，连接状态上报到 harness 日志/设置卡。Hub 不可达由 Leaf 负责重试，插件零感知。
-2. **RPC 桥**：订阅 `svc.dsh.{instance}.>`，校验设备 token + 方法白名单后，进程内调 `toFetchHandler(ctx.apiProxy)`，把响应作为 request-reply 回复。
-3. **事件流桥**：把 `events.mux` / `events.host` 两条下行帧流（复用 connection 插件同源的事件源）publish 到 `evt.dsh.{instance}.mux` / `evt.dsh.{instance}.host`。
+2. **RPC 桥**：订阅 `svc.dsh.{instance}.>`，校验设备 token + 方法白名单后，通过 `typertGateway` 调用当前 Remote；审批/提问结果经 shared `/api/$events/result` 回传。
+3. **事件流桥**：消费 `$events`、`session/control`、`workspace/follow` 与按地址打开的 `session/follow`，投影为 App 的 mux/host 帧并 publish 到 `evt.dsh.{instance}.mux` / `evt.dsh.{instance}.host`。
 4. **配对与设备管理**：配对码签发（仅本机操作可领）、核销换 token、token 校验与吊销。
 5. **首次配置向导**：dsh Web 设置页注册一张"移动端"设置卡（harness 的 settings 扩展点），字段只有 Hub 地址 + 账号 + 密码；提供"测试连接"按钮，连通了才允许生成配对二维码。CLI 路径：`dsh` 输出同款信息与终端二维码。
 
@@ -50,7 +50,7 @@ phone (外网) ──wss:8443──► NATS Hub (115.159.57.137, 既有)
 │ deepseek-harness (web profile, 家庭内网)              │
 │  ┌──────────────────────────────────────────────┐  │
 │  │ dsh-mobile-plugin                             │  │
-│  │  svc sub ──► token 门 ──► 白名单 ──► toFetchHandler(ctx.apiProxy) │
+│  │  svc sub ──► token 门 ──► 白名单 ──► typertGateway Remote │
 │  │  事件源 ──► publish evt.dsh.{i}.mux / .host    │  │
 │  └──────────────────────────────────────────────┘  │
 │  webserver: 仍可只绑 127.0.0.1（浏览器照常，LAN 零暴露） │
@@ -145,6 +145,6 @@ config:
 
 ## RPC 方法白名单（v1）
 
-`host.describe`、`workspace.list`、`workspace.create`、`session.list`、`session.create`、`session.history`、`session.prompt`、`session.cancel`、`session.updateQueue`、`session.rename`、`session.fork`、`session.models`、`session.selectModel`、`session.search`、`command.list`、`command.execute`、`skill.list`、`respond`。
+`host.describe`、`workspace.*`（受限于显式白名单）、`session.list/create/history/prompt/cancel/updateQueue/rename/fork/models/selectModel/search/attachment`、`command.list/execute`、`reference.files/sessions`、`skill.list`、`goal.*`、`subagent.*`、`agentPreset.list/read/select`、`respond`。
 
 白名单之外的请求返回 403 语义的 RPC 错误，与方法不存在区分。

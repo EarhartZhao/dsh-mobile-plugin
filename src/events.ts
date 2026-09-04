@@ -10,6 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { NatsConnection } from 'nats'
+import type { SessionAddress } from './bridge.js'
 
 /** Narrow structural view of the host stream frames (payload stays opaque). */
 export interface StreamFrame {
@@ -36,87 +37,378 @@ export interface EventBridgeOptions {
   coalesceMs: number
 }
 
+type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow'
+
 /**
  * Adapts the dsh 0.1.2-alpha.2 Typert Gateway `$events` stream to the legacy
  * `EventStreams` interface (mux + host). The wire format on NATS stays the
  * same, so the mobile app protocol layer needs no changes.
  */
 export class GatewayEventAdapter {
-  private sink: ((frame: StreamFrame) => void) | undefined
-  private lifetime: AbortSignal | undefined
-  private readonly wantedSessions = new Set<string>()
+  private muxSink: ((frame: StreamFrame) => void) | undefined
+  private hostSink: ((frame: StreamFrame) => void) | undefined
+  private muxLifetime: AbortSignal | undefined
+  private readonly wantedSessions = new Map<string, SessionAddress>()
   private readonly sessionWatchers = new Map<string, AbortController>()
+  private readonly pendingEvents = new Map<string, { event: string; agentId: string }>()
+  private readonly hostBacklog: StreamFrame[] = []
+  private eventClientId: string | undefined
+  private workspaceBaseline: { items: unknown[]; archivedSessionIds: unknown[] } | undefined
+
+  private readonly failedStreams = new Set<GatewayStreamName>()
 
   constructor(private readonly gateway: {
     wireStream: { open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> }
     stream(request: { namespace: string, method: string, args: Record<string, unknown>, signal?: AbortSignal }): Promise<AsyncIterable<unknown>>
-  }) {}
+  }, private readonly carrier?: { fetch(request: Request): Promise<Response> }, private readonly onStreamError?: (name: GatewayStreamName, error: unknown) => void, private readonly onStreamRecovered?: (name: GatewayStreamName) => void, private readonly retryDelayMs = 1_000) {}
 
   /** Ensure live events for a Session continue after its history snapshot. */
-  watchSession(sessionId: string): void {
+  watchSession(address: SessionAddress): void {
+    const key = sessionAddressKey(address)
+    const sessionId = sessionAddressId(address)
     if (sessionId.length === 0) return
-    this.wantedSessions.add(sessionId)
-    if (this.sink !== undefined && this.lifetime !== undefined) this.startSessionWatcher(sessionId)
+    this.wantedSessions.set(key, address)
+    if (this.muxSink !== undefined && this.muxLifetime !== undefined) this.startSessionWatcher(address)
+  }
+
+  /** Read the current Workspace baseline without reaching into Host internals. */
+  async workspaceSnapshot(): Promise<{ items: unknown[]; archivedSessionIds: unknown[] }> {
+    if (this.workspaceBaseline !== undefined) return this.workspaceBaseline
+    const controller = new AbortController()
+    try {
+      const stream = await this.gateway.stream({
+        namespace: 'workspace', method: 'follow', args: {}, signal: controller.signal,
+      })
+      for await (const frame of stream) {
+        if (!isRecord(frame) || frame.type !== 'baseline' || !isRecord(frame.value)) continue
+        this.workspaceBaseline = workspaceValue(frame.value)
+        return this.workspaceBaseline
+      }
+      throw new Error('workspace follow ended before its baseline')
+    } finally {
+      controller.abort()
+    }
+  }
+
+  /** Settle one answerable Remote Event delivered by the current `$events` generation. */
+  async respond(eventId: string, result: unknown): Promise<boolean> {
+    const pending = this.pendingEvents.get(eventId)
+    const clientId = this.eventClientId
+    if (pending === undefined || clientId === undefined || this.carrier === undefined) return false
+    const outcome = remoteEventOutcome(pending.event, result)
+    const rpcId = randomUUID()
+    const request = new Request('http://mobile.internal/api/$events/result', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request', rpcId, method: '$events/result',
+        payload: { args: { clientId, eventId, outcome } },
+      }),
+    })
+    const response = await this.carrier.fetch(request)
+    const message = await response.json() as unknown
+    if (!isRecord(message) || message.type !== 'server-response' || !isRecord(message.result)) {
+      throw new Error('remote event result returned an invalid response')
+    }
+    if (message.result.ok !== true) {
+      const error = isRecord(message.result.error) ? message.result.error.message : undefined
+      throw new Error(typeof error === 'string' ? error : 'remote event result was rejected')
+    }
+    return true
   }
 
   readonly events = {
     mux: async function* (this: GatewayEventAdapter, _request: { rpcId: string }, signal: AbortSignal): AsyncGenerator<StreamFrame> {
-      yield* this.openAndAdapt(signal)
+      yield* this.openMux(signal)
     }.bind(this),
     host: async function* (this: GatewayEventAdapter, _request: { rpcId: string }, signal: AbortSignal): AsyncGenerator<StreamFrame> {
-      // Host-level events are currently merged into the mux stream; the
-      // mobile app listens on the mux subject for all actionable frames.
-      yield* []
-    },
+      yield* this.openHost(signal)
+    }.bind(this),
   }
 
-  private async *openAndAdapt(signal: AbortSignal): AsyncGenerator<StreamFrame> {
+  private async *openMux(signal: AbortSignal): AsyncGenerator<StreamFrame> {
     const queue = new FrameQueue()
-    this.sink = frame => queue.push(frame)
-    this.lifetime = signal
-    for (const sessionId of this.wantedSessions) this.startSessionWatcher(sessionId)
-    const remoteEvents = void this.pumpRemoteEvents(signal).finally(() => queue.close())
+    const lifetime = new AbortController()
+    const combinedSignal = AbortSignal.any([signal, lifetime.signal])
+    this.muxSink = frame => queue.push(frame)
+    this.muxLifetime = combinedSignal
+    for (const address of this.wantedSessions.values()) this.startSessionWatcher(address)
+    const pumps = Promise.allSettled([
+      this.runPump('remote events', combinedSignal, lifetime, queue, () => this.pumpRemoteEvents(combinedSignal)),
+      this.runPump('session control', combinedSignal, lifetime, queue, () => this.pumpControl(combinedSignal)),
+    ])
     try {
       yield* queue.read(signal)
     } finally {
-      void remoteEvents
-      this.sink = undefined
-      this.lifetime = undefined
+      lifetime.abort()
+      await pumps
+      this.muxSink = undefined
+      this.muxLifetime = undefined
+      this.eventClientId = undefined
       for (const watcher of this.sessionWatchers.values()) watcher.abort()
       this.sessionWatchers.clear()
+    }
+  }
+
+  private async *openHost(signal: AbortSignal): AsyncGenerator<StreamFrame> {
+    const queue = new FrameQueue()
+    const lifetime = new AbortController()
+    const combinedSignal = AbortSignal.any([signal, lifetime.signal])
+    this.hostSink = frame => queue.push(frame)
+    for (const frame of this.hostBacklog.splice(0)) queue.push(frame)
+    const pump = this.runPump(
+      'workspace follow', combinedSignal, lifetime, queue,
+      () => this.pumpWorkspace(combinedSignal),
+    )
+    try {
+      yield* queue.read(signal)
+    } finally {
+      lifetime.abort()
+      await pump
+      this.hostSink = undefined
+    }
+  }
+
+  private async runPump(
+    name: GatewayStreamName,
+    signal: AbortSignal,
+    _lifetime: AbortController,
+    queue: FrameQueue,
+    pump: () => Promise<void>,
+  ): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        await pump()
+        if (!signal.aborted) throw new Error(`${name} stream ended unexpectedly`)
+      } catch (error) {
+        if (signal.aborted) return
+        this.failedStreams.add(name)
+        if (name === 'remote events') {
+          this.eventClientId = undefined
+          this.pendingEvents.clear()
+        }
+        queue.push({
+          rpcId: randomUUID(),
+          payload: {
+            type: 'stream/error',
+            error: { code: 'internal', message: errorMessage(error, name), details: {} },
+          },
+        })
+        this.onStreamError?.(name, error)
+        await waitForRetry(signal, this.retryDelayMs)
+      }
     }
   }
 
   private async pumpRemoteEvents(signal: AbortSignal): Promise<void> {
     const stream = await this.gateway.wireStream.open('$events', { args: {} }, signal)
     for await (const item of stream) {
-      const frame = adaptFrame(item)
-      if (frame !== null) this.sink?.(frame)
+      this.adaptRemoteFrame(item)
     }
   }
 
-  private startSessionWatcher(sessionId: string): void {
-    if (this.sessionWatchers.has(sessionId) || this.lifetime === undefined) return
+  private adaptRemoteFrame(item: unknown): void {
+    if (!isRecord(item)) return
+    if (item.type === 'ready') {
+      if (typeof item.clientId === 'string') this.eventClientId = item.clientId
+      this.markStreamRecovered('remote events')
+      return
+    }
+    if (item.type === 'emit') {
+      const event = typeof item.event === 'string' ? item.event : ''
+      const args = Array.isArray(item.args) ? item.args : []
+      const hostFrame = hostFrameForEmit(event, args)
+      if (hostFrame !== null) this.publishHost(hostFrame)
+      return
+    }
+    if (item.type === 'waterfall') {
+      const eventId = typeof item.eventId === 'string' ? item.eventId : ''
+      const event = typeof item.event === 'string' ? item.event : ''
+      const agentId = typeof item.agentId === 'string' ? item.agentId : ''
+      const request = isRecord(item.request) ? item.request : {}
+      if (eventId === '' || agentId === '') return
+      this.pendingEvents.set(eventId, { event, agentId })
+      if (event === 'approval/request') {
+        this.muxSink?.({
+          rpcId: eventId,
+          payload: {
+            type: 'approval/requested', sessionId: agentId, approvalId: eventId,
+            toolName: typeof request.toolName === 'string' ? request.toolName : 'tool',
+            ...(typeof request.callId === 'string' ? { callId: request.callId } : {}),
+            ...(typeof request.reason === 'string' ? { reason: request.reason } : {}),
+          },
+        })
+      } else if (event === 'user-questions/request' && Array.isArray(request.questions)) {
+        this.muxSink?.({
+          rpcId: eventId,
+          payload: { type: 'question/requested', sessionId: agentId, questions: request.questions },
+        })
+      }
+      return
+    }
+    if (item.type === 'cancel' && typeof item.eventId === 'string') {
+      const pending = this.pendingEvents.get(item.eventId)
+      if (pending === undefined) return
+      this.pendingEvents.delete(item.eventId)
+      this.muxSink?.(pending.event === 'approval/request'
+        ? {
+            rpcId: randomUUID(),
+            payload: {
+              type: 'approval/resolved', sessionId: pending.agentId,
+              approvalId: item.eventId, outcome: 'cancelled',
+            },
+          }
+        : {
+            rpcId: randomUUID(),
+            payload: {
+              type: 'question/resolved', sessionId: pending.agentId,
+              questionRpcId: item.eventId, outcome: 'cancelled',
+            },
+          })
+    }
+  }
+
+  private async pumpControl(signal: AbortSignal): Promise<void> {
+    const stream = await this.gateway.stream({ namespace: 'session', method: 'control', args: {}, signal })
+    for await (const frame of stream) this.applyControlFrame(frame)
+  }
+
+  private publishHost(frame: StreamFrame): void {
+    if (this.hostSink !== undefined) this.hostSink(frame)
+    else {
+      this.hostBacklog.push(frame)
+      if (this.hostBacklog.length > 100) this.hostBacklog.shift()
+    }
+  }
+
+  private applyControlFrame(frame: unknown): void {
+    if (!isRecord(frame)) return
+    if (frame.type === 'baseline' && isRecord(frame.value)) {
+      this.markStreamRecovered('session control')
+      const queues = isRecord(frame.value.queues) ? frame.value.queues : {}
+      const jobs = isRecord(frame.value.jobs) ? frame.value.jobs : {}
+      const projections = isRecord(frame.value.projections) ? frame.value.projections : {}
+      for (const [sessionId, items] of Object.entries(queues)) this.publishQueue(sessionId, items)
+      for (const [sessionId, value] of Object.entries(jobs)) this.publishJobs(sessionId, value)
+      for (const [sessionId, value] of Object.entries(projections)) this.publishProjectionBaseline(sessionId, value)
+      return
+    }
+    const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : ''
+    if (sessionId === '') return
+    if (frame.type === 'queue') this.publishQueue(sessionId, frame.items)
+    else if (frame.type === 'jobs') this.publishJobs(sessionId, frame.jobs)
+    else if (frame.type === 'projection' && typeof frame.key === 'string' && typeof frame.seq === 'number') {
+      this.muxSink?.({
+        rpcId: randomUUID(),
+        payload: { type: 'session/projection', sessionId, key: frame.key, value: frame.value, seq: frame.seq },
+      })
+    }
+  }
+
+  private publishQueue(sessionId: string, value: unknown): void {
+    const items = Array.isArray(value) ? value.map(queueItem).filter(item => item !== null) : []
+    this.muxSink?.({ rpcId: randomUUID(), payload: { type: 'session/queue', sessionId, items } })
+  }
+
+  private publishJobs(sessionId: string, value: unknown): void {
+    this.muxSink?.({
+      rpcId: randomUUID(),
+      payload: { type: 'session/jobs', sessionId, jobs: Array.isArray(value) ? value : [] },
+    })
+  }
+
+  private publishProjectionBaseline(sessionId: string, value: unknown): void {
+    if (!isRecord(value) || typeof value.asOfSeq !== 'number' || !isRecord(value.values)) return
+    for (const [key, projection] of Object.entries(value.values)) {
+      this.muxSink?.({
+        rpcId: randomUUID(),
+        payload: { type: 'session/projection', sessionId, key, value: projection, seq: value.asOfSeq },
+      })
+    }
+  }
+
+  private async pumpWorkspace(signal: AbortSignal): Promise<void> {
+    const stream = await this.gateway.stream({ namespace: 'workspace', method: 'follow', args: {}, signal })
+    for await (const frame of stream) this.applyWorkspaceFrame(frame)
+  }
+
+  private applyWorkspaceFrame(frame: unknown): void {
+    if (!isRecord(frame)) return
+    if (frame.type === 'baseline' && isRecord(frame.value)) {
+      this.markStreamRecovered('workspace follow')
+      this.workspaceBaseline = workspaceValue(frame.value)
+      for (const workspace of this.workspaceBaseline.items) {
+        this.hostSink?.({ rpcId: randomUUID(), payload: { type: 'host/workspace-changed', workspace } })
+      }
+      this.hostSink?.({
+        rpcId: randomUUID(),
+        payload: { type: 'host/archived-sessions-changed', archivedSessionIds: this.workspaceBaseline.archivedSessionIds },
+      })
+      return
+    }
+    if (frame.type === 'upsert' && isRecord(frame.workspace)) {
+      this.upsertWorkspace(frame.workspace)
+      this.hostSink?.({ rpcId: randomUUID(), payload: { type: 'host/workspace-changed', workspace: frame.workspace } })
+    } else if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
+      this.removeWorkspace(frame.workspaceId)
+      this.hostSink?.({ rpcId: randomUUID(), payload: { type: 'host/workspace-removed', workspaceId: frame.workspaceId } })
+    } else if (frame.type === 'order' && Array.isArray(frame.workspaceIds)) {
+      this.reorderWorkspaces(frame.workspaceIds)
+      this.hostSink?.({ rpcId: randomUUID(), payload: { type: 'host/workspace-order-changed', workspaceIds: frame.workspaceIds } })
+    } else if (frame.type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
+      if (this.workspaceBaseline !== undefined) this.workspaceBaseline.archivedSessionIds = [...frame.archivedSessionIds]
+      this.hostSink?.({
+        rpcId: randomUUID(),
+        payload: { type: 'host/archived-sessions-changed', archivedSessionIds: frame.archivedSessionIds },
+      })
+    }
+  }
+
+  private upsertWorkspace(workspace: Record<string, unknown>): void {
+    this.workspaceBaseline ??= { items: [], archivedSessionIds: [] }
+    const id = workspace.workspaceId
+    const index = this.workspaceBaseline.items.findIndex(item => isRecord(item) && item.workspaceId === id)
+    if (index < 0) this.workspaceBaseline.items.push(workspace)
+    else this.workspaceBaseline.items[index] = workspace
+  }
+
+  private removeWorkspace(workspaceId: string): void {
+    if (this.workspaceBaseline === undefined) return
+    this.workspaceBaseline.items = this.workspaceBaseline.items.filter(item => !isRecord(item) || item.workspaceId !== workspaceId)
+  }
+
+  private reorderWorkspaces(workspaceIds: unknown[]): void {
+    if (this.workspaceBaseline === undefined) return
+    const order = new Map(workspaceIds.map((id, index) => [id, index]))
+    this.workspaceBaseline.items.sort((left, right) =>
+      (order.get(isRecord(left) ? left.workspaceId : undefined) ?? Number.MAX_SAFE_INTEGER)
+      - (order.get(isRecord(right) ? right.workspaceId : undefined) ?? Number.MAX_SAFE_INTEGER))
+  }
+
+  private startSessionWatcher(address: SessionAddress): void {
+    const key = sessionAddressKey(address)
+    const sessionId = sessionAddressId(address)
+    if (this.sessionWatchers.has(key) || this.muxLifetime === undefined) return
     const controller = new AbortController()
-    this.sessionWatchers.set(sessionId, controller)
-    const signal = AbortSignal.any([this.lifetime, controller.signal])
+    this.sessionWatchers.set(key, controller)
+    const signal = AbortSignal.any([this.muxLifetime, controller.signal])
     void (async () => {
       try {
         const stream = await this.gateway.stream({
           namespace: 'session', method: 'follow',
-          args: { request: { address: { kind: 'session', sessionId }, maxMessages: 1 } },
+          args: { request: { address, maxMessages: 1 } },
           signal,
         })
         for await (const item of stream) {
           if (typeof item !== 'object' || item === null) continue
           const record = item as Record<string, unknown>
           if (record['type'] === 'snapshot') {
-            this.sink?.({
+            this.muxSink?.({
               rpcId: randomUUID(),
               payload: { type: 'session/subscribed', sessionId, lastSeq: Number(record['cursor'] ?? -1) },
             })
           } else if (record['type'] === 'event' && typeof record['event'] === 'object' && record['event'] !== null) {
-            this.sink?.({
+            this.muxSink?.({
               rpcId: randomUUID(),
               payload: { type: 'session/event', sessionId, event: record['event'] },
             })
@@ -126,9 +418,122 @@ export class GatewayEventAdapter {
         // A later history/list call can re-arm the watcher. The NATS bridge
         // remains usable for bounded RPCs if one Session disappears.
       } finally {
-        this.sessionWatchers.delete(sessionId)
+        this.sessionWatchers.delete(key)
       }
     })()
+  }
+
+  private markStreamRecovered(name: GatewayStreamName): void {
+    if (!this.failedStreams.delete(name)) return
+    this.onStreamRecovered?.(name)
+  }
+}
+
+function sessionAddressId(address: SessionAddress): string {
+  return address.kind === 'session'
+    ? String(address.sessionId ?? '')
+    : String(address.childSessionId ?? '')
+}
+
+function errorMessage(error: unknown, source: string): string {
+  return `${source}: ${error instanceof Error ? error.message : String(error)}`
+}
+
+async function waitForRetry(signal: AbortSignal, delayMs: number): Promise<void> {
+  if (signal.aborted) return
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, delayMs)
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer)
+      resolve()
+    }, { once: true })
+  })
+}
+
+function sessionAddressKey(address: SessionAddress): string {
+  return address.kind === 'session'
+    ? `session:${String(address.sessionId ?? '')}`
+    : `subagent:${String(address.parentSessionId ?? '')}:${String(address.childSessionId ?? '')}:${String(address.mode ?? '')}`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function workspaceValue(value: Record<string, unknown>): { items: unknown[]; archivedSessionIds: unknown[] } {
+  return {
+    items: Array.isArray(value.items) ? [...value.items] : [],
+    archivedSessionIds: Array.isArray(value.archivedSessionIds) ? [...value.archivedSessionIds] : [],
+  }
+}
+
+function queueItem(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || !isRecord(value.message)) return null
+  const content = Array.isArray(value.message.content) ? value.message.content : []
+  return {
+    id: value.id,
+    placement: value.placement,
+    message: {
+      id: value.id,
+      role: 'user',
+      content,
+      source: {
+        kind: 'user',
+        ...(typeof value.rpcId === 'string' ? { rpcId: value.rpcId } : {}),
+      },
+    },
+  }
+}
+
+function hostFrameForEmit(event: string, args: unknown[]): StreamFrame | null {
+  const rpcId = randomUUID()
+  if (event === 'api-session/added' && isRecord(args[0]) && typeof args[0].sessionId === 'string') {
+    const summary = args[0]
+    const projectionHints = isRecord(summary.projections) && isRecord(summary.projections.values)
+      ? summary.projections.values
+      : undefined
+    const agentPreset = typeof projectionHints?.agentPreset === 'string' ? projectionHints.agentPreset : undefined
+    return {
+      rpcId,
+      payload: {
+        type: 'host/session-added', sessionId: summary.sessionId, blank: summary.blank === true,
+        ...(typeof summary.parentSessionId === 'string' ? { parentSessionId: summary.parentSessionId } : {}),
+        ...(summary.origin === 'subagent' ? { origin: 'subagent' } : {}),
+        ...(typeof summary.cwd === 'string' ? { cwd: summary.cwd } : {}),
+        ...(agentPreset === undefined ? {} : { agentPreset }),
+      },
+    }
+  }
+  if (event === 'api-session/removed' && typeof args[0] === 'string') {
+    return { rpcId, payload: { type: 'host/session-removed', sessionId: args[0] } }
+  }
+  if (event === 'api-session/status' && typeof args[0] === 'string' && typeof args[1] === 'boolean') {
+    return { rpcId, payload: { type: 'host/session-status', sessionId: args[0], running: args[1] } }
+  }
+  if (event === 'api-session/error' && typeof args[0] === 'string' && typeof args[1] === 'string') {
+    return { rpcId, payload: { type: 'host/agent-error', sessionId: args[0], message: args[1] } }
+  }
+  if (event !== '') return { rpcId, payload: { type: 'host/remote-event', event, args } }
+  return null
+}
+
+function remoteEventOutcome(event: string, result: unknown): Record<string, unknown> {
+  if (!isRecord(result)) {
+    return { kind: 'rejected', error: { name: 'Error', message: 'mobile response is invalid' } }
+  }
+  if (result.ok === true && isRecord(result.value)) {
+    const value = event === 'approval/request' ? result.value.outcome : result.value.answer
+    if (value !== undefined) return { kind: 'result', value }
+  }
+  const error = isRecord(result.error) ? result.error : {}
+  return {
+    kind: 'rejected',
+    error: {
+      name: 'Error',
+      message: typeof error.message === 'string' ? error.message : 'mobile response was rejected',
+      ...(typeof error.code === 'string' ? { code: error.code } : {}),
+      ...(isRecord(error.details) ? { details: error.details } : {}),
+    },
   }
 }
 
@@ -163,29 +568,6 @@ class FrameQueue {
       signal.removeEventListener('abort', abort)
     }
   }
-}
-
-/** Convert one gateway downlink item to the legacy StreamFrame, or null to skip. */
-function adaptFrame(item: unknown): StreamFrame | null {
-  if (typeof item !== 'object' || item === null) return null
-  const record = item as Record<string, unknown>
-  const type = record['type']
-  if (type === 'emit') {
-    // Current forwarded Cordis notifications use a different vocabulary from
-    // the legacy mux frames. Baselines cover them; never publish malformed
-    // frames that the mobile schema must drop.
-    return null
-  }
-  if (type === 'waterfall') {
-    const event = String(record['event'] ?? '')
-    if (event === 'approval/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'approval/requested', sessionId: record['agentId'], approvalId: record['eventId'], ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
-    if (event === 'user-questions/request') return { rpcId: String(record['eventId'] ?? randomUUID()), payload: { type: 'question/requested', sessionId: record['agentId'], ...(typeof record['request'] === 'object' && record['request'] !== null ? record['request'] as Record<string, unknown> : {}) } }
-    return null
-  }
-  if (type === 'cancel') {
-    return { rpcId: String(record['eventId'] ?? ''), payload: { type: 'approval/resolved', approvalId: record['eventId'] } }
-  }
-  return null
 }
 
 function serverRequest(frame: StreamFrame): string {
