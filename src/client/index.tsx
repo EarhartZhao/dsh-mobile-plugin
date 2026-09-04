@@ -10,6 +10,7 @@
  * the dsh client module system at /plugins/dsh-mobile-plugin/client.js.
  */
 import { createElement, useState } from 'react'
+import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Minimal structural view of the slots service this card consumes. */
 interface SlotsService {
@@ -26,9 +27,11 @@ const COLLAPSE_KEY = 'dsh-mobile-bridge-card-collapsed'
 function MobileBridgeCard() {
   const [collapsed, setCollapsed] = useState(() => {
     try {
-      return localStorage.getItem(COLLAPSE_KEY) === '1'
+      // New installations start collapsed; only an explicit saved open state
+      // opts into rendering the embedded console immediately.
+      return localStorage.getItem(COLLAPSE_KEY) !== '0'
     } catch {
-      return false
+      return true
     }
   })
 
@@ -44,11 +47,14 @@ function MobileBridgeCard() {
     })
   }
 
-  return createElement('div', {
+  return createElement('li', {
     style: {
-      border: '1px solid var(--border, #8884)',
-      borderRadius: 8,
+      listStyle: 'none',
+      border: '0.5px solid var(--dsw-alias-border-l4)',
+      borderRadius: 16,
+      background: 'var(--dsw-alias-bg-layer-3)',
       overflow: 'hidden',
+      transition: 'border-color .16s, background .16s',
     },
   },
     createElement('button', {
@@ -56,29 +62,39 @@ function MobileBridgeCard() {
       onClick: toggle,
       'aria-expanded': String(!collapsed),
       style: {
+        appearance: 'none',
         display: 'flex',
         alignItems: 'center',
-        gap: 8,
+        gap: 12,
         width: '100%',
-        padding: '10px 14px',
+        padding: '14px 16px',
         border: 'none',
-        background: 'transparent',
+        borderRadius: 12,
+        background: 'none',
         color: 'inherit',
         font: 'inherit',
-        fontWeight: 600,
         cursor: 'pointer',
         textAlign: 'left',
       },
     },
       createElement('span', {
-        'aria-hidden': 'true',
+        style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 },
+      },
+        createElement('span', {
+          style: { fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)' },
+        }, 'dsh-mobile 桥接配置'),
+        createElement('span', {
+          style: { fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
+        }, '配置移动端桥接、NATS 连接与设备配对'),
+      ),
+      createElement(IconChevronDownOutline14, {
         style: {
-          display: 'inline-block',
-          transition: 'transform 150ms ease',
-          transform: collapsed ? 'rotate(0deg)' : 'rotate(90deg)',
+          flex: 'none',
+          color: 'var(--dsw-alias-label-tertiary)',
+          transition: 'transform .16s',
+          transform: collapsed ? 'rotate(0deg)' : 'rotate(180deg)',
         },
-      }, '▸'),
-      createElement('span', null, 'dsh-mobile 桥接配置'),
+      }),
     ),
     collapsed ? null : createElement('iframe', {
       src: '/mobile-bridge',
@@ -86,10 +102,11 @@ function MobileBridgeCard() {
       style: {
         display: 'block',
         width: '100%',
-        minHeight: 820,
+        height: 460,
+        maxHeight: 460,
         border: 'none',
-        borderTop: '1px solid var(--border, #8884)',
-        background: 'var(--background, transparent)',
+        borderTop: '0.5px solid var(--dsw-alias-border-l2)',
+        background: 'var(--dsw-alias-bg-layer-2)',
       },
     }),
   )

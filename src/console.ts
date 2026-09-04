@@ -37,6 +37,7 @@ export interface ConsoleBackend {
   bridge: () => MobileBridge
   currentConfig: () => Config
   updateConfig: (patch: Partial<Config>) => Promise<void>
+  startNats: () => Promise<{ ok: boolean, message: string }>
 }
 
 /** Register all console routes on the webserver; returns the disposer. */
@@ -83,6 +84,26 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
           json(res, 200, { ok: true })
         } catch (error) {
           json(res, 400, { error: String(error) })
+        }
+      },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: '/mobile-bridge/api/nats/start',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const remoteAddress = req.socket.remoteAddress
+        if (remoteAddress !== undefined
+          && remoteAddress !== '127.0.0.1'
+          && remoteAddress !== '::1'
+          && remoteAddress !== '::ffff:127.0.0.1') {
+          return json(res, 403, { error: 'loopback only' })
+        }
+        try {
+          const result = await backend.startNats()
+          json(res, result.ok ? 200 : 400, result)
+        } catch (error) {
+          json(res, 400, { ok: false, message: String(error) })
         }
       },
     }),
@@ -153,6 +174,10 @@ const CONSOLE_HTML = `<!doctype html>
 <body>
 <h1>dsh-mobile 桥接配置</h1>
 <p id="statusLine">状态：<span id="status">加载中…</span></p>
+<div class="row">
+  <button id="startNatsBtn" class="secondary">启动本地 NATS</button>
+  <span id="natsMsg"></span>
+</div>
 <dl class="health">
   <dt>插件版本</dt><dd id="pluginVersion">—</dd>
   <dt>mobileApi</dt><dd id="mobileApi">—</dd>
@@ -181,6 +206,7 @@ const CONSOLE_HTML = `<!doctype html>
   <button id="pairBtn">生成配对二维码</button>
   <span class="error" id="pairErr"></span>
 </div>
+<p id="pairHint" style="font-size:12px;opacity:.7">需先连接本地 NATS 才能生成二维码</p>
 <div id="qr"></div>
 <p id="qrExpiry"></p>
 
@@ -216,10 +242,14 @@ async function refreshStatus() {
     $('instanceId').value = s.config.instanceId
     $('hubPass').placeholder = s.config.hubPassConfigured ? '已配置（留空保持不变）' : '未配置'
     $('pairBtn').disabled = s.connection !== 'connected'
+    $('pairHint').textContent = s.connection === 'connected'
+      ? '本地 NATS 已连接，可以生成二维码'
+      : '当前状态为“' + ({ connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection) + '”，请先点击“启动本地 NATS”'
   } catch (error) {
     $('status').textContent = '状态读取失败'
     $('lastError').textContent = String(error)
     $('pairBtn').disabled = true
+    $('pairHint').textContent = '状态不可用，请先启动本地 NATS'
   }
 }
 
@@ -245,6 +275,21 @@ $('saveBtn').onclick = async () => {
   })
   if (r.ok) { $('saveMsg').className = 'ok'; $('saveMsg').textContent = '已保存'; $('hubPass').value = ''; refreshStatus() }
   else { $('saveMsg').className = 'error'; $('saveMsg').textContent = r.error || '保存失败' }
+}
+
+$('startNatsBtn').onclick = async () => {
+  $('natsMsg').className = ''; $('natsMsg').textContent = '启动中…'
+  $('startNatsBtn').disabled = true
+  try {
+    const r = await api('nats/start', {})
+    $('natsMsg').className = r.ok ? 'ok' : 'error'
+    $('natsMsg').textContent = r.message || (r.ok ? '已启动' : '启动失败')
+    refreshStatus()
+  } catch (error) {
+    $('natsMsg').className = 'error'; $('natsMsg').textContent = String(error)
+  } finally {
+    $('startNatsBtn').disabled = false
+  }
 }
 
 $('pairBtn').onclick = async () => {

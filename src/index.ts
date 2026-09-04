@@ -9,9 +9,10 @@
  * onboarding wizard. See docs/00-plugin-plan.md.
  */
 import { homedir } from 'node:os'
-import { statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { connect, type NatsConnection } from 'nats'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
@@ -93,6 +94,9 @@ export class MobileBridge extends Service {
   private lastError: string | null = null
   private readonly streamErrors = new Map<string, string>()
   private readonly tokens: TokenStore
+  /** A process started from the local console. NATS is a host service, so it
+   * intentionally survives bridge restarts and is never killed by stop(). */
+  private localNatsProcess: ChildProcess | null = null
   private current: Config
   /** Serializes start/stop/restart: concurrent triggers (boot effect + settings
    *  watch) must never overlap, or a duplicate NATS connection + RPC
@@ -125,6 +129,7 @@ export class MobileBridge extends Service {
         bridge: () => this,
         currentConfig: () => this.current,
         updateConfig: patch => this.updateConfig(patch),
+        startNats: () => this.startLocalNats(),
       })
     })
 
@@ -204,6 +209,63 @@ export class MobileBridge extends Service {
 
   async revokeDevice(deviceId: string): Promise<boolean> {
     return this.tokens.revoke(deviceId)
+  }
+
+  /** Start the machine-local NATS Leaf used by this bridge. */
+  async startLocalNats(): Promise<{ ok: boolean, message: string }> {
+    if (this.localNatsProcess !== null
+      && this.localNatsProcess.exitCode === null
+      && !this.localNatsProcess.killed) {
+      return { ok: true, message: '本地 NATS 已在运行（由插件启动）' }
+    }
+
+    const command = process.env.NATS_SERVER_PATH
+      ?? (process.platform === 'win32'
+        ? (existsSync('C:\\nats-server\\nats-server.exe') ? 'C:\\nats-server\\nats-server.exe' : 'nats-server.exe')
+        : 'nats-server')
+    const configPath = process.env.NATS_CONFIG_PATH
+      ?? (process.platform === 'win32' ? 'C:\\nats\\leaf.conf' : '/etc/nats/leaf.conf')
+    if (!existsSync(configPath)) {
+      return { ok: false, message: `找不到 NATS 配置文件：${configPath}` }
+    }
+
+    let child: ChildProcess
+    try {
+      child = spawn(command, ['-c', configPath], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    } catch (error) {
+      return { ok: false, message: `启动 NATS 失败：${String(error)}` }
+    }
+    this.localNatsProcess = child
+    child.once('exit', () => {
+      if (this.localNatsProcess === child) this.localNatsProcess = null
+    })
+
+    // A missing executable is reported by spawn() on the next turn. Give the
+    // error a short window to arrive without blocking the web request.
+    const spawnError = await new Promise<Error | null>(resolve => {
+      let settled = false
+      const finish = (error: Error | null) => {
+        if (settled) return
+        settled = true
+        resolve(error)
+      }
+      child.once('error', finish)
+      setTimeout(() => finish(null), 250)
+    })
+    child.unref()
+    if (spawnError !== null) {
+      if (this.localNatsProcess === child) this.localNatsProcess = null
+      return { ok: false, message: `启动 NATS 失败：${spawnError.message}` }
+    }
+    if (child.exitCode !== null) {
+      if (this.localNatsProcess === child) this.localNatsProcess = null
+      return { ok: false, message: `NATS 已退出（代码 ${child.exitCode}），请检查配置文件：${configPath}` }
+    }
+    return { ok: true, message: `NATS 启动命令已执行（配置：${configPath}），正在连接…` }
   }
 
   /**
