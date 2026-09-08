@@ -20,8 +20,8 @@ rg -n "ctx\.get\(|from '@deepseek-ai" src/index.ts src/events.ts src/bridge.ts
 
 | 导入 | 用途 | dsh 版本要求 |
 |------|------|-------------|
-| `@deepseek-ai/dsh-client-connection` (`HostConnectionHandle`) | 创建 shared `/api` handler，提交 `$events/result` | 0.1.2-alpha.5 |
-| `@deepseek-ai/dsh-api-gateway` (`TypertGateway`) | 调用 unary/stream Remote 与 `$events` | 0.1.2-alpha.5 |
+| `@deepseek-ai/dsh-client-connection` (`HostConnectionHandle`) | 创建 shared `/api` handler，提交 `$events/result` | 0.1.3-alpha.1 |
+| `@deepseek-ai/dsh-api-gateway` (`TypertGateway`) | 调用 unary/stream Remote 与 `$events` | 0.1.3-alpha.1 |
 | `@deepseek-ai/cordis` (`Context`, `Service`) | 插件生命周期 | ^4.0.1 |
 | `@deepseek-ai/schemastery` (`Config`) | 插件配置 schema | ^3.18.1 |
 
@@ -76,12 +76,13 @@ app 侧的 `packages/core/src/compatibility.ts` 会通过 `mobile.info` RPC 校�
 
 **新架构**：dsh 使用 `packages/api/gateway` 的 `TypertGatewayService` + `packages/client/connection` 的 `HostConnectionService`。
 
-**已完成迁移**（插件 0.2.1+）：
+**已完成迁移**（插件 0.2.2+）：
 
 1. `src/index.ts` 的 `static inject` 已从 `['apiProxy']` 改为 `['connection', 'typertGateway']`。
 2. 单次 RPC 通过 `connection.createSharedFetchHandler('/api')` → `handler.fetch(request)` 转发。
 3. 事件流通过 `GatewayEventAdapter`（`src/events.ts`）打开 gateway 的 `$events` 流，将 `emit`/`waterfall`/`cancel` 帧适配为旧 `StreamFrame` 格式，NATS wire protocol 不变。
 4. `src/harness-shims.d.ts` 已更新为声明 `@deepseek-ai/dsh-client-connection` 和 `@deepseek-ai/dsh-api-gateway` 的结构类型。
+5. `file.upload` 已映射到 `fileUploads/upload`，供移动端上传小文件并取得 Agent-scoped staged receipt。
 
 ## 防止遗漏
 

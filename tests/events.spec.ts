@@ -271,9 +271,59 @@ describe('GatewayEventAdapter', () => {
             kind: 'subagent', parentSessionId: 'parent-1', childSessionId: 'child-1', mode: 'continuable',
           },
           maxMessages: 1,
+          assistantStream: true,
         },
       },
     }))
+    controller.abort()
+    await iterator.return?.()
+  })
+
+  it('replays compact assistant baseline and follows live assistant frames', async () => {
+    const controller = new AbortController()
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async (request) => {
+        if (request.namespace === 'session' && request.method === 'control') {
+          return (async function* (): AsyncIterable<unknown> {
+            await new Promise<void>(resolve => (request.signal ?? controller.signal).addEventListener('abort', () => resolve(), { once: true }))
+          })()
+        }
+        return objectStream([
+          {
+            type: 'snapshot', cursor: 9,
+            assistantStream: {
+              revision: 3,
+              activeAttempt: {
+                attemptId: 'attempt-1', turn: 2, step: 1, nextIndex: 4,
+                stream: [
+                  { type: 'text-chunks', time0: 10, index: 0, dt: [2], texts: ['ab', 'cd'] },
+                  { type: 'reasoning-chunks', time0: 20, index: 0, dt: [], texts: ['why'] },
+                  { type: 'tool-call-chunks', time0: 30, index: 1, dt: [], id: 'call-1', name: 'search', args: ['{"q":'] },
+                ],
+              },
+            },
+          },
+          { type: 'assistant-stream', frame: { type: 'start', attemptId: 'attempt-2', revision: 1, turn: 3, step: 1, startedAfterSeq: 9 } },
+          { type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'attempt-2', revision: 2, index: 0, time: 40, chunk: { type: 'text-delta', index: 0, text: 'live' } } },
+          { type: 'assistant-stream', frame: { type: 'end', attemptId: 'attempt-2', revision: 3, index: 1, outcome: { kind: 'abandoned' } } },
+        ], request.signal ?? controller.signal)
+      },
+    })
+    adapter.watchSession({ kind: 'session', sessionId: 'session-1' })
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const frames = await take(iterator, 7)
+    expect(frames.map(item => item.payload.type)).toEqual([
+      'session/subscribed', 'session/event', 'session/event', 'session/event',
+      'session/event', 'session/event', 'session/event',
+    ])
+    const assistant = frames.slice(1).map(item => item.payload.event as Record<string, unknown>)
+    expect(assistant.map(event => (event.data as Record<string, unknown>).index)).toEqual([0, 1, 2, 3, 0, 1])
+    expect((assistant[0]?.data as Record<string, unknown>).chunk).toEqual({ type: 'text-delta', index: 0, text: 'ab' })
+    expect((assistant[2]?.data as Record<string, unknown>).chunk).toEqual({ type: 'reasoning-delta', index: 0, text: 'why' })
+    expect((assistant[3]?.data as Record<string, unknown>).chunk).toMatchObject({ type: 'tool-call-delta', index: 1, id: 'call-1', name: 'search' })
+    expect(assistant[5]?.type).toBe('assistant/stream-end')
     controller.abort()
     await iterator.return?.()
   })

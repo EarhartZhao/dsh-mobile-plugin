@@ -40,7 +40,7 @@ export interface EventBridgeOptions {
 type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow'
 
 /**
- * Adapts the dsh 0.1.2-alpha.2 Typert Gateway `$events` stream to the legacy
+ * Adapts the dsh 0.1.3-alpha.1 Typert Gateway `$events` stream to the legacy
  * `EventStreams` interface (mux + host). The wire format on NATS stays the
  * same, so the mobile app protocol layer needs no changes.
  */
@@ -396,9 +396,10 @@ export class GatewayEventAdapter {
       try {
         const stream = await this.gateway.stream({
           namespace: 'session', method: 'follow',
-          args: { request: { address, maxMessages: 1 } },
+          args: { request: { address, maxMessages: 1, assistantStream: true } },
           signal,
         })
+        const attempts = new Map<string, { turn: number; step: number }>()
         for await (const item of stream) {
           if (typeof item !== 'object' || item === null) continue
           const record = item as Record<string, unknown>
@@ -407,11 +408,43 @@ export class GatewayEventAdapter {
               rpcId: randomUUID(),
               payload: { type: 'session/subscribed', sessionId, lastSeq: Number(record['cursor'] ?? -1) },
             })
+            const baseline = isRecord(record['assistantStream']) ? record['assistantStream'] : undefined
+            const active = baseline !== undefined && isRecord(baseline['activeAttempt'])
+              ? baseline['activeAttempt'] : undefined
+            if (active !== undefined) {
+              const attemptId = typeof active['attemptId'] === 'string' ? active['attemptId'] : ''
+              const turn = typeof active['turn'] === 'number' ? active['turn'] : -1
+              const step = typeof active['step'] === 'number' ? active['step'] : -1
+              if (attemptId !== '') {
+                attempts.set(attemptId, { turn, step })
+                const records = Array.isArray(active['stream']) ? active['stream'] : []
+                let streamIndex = 0
+                for (const record of records) {
+                  streamIndex = this.publishAssistantRecord(sessionId, attemptId, turn, step, record, streamIndex)
+                }
+              }
+            }
           } else if (record['type'] === 'event' && typeof record['event'] === 'object' && record['event'] !== null) {
             this.muxSink?.({
               rpcId: randomUUID(),
               payload: { type: 'session/event', sessionId, event: record['event'] },
             })
+          } else if (record['type'] === 'assistant-stream' && isRecord(record['frame'])) {
+            const frame = record['frame']
+            const attemptId = typeof frame['attemptId'] === 'string' ? frame['attemptId'] : ''
+            if (attemptId === '') continue
+            if (frame['type'] === 'start') {
+              const turn = typeof frame['turn'] === 'number' ? frame['turn'] : -1
+              const step = typeof frame['step'] === 'number' ? frame['step'] : -1
+              attempts.set(attemptId, { turn, step })
+            } else if (frame['type'] === 'chunk') {
+              const position = attempts.get(attemptId)
+              if (position !== undefined) this.publishAssistantChunk(sessionId, attemptId, Number(frame['index'] ?? 0), position.turn, position.step, frame['chunk'], frame['time'])
+            } else if (frame['type'] === 'end') {
+              const position = attempts.get(attemptId)
+              if (position !== undefined) this.publishAssistantEnd(sessionId, attemptId, Number(frame['index'] ?? 0), position.turn, position.step, frame['outcome'])
+              attempts.delete(attemptId)
+            }
           }
         }
       } catch {
@@ -421,6 +454,46 @@ export class GatewayEventAdapter {
         this.sessionWatchers.delete(key)
       }
     })()
+  }
+
+  private publishAssistantRecord(sessionId: string, attemptId: string, turn: number, step: number, record: unknown, startIndex: number): number {
+    if (!isRecord(record)) return startIndex
+    const type = record['type']
+    if (type === 'text-chunks' || type === 'reasoning-chunks' || type === 'tool-call-chunks') {
+      const texts = type === 'tool-call-chunks' ? record['args'] : record['texts']
+      if (!Array.isArray(texts)) return startIndex
+      const gaps = Array.isArray(record['dt']) ? record['dt'] : []
+      let time = typeof record['time0'] === 'number' ? record['time0'] : 0
+      for (let index = 0; index < texts.length; index += 1) {
+        if (typeof texts[index] !== 'string') continue
+        if (index > 0) time += Number(gaps[index - 1] ?? 0)
+        const chunk = type === 'tool-call-chunks'
+          ? { type: 'tool-call-delta', index: record['index'], id: record['id'], ...(typeof record['name'] === 'string' ? { name: record['name'] } : {}), argumentsDelta: texts[index] }
+          : { type: type === 'text-chunks' ? 'text-delta' : 'reasoning-delta', index: record['index'], text: texts[index] }
+        this.publishAssistantChunk(sessionId, attemptId, startIndex + index, turn, step, chunk, time)
+      }
+      return startIndex + texts.length
+    }
+    if (type === 'chunk') {
+      this.publishAssistantChunk(sessionId, attemptId, startIndex, turn, step, record['chunk'], record['time'])
+      return startIndex + 1
+    }
+    return startIndex
+  }
+
+  private publishAssistantChunk(sessionId: string, attemptId: string, index: number, turn: number, step: number, chunk: unknown, time: unknown): void {
+    if (!isRecord(chunk)) return
+    this.muxSink?.({
+      rpcId: randomUUID(),
+      payload: { type: 'session/event', sessionId, event: { type: 'assistant/chunk', seq: 0, time: Number(time ?? 0), data: { turn, step, chunk, transient: true, attemptId, index } } },
+    })
+  }
+
+  private publishAssistantEnd(sessionId: string, attemptId: string, index: number, turn: number, step: number, outcome: unknown): void {
+    this.muxSink?.({
+      rpcId: randomUUID(),
+      payload: { type: 'session/event', sessionId, event: { type: 'assistant/stream-end', seq: 0, time: 0, data: { turn, step, transient: true, attemptId, index, outcome } } },
+    })
   }
 
   private markStreamRecovered(name: GatewayStreamName): void {

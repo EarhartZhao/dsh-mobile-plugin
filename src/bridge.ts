@@ -42,6 +42,7 @@ const ALLOWED_METHODS = new Set([
   'session.create',
   'session.history',
   'session.attachment',
+  'file.upload',
   'session.prompt',
   'session.cancel',
   'session.updateQueue',
@@ -79,7 +80,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.1'
+export const PLUGIN_VERSION = '0.2.2'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -94,6 +95,7 @@ export const PLUGIN_FEATURES = [
   'workspace-follow',
   'remote-event-results',
   'reference-candidates',
+  'file-uploads',
 ] as const
 
 export const TOKEN_HEADER = 'x-dsh-token'
@@ -168,9 +170,26 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
     return { namespace: 'commands', method: 'list', args: { agentId: request.sessionId } }
   }
   if (method === 'command.execute') {
+    const submittedAttachments = Array.isArray(request.attachments)
+      ? request.attachments
+      : Array.isArray(request.images)
+        ? request.images.map(image => isRecord(image) ? { type: 'image', ...image } : image)
+        : []
     return {
       namespace: 'commands', method: 'execute',
-      args: { agentId: request.sessionId, line: request.line, images: request.images ?? [] },
+      args: { agentId: request.sessionId, line: request.line, submittedAttachments },
+    }
+  }
+  if (method === 'file.upload') {
+    return {
+      namespace: 'fileUploads', method: 'upload',
+      args: {
+        agentId: request.sessionId,
+        request: {
+          data: request.data,
+          ...(typeof request.name === 'string' ? { name: request.name } : {}),
+        },
+      },
     }
   }
   if (method === 'reference.files') {

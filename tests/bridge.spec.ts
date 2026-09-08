@@ -224,11 +224,12 @@ describe('RpcBridge', () => {
     })
   })
 
-  it('maps command, reference, preset, and goal calls to alpha.5 Remote arguments', async () => {
+  it('maps command, reference, preset, and goal calls to current Remote arguments', async () => {
     const gateway = useGateway({ value: { ref: { id: 'goal-1', revision: 1 } } })
     for (const [rpcId, method, payload] of [
       ['command-list', 'command.list', { sessionId: 's1' }],
       ['command-run', 'command.execute', { sessionId: 's1', line: '/plan', images: [] }],
+      ['file-upload', 'file.upload', { sessionId: 's1', data: 'AAE=', name: 'notes.txt' }],
       ['reference-files', 'reference.files', { sessionId: 's1', query: 'src' }],
       ['reference-sessions', 'reference.sessions', { sessionId: 's1', query: 'research' }],
       ['preset', 'agentPreset.select', { sessionId: 's1', agentPreset: 'coding' }],
@@ -242,7 +243,8 @@ describe('RpcBridge', () => {
     }
     expect(gateway.calls).toEqual([
       { namespace: 'commands', method: 'list', args: { agentId: 's1' } },
-      { namespace: 'commands', method: 'execute', args: { agentId: 's1', line: '/plan', images: [] } },
+      { namespace: 'commands', method: 'execute', args: { agentId: 's1', line: '/plan', submittedAttachments: [] } },
+      { namespace: 'fileUploads', method: 'upload', args: { agentId: 's1', request: { data: 'AAE=', name: 'notes.txt' } } },
       { namespace: 'fileReferences', method: 'list', args: { agentId: 's1', query: 'src' } },
       { namespace: 'sessionReferenceResolver', method: 'candidates', args: { agentId: 's1', query: 'research' } },
       { namespace: 'agentPresets', method: 'select', args: { agentId: 's1', agentPreset: 'coding' } },
@@ -372,12 +374,12 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.1',
+      pluginVersion: '0.2.2',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
         'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
-        'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates',
+        'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
       ],
     })
     expect(carrierCalls).toHaveLength(0)

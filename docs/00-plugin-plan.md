@@ -145,6 +145,6 @@ config:
 
 ## RPC 方法白名单（v1）
 
-`host.describe`、`workspace.*`（受限于显式白名单）、`session.list/create/history/prompt/cancel/updateQueue/rename/fork/models/selectModel/search/attachment`、`command.list/execute`、`reference.files/sessions`、`skill.list`、`goal.*`、`subagent.*`、`agentPreset.list/read/select`、`respond`。
+`host.describe`、`workspace.*`（受限于显式白名单）、`session.list/create/history/prompt/cancel/updateQueue/rename/fork/models/selectModel/search/attachment`、`file.upload`、`command.list/execute`、`reference.files/sessions`、`skill.list`、`goal.*`、`subagent.*`、`agentPreset.list/read/select`、`respond`。
 
 白名单之外的请求返回 403 语义的 RPC 错误，与方法不存在区分。
