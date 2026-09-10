@@ -264,6 +264,7 @@ describe('RpcBridge', () => {
       ['file-list-path', 'file.list', { sessionId: 's1', path: 'src' }],
       ['file-read', 'file.read', { sessionId: 's1', path: 'src/a.ts', offset: 5, limit: 20 }],
       ['file-bytes', 'file.bytes', { sessionId: 's1', path: 'shot.png', length: 1024 }],
+      ['file-stat', 'file.stat', { sessionId: 's1', path: 'src/a.ts' }],
       ['file-related', 'file.related', { sessionId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' }],
       ['file-reveal', 'file.reveal', { sessionId: 's1', path: 'C:/repo/a.ts' }],
       ['host-open', 'host.openPath', { path: 'C:/repo/a.ts' }],
@@ -284,6 +285,7 @@ describe('RpcBridge', () => {
         namespace: 'workspaceFiles', method: 'readBytes',
         args: { workspaceFileScopeId: 's1', path: 'shot.png', range: { length: 1024 } },
       },
+      { namespace: 'workspaceFiles', method: 'stat', args: { workspaceFileScopeId: 's1', path: 'src/a.ts' } },
       {
         namespace: 'workspaceFiles', method: 'readRelated',
         args: { workspaceFileScopeId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' },
@@ -434,13 +436,13 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.4',
+      pluginVersion: '0.2.5',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
         'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
         'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
-        'workspace-files', 'workspace-watch', 'goal-state', 'open-path',
+        'workspace-files', 'workspace-watch', 'workspace-stat', 'goal-state', 'open-path',
       ],
     })
     expect(carrierCalls).toHaveLength(0)

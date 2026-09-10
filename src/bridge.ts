@@ -68,6 +68,7 @@ const ALLOWED_METHODS = new Set([
   'file.read',
   'file.bytes',
   'file.related',
+  'file.stat',
   'file.watch',
   'file.reveal',
   'subagent.list',
@@ -88,7 +89,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.4'
+export const PLUGIN_VERSION = '0.2.5'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -106,6 +107,7 @@ export const PLUGIN_FEATURES = [
   'file-uploads',
   'workspace-files',
   'workspace-watch',
+  'workspace-stat',
   'goal-state',
   'open-path',
 ] as const
@@ -260,6 +262,14 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
           ...(typeof request.length === 'number' ? { length: request.length } : {}),
         },
       },
+    }
+  }
+  if (method === 'file.stat') {
+    // Cheap freshness probe: one version string lets the App reuse a cached
+    // preview instead of re-reading the whole page.
+    return {
+      namespace: 'workspaceFiles', method: 'stat',
+      args: { workspaceFileScopeId: request.sessionId, path: request.path },
     }
   }
   if (method === 'file.related') {
