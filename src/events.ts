@@ -37,7 +37,7 @@ export interface EventBridgeOptions {
   coalesceMs: number
 }
 
-type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow'
+type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow' | 'workspace files'
 
 /**
  * Adapts the dsh 0.1.5-rc.1 Typert Gateway `$events` stream to the legacy
@@ -48,8 +48,11 @@ export class GatewayEventAdapter {
   private muxSink: ((frame: StreamFrame) => void) | undefined
   private hostSink: ((frame: StreamFrame) => void) | undefined
   private muxLifetime: AbortSignal | undefined
+  private hostLifetime: AbortSignal | undefined
   private readonly wantedSessions = new Map<string, SessionAddress>()
   private readonly sessionWatchers = new Map<string, AbortController>()
+  private readonly wantedFileSessions = new Set<string>()
+  private readonly fileWatchers = new Map<string, AbortController>()
   private readonly pendingEvents = new Map<string, { event: string; agentId: string }>()
   private readonly hostBacklog: StreamFrame[] = []
   private eventClientId: string | undefined
@@ -69,6 +72,19 @@ export class GatewayEventAdapter {
     if (sessionId.length === 0) return
     this.wantedSessions.set(key, address)
     if (this.muxSink !== undefined && this.muxLifetime !== undefined) this.startSessionWatcher(address)
+  }
+
+  /**
+   * Watch one Session's workspace files so the phone can refresh a listing
+   * without polling. Frames ride the host stream as `workspace-files/*`
+   * forwarded events: that vocabulary is already published in the frozen
+   * mobile wire, while a brand-new mux frame type would be dropped by the
+   * App's carrier schema.
+   */
+  watchFiles(sessionId: string): void {
+    if (sessionId.length === 0) return
+    this.wantedFileSessions.add(sessionId)
+    if (this.hostSink !== undefined && this.hostLifetime !== undefined) this.startFileWatcher(sessionId)
   }
 
   /** Read the current Workspace baseline without reaching into Host internals. */
@@ -155,7 +171,11 @@ export class GatewayEventAdapter {
     const lifetime = new AbortController()
     const combinedSignal = AbortSignal.any([signal, lifetime.signal])
     this.hostSink = frame => queue.push(frame)
+    this.hostLifetime = combinedSignal
     for (const frame of this.hostBacklog.splice(0)) queue.push(frame)
+    // The file watcher publishes onto this stream, so its lifetime is the
+    // host generation, not the mux one.
+    for (const sessionId of this.wantedFileSessions) this.startFileWatcher(sessionId)
     const pump = this.runPump(
       'workspace follow', combinedSignal, lifetime, queue,
       () => this.pumpWorkspace(combinedSignal),
@@ -166,6 +186,9 @@ export class GatewayEventAdapter {
       lifetime.abort()
       await pump
       this.hostSink = undefined
+      this.hostLifetime = undefined
+      for (const watcher of this.fileWatchers.values()) watcher.abort()
+      this.fileWatchers.clear()
     }
   }
 
@@ -452,6 +475,58 @@ export class GatewayEventAdapter {
         // remains usable for bounded RPCs if one Session disappears.
       } finally {
         this.sessionWatchers.delete(key)
+      }
+    })()
+  }
+
+  private startFileWatcher(sessionId: string): void {
+    if (this.fileWatchers.has(sessionId) || this.hostLifetime === undefined) return
+    const controller = new AbortController()
+    this.fileWatchers.set(sessionId, controller)
+    const signal = AbortSignal.any([this.hostLifetime, controller.signal])
+    void (async () => {
+      try {
+        const stream = await this.gateway.stream({
+          namespace: 'workspaceFiles', method: 'changes',
+          args: { workspaceFileScopeId: sessionId }, signal,
+        })
+        for await (const item of stream) {
+          if (!isRecord(item)) continue
+          if (item['kind'] === 'ready') {
+            this.markStreamRecovered('workspace files')
+            this.publishHost({
+              rpcId: randomUUID(),
+              payload: { type: 'host/remote-event', event: 'workspace-files/ready', args: [{ sessionId }] },
+            })
+            continue
+          }
+          if (item['kind'] === 'change' && isRecord(item['change'])) {
+            this.publishHost({
+              rpcId: randomUUID(),
+              payload: {
+                type: 'host/remote-event',
+                event: 'workspace-files/change',
+                args: [{ sessionId, ...item['change'] }],
+              },
+            })
+          }
+        }
+        if (!signal.aborted) throw new Error('workspace file watch ended unexpectedly')
+      } catch (error: unknown) {
+        if (signal.aborted) return
+        this.failedStreams.add('workspace files')
+        this.onStreamError?.('workspace files', error)
+        this.publishHost({
+          rpcId: randomUUID(),
+          payload: {
+            type: 'host/remote-event',
+            event: 'workspace-files/watch-error',
+            args: [{ sessionId, message: errorMessage(error, 'workspace files') }],
+          },
+        })
+      } finally {
+        // A later file.watch call re-arms the stream for this Session.
+        this.fileWatchers.delete(sessionId)
       }
     })()
   }

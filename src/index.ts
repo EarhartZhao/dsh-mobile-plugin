@@ -399,6 +399,7 @@ export class MobileBridge extends Service {
       },
       onWorkspaceList: () => eventAdapter.workspaceSnapshot(),
       onSessionSeen: address => eventAdapter.watchSession(address),
+      onFileWatch: sessionId => eventAdapter.watchFiles(sessionId),
       onRespond: (rpcId, result) => eventAdapter.respond(rpcId, result),
     })
     this.rpcBridge.start()

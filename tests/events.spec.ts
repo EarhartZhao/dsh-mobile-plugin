@@ -243,6 +243,45 @@ describe('GatewayEventAdapter', () => {
     await iterator.return?.()
   })
 
+  it('forwards workspace file observations as host remote events', async () => {
+    const controller = new AbortController()
+    const calls: { namespace: string; method: string; args: Record<string, unknown> }[] = []
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async (request) => {
+        calls.push({ namespace: request.namespace, method: request.method, args: request.args })
+        if (request.namespace === 'workspaceFiles') {
+          return objectStream([
+            { kind: 'ready' },
+            { kind: 'change', change: { absolutePath: '/repo/out.txt', version: 'v2' } },
+            { kind: 'change', change: { absolutePath: '/repo/gone.txt', absent: true } },
+          ], request.signal ?? controller.signal)
+        }
+        return objectStream([], request.signal ?? controller.signal)
+      },
+    })
+    adapter.watchFiles('s1')
+
+    const iterator = adapter.events.host({ rpcId: 'host' }, controller.signal)[Symbol.asyncIterator]()
+    const frames = await take(iterator, 3)
+    expect(calls[0]).toEqual({
+      namespace: 'workspaceFiles', method: 'changes', args: { workspaceFileScopeId: 's1' },
+    })
+    expect(frames.map(frame => frame.payload)).toEqual([
+      { type: 'host/remote-event', event: 'workspace-files/ready', args: [{ sessionId: 's1' }] },
+      {
+        type: 'host/remote-event', event: 'workspace-files/change',
+        args: [{ sessionId: 's1', absolutePath: '/repo/out.txt', version: 'v2' }],
+      },
+      {
+        type: 'host/remote-event', event: 'workspace-files/change',
+        args: [{ sessionId: 's1', absolutePath: '/repo/gone.txt', absent: true }],
+      },
+    ])
+    controller.abort()
+    await iterator.return?.()
+  })
+
   it('follows the complete subagent address after history opens it', async () => {
     const controller = new AbortController()
     const calls: unknown[] = []

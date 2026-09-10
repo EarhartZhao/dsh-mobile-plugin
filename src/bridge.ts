@@ -67,6 +67,8 @@ const ALLOWED_METHODS = new Set([
   'file.list',
   'file.read',
   'file.bytes',
+  'file.related',
+  'file.watch',
   'file.reveal',
   'subagent.list',
   'subagent.history',
@@ -86,7 +88,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.3'
+export const PLUGIN_VERSION = '0.2.4'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -103,6 +105,7 @@ export const PLUGIN_FEATURES = [
   'reference-candidates',
   'file-uploads',
   'workspace-files',
+  'workspace-watch',
   'goal-state',
   'open-path',
 ] as const
@@ -133,6 +136,8 @@ export interface BridgeOptions {
   onWorkspaceList?: () => unknown | Promise<unknown>
   /** Called when a Session address becomes relevant to the mobile client. */
   onSessionSeen?: (address: SessionAddress) => void
+  /** Start (or re-arm) the workspace file-change stream of one Session. */
+  onFileWatch?: (sessionId: string) => void
   /** Settle one Gateway Remote Event using its original event-stream generation. */
   onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
 }
@@ -254,6 +259,18 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
           ...(typeof request.offset === 'number' ? { offset: request.offset } : {}),
           ...(typeof request.length === 'number' ? { length: request.length } : {}),
         },
+      },
+    }
+  }
+  if (method === 'file.related') {
+    // Resolves one path relative to another file's directory, so Markdown
+    // previews can pull the images they reference.
+    return {
+      namespace: 'workspaceFiles', method: 'readRelated',
+      args: {
+        workspaceFileScopeId: request.sessionId,
+        path: request.path,
+        relativePath: request.relativePath,
       },
     }
   }
@@ -566,6 +583,16 @@ export class RpcBridge {
       }
       const payload = envelope.payload
       try {
+        if (method === 'file.watch') {
+          const request = isRecord(payload) ? payload : {}
+          if (typeof request.sessionId !== 'string' || this.options.onFileWatch === undefined) {
+            msg.respond(new TextEncoder().encode(gateFailure(rpcId, 'mobile-forbidden')))
+            return
+          }
+          this.options.onFileWatch(request.sessionId)
+          msg.respond(new TextEncoder().encode(serverResult(id, { watching: true })))
+          return
+        }
         if (method === 'session.history' || method === 'subagent.history') {
           const request = isRecord(payload) ? payload : {}
           const address = addressFromHistory(method, request)

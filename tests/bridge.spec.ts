@@ -109,6 +109,7 @@ describe('RpcBridge', () => {
     host?: unknown
     workspaces?: unknown
     onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
+    onFileWatch?: (sessionId: string) => void
   } = {}): { calls: any[] } {
     const calls: any[] = []
     const gateway: GatewayCarrier = {
@@ -128,6 +129,7 @@ describe('RpcBridge', () => {
       onHostDescribe: () => options.host,
       onWorkspaceList: () => options.workspaces,
       ...(options.onRespond === undefined ? {} : { onRespond: options.onRespond }),
+      ...(options.onFileWatch === undefined ? {} : { onFileWatch: options.onFileWatch }),
     })
     return { calls }
   }
@@ -262,6 +264,7 @@ describe('RpcBridge', () => {
       ['file-list-path', 'file.list', { sessionId: 's1', path: 'src' }],
       ['file-read', 'file.read', { sessionId: 's1', path: 'src/a.ts', offset: 5, limit: 20 }],
       ['file-bytes', 'file.bytes', { sessionId: 's1', path: 'shot.png', length: 1024 }],
+      ['file-related', 'file.related', { sessionId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' }],
       ['file-reveal', 'file.reveal', { sessionId: 's1', path: 'C:/repo/a.ts' }],
       ['host-open', 'host.openPath', { path: 'C:/repo/a.ts' }],
     ] as const) {
@@ -281,9 +284,34 @@ describe('RpcBridge', () => {
         namespace: 'workspaceFiles', method: 'readBytes',
         args: { workspaceFileScopeId: 's1', path: 'shot.png', range: { length: 1024 } },
       },
+      {
+        namespace: 'workspaceFiles', method: 'readRelated',
+        args: { workspaceFileScopeId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' },
+      },
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts', action: 'reveal' } } },
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts' } } },
     ])
+  })
+
+  it('arms the workspace file watch through the bridge hook', async () => {
+    const watched: string[] = []
+    useGateway({ onFileWatch: sessionId => { watched.push(sessionId) } })
+    const msg = makeMsg(`${PREFIX}file.watch`, {
+      type: 'client-request', rpcId: 'watch-1', method: 'file.watch', payload: { sessionId: 's1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual({ watching: true })
+    expect(watched).toEqual(['s1'])
+  })
+
+  it('refuses the workspace file watch when no watcher is wired', async () => {
+    useGateway({})
+    const msg = makeMsg(`${PREFIX}file.watch`, {
+      type: 'client-request', rpcId: 'watch-2', method: 'file.watch', payload: { sessionId: 's1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.ok).toBe(false)
+    expect(replyJson(msg).result.error.message).toBe('mobile-forbidden')
   })
 
   it('serves removed host/workspace baselines and converts session follow snapshots', async () => {
@@ -406,13 +434,13 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.3',
+      pluginVersion: '0.2.4',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
         'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
         'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
-        'workspace-files', 'goal-state', 'open-path',
+        'workspace-files', 'workspace-watch', 'goal-state', 'open-path',
       ],
     })
     expect(carrierCalls).toHaveLength(0)
