@@ -248,6 +248,7 @@ describe('GatewayEventAdapter', () => {
     const calls: { namespace: string; method: string; args: Record<string, unknown> }[] = []
     const adapter = new GatewayEventAdapter({
       wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      invoke: async () => ({ items: [{ sessionId: 's1', cwd: '/repo' }] }),
       stream: async (request) => {
         calls.push({ namespace: request.namespace, method: request.method, args: request.args })
         if (request.namespace === 'workspaceFiles') {
@@ -264,18 +265,18 @@ describe('GatewayEventAdapter', () => {
 
     const iterator = adapter.events.host({ rpcId: 'host' }, controller.signal)[Symbol.asyncIterator]()
     const frames = await take(iterator, 3)
-    expect(calls[0]).toEqual({
+    expect(calls).toContainEqual({
       namespace: 'workspaceFiles', method: 'changes', args: { workspaceFileScopeId: 's1' },
     })
     expect(frames.map(frame => frame.payload)).toEqual([
       { type: 'host/remote-event', event: 'workspace-files/ready', args: [{ sessionId: 's1' }] },
       {
         type: 'host/remote-event', event: 'workspace-files/change',
-        args: [{ sessionId: 's1', absolutePath: '/repo/out.txt', version: 'v2' }],
+        args: [{ sessionId: 's1', absolutePath: '/repo/out.txt', version: 'v2', path: 'out.txt' }],
       },
       {
         type: 'host/remote-event', event: 'workspace-files/change',
-        args: [{ sessionId: 's1', absolutePath: '/repo/gone.txt', absent: true }],
+        args: [{ sessionId: 's1', absolutePath: '/repo/gone.txt', absent: true, path: 'gone.txt' }],
       },
     ])
     controller.abort()

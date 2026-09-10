@@ -53,6 +53,7 @@ export class GatewayEventAdapter {
   private readonly sessionWatchers = new Map<string, AbortController>()
   private readonly wantedFileSessions = new Set<string>()
   private readonly fileWatchers = new Map<string, AbortController>()
+  private readonly workspaceRoots = new Map<string, string | undefined>()
   private readonly pendingEvents = new Map<string, { event: string; agentId: string }>()
   private readonly hostBacklog: StreamFrame[] = []
   private eventClientId: string | undefined
@@ -62,6 +63,7 @@ export class GatewayEventAdapter {
 
   constructor(private readonly gateway: {
     wireStream: { open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> }
+    invoke(request: { namespace: string, method: string, args: Record<string, unknown> }): Promise<unknown>
     stream(request: { namespace: string, method: string, args: Record<string, unknown>, signal?: AbortSignal }): Promise<AsyncIterable<unknown>>
   }, private readonly carrier?: { fetch(request: Request): Promise<Response> }, private readonly onStreamError?: (name: GatewayStreamName, error: unknown) => void, private readonly onStreamRecovered?: (name: GatewayStreamName) => void, private readonly retryDelayMs = 1_000) {}
 
@@ -486,6 +488,7 @@ export class GatewayEventAdapter {
     const signal = AbortSignal.any([this.hostLifetime, controller.signal])
     void (async () => {
       try {
+        const root = await this.workspaceRootOf(sessionId)
         const stream = await this.gateway.stream({
           namespace: 'workspaceFiles', method: 'changes',
           args: { workspaceFileScopeId: sessionId }, signal,
@@ -501,12 +504,17 @@ export class GatewayEventAdapter {
             continue
           }
           if (item['kind'] === 'change' && isRecord(item['change'])) {
+            const absolutePath = typeof item['change']['absolutePath'] === 'string'
+              ? item['change']['absolutePath'] : undefined
+            // A workspace-relative path lets the App ignore changes outside the
+            // directory it is showing; without a resolvable root it must refresh.
+            const relativePath = absolutePath === undefined ? undefined : workspaceRelativePath(root, absolutePath)
             this.publishHost({
               rpcId: randomUUID(),
               payload: {
                 type: 'host/remote-event',
                 event: 'workspace-files/change',
-                args: [{ sessionId, ...item['change'] }],
+                args: [{ sessionId, ...item['change'], ...(relativePath === undefined ? {} : { path: relativePath }) }],
               },
             })
           }
@@ -529,6 +537,29 @@ export class GatewayEventAdapter {
         this.fileWatchers.delete(sessionId)
       }
     })()
+  }
+
+  /**
+   * Absolute workspace root of one Session, from its summary `cwd` — the same
+   * value `workspaceFileScope` resolves against. Cached per watch attempt;
+   * `undefined` means paths stay absolute and clients refresh unconditionally.
+   */
+  private async workspaceRootOf(sessionId: string): Promise<string | undefined> {
+    if (this.workspaceRoots.has(sessionId)) return this.workspaceRoots.get(sessionId)
+    let root: string | undefined
+    try {
+      const value = await this.gateway.invoke({
+        namespace: 'session', method: 'list', args: { _request: {} },
+      })
+      const items = isRecord(value) && Array.isArray(value['items']) ? value['items'] : []
+      const match = items.find(item => isRecord(item) && item['sessionId'] === sessionId)
+      root = isRecord(match) && typeof match['cwd'] === 'string' && match['cwd'].length > 0
+        ? match['cwd'] : undefined
+    } catch {
+      root = undefined
+    }
+    this.workspaceRoots.set(sessionId, root)
+    return root
   }
 
   private publishAssistantRecord(sessionId: string, attemptId: string, turn: number, step: number, record: unknown, startIndex: number): number {
@@ -631,6 +662,20 @@ function queueItem(value: unknown): Record<string, unknown> | null {
       },
     },
   }
+}
+
+/**
+ * Workspace-relative form of one host path, or `undefined` when the file lies
+ * outside the root (or the root is unknown). Comparison is case-insensitive so
+ * Windows drive-letter casing never splits a path that is actually inside.
+ */
+function workspaceRelativePath(root: string | undefined, absolutePath: string): string | undefined {
+  if (root === undefined) return undefined
+  const normalizedRoot = root.replace(/\\/g, '/').replace(/\/+$/, '')
+  const normalizedPath = absolutePath.replace(/\\/g, '/')
+  if (normalizedRoot.length === 0) return undefined
+  if (!normalizedPath.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)) return undefined
+  return normalizedPath.slice(normalizedRoot.length + 1)
 }
 
 function hostFrameForEmit(event: string, args: unknown[]): StreamFrame | null {
