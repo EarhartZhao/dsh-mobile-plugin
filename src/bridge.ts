@@ -51,17 +51,23 @@ const ALLOWED_METHODS = new Set([
   'session.models',
   'session.selectModel',
   'session.search',
+  'host.openPath',
   'command.list',
   'command.execute',
   'reference.files',
   'reference.sessions',
   'skill.list',
+  'goal.get',
   'goal.create',
   'goal.edit',
   'goal.pause',
   'goal.resume',
   'goal.complete',
   'goal.clear',
+  'file.list',
+  'file.read',
+  'file.bytes',
+  'file.reveal',
   'subagent.list',
   'subagent.history',
   'subagent.interrupt',
@@ -80,7 +86,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.2'
+export const PLUGIN_VERSION = '0.2.3'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -96,6 +102,9 @@ export const PLUGIN_FEATURES = [
   'remote-event-results',
   'reference-candidates',
   'file-uploads',
+  'workspace-files',
+  'goal-state',
+  'open-path',
 ] as const
 
 export const TOKEN_HEADER = 'x-dsh-token'
@@ -210,6 +219,56 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
   }
   if (method === 'subagent.interrupt') {
     return { namespace: 'subagents', method: 'interruptByParent', args: request }
+  }
+  if (method === 'goal.get') {
+    return { namespace: 'goals', method: 'get', args: { agentId: request.sessionId } }
+  }
+  if (method === 'file.list') {
+    // `workspaceFiles` speaks workspace paths and resolves its scope from the
+    // Session header, so the empty path lists the workspace root.
+    return {
+      namespace: 'workspaceFiles', method: 'list',
+      args: { workspaceFileScopeId: request.sessionId, path: typeof request.path === 'string' ? request.path : '' },
+    }
+  }
+  if (method === 'file.read') {
+    return {
+      namespace: 'workspaceFiles', method: 'read',
+      args: {
+        workspaceFileScopeId: request.sessionId,
+        path: request.path,
+        range: {
+          ...(typeof request.offset === 'number' ? { offset: request.offset } : {}),
+          ...(typeof request.limit === 'number' ? { limit: request.limit } : {}),
+        },
+      },
+    }
+  }
+  if (method === 'file.bytes') {
+    return {
+      namespace: 'workspaceFiles', method: 'readBytes',
+      args: {
+        workspaceFileScopeId: request.sessionId,
+        path: request.path,
+        range: {
+          ...(typeof request.offset === 'number' ? { offset: request.offset } : {}),
+          ...(typeof request.length === 'number' ? { length: request.length } : {}),
+        },
+      },
+    }
+  }
+  if (method === 'file.reveal' || method === 'host.openPath') {
+    // One Host hand-off covers both verbs: opening uses the default
+    // application, revealing selects the path in the file manager.
+    return {
+      namespace: 'session', method: 'openWorkspacePath',
+      args: {
+        request: {
+          path: request.path,
+          ...(method === 'file.reveal' ? { action: 'reveal' } : {}),
+        },
+      },
+    }
   }
   if (method.startsWith('goal.')) {
     const name = method.slice('goal.'.length)
