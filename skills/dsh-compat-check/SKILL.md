@@ -16,12 +16,12 @@ cd dsh-mobile-plugin
 rg -n "ctx\.get\(|from '@deepseek-ai" src/index.ts src/events.ts src/bridge.ts
 ```
 
-当前依赖面（截至插件 0.2.0）：
+当前依赖面（截至插件 0.2.2）：
 
 | 导入 | 用途 | dsh 版本要求 |
 |------|------|-------------|
-| `@deepseek-ai/dsh-client-connection` (`HostConnectionHandle`) | 创建 shared `/api` handler，提交 `$events/result` | 0.1.3-alpha.1 |
-| `@deepseek-ai/dsh-api-gateway` (`TypertGateway`) | 调用 unary/stream Remote 与 `$events` | 0.1.3-alpha.1 |
+| `@deepseek-ai/dsh-client-connection` (`HostConnectionHandle`) | 创建 shared `/api` handler，提交 `$events/result` | 0.1.5-rc.1（0.1.3-alpha.1 起签名未变） |
+| `@deepseek-ai/dsh-api-gateway` (`TypertGateway`) | 调用 unary/stream Remote 与 `$events` | 0.1.5-rc.1（0.1.3-alpha.1 起签名未变） |
 | `@deepseek-ai/cordis` (`Context`, `Service`) | 插件生命周期 | ^4.0.1 |
 | `@deepseek-ai/schemastery` (`Config`) | 插件配置 schema | ^3.18.1 |
 
@@ -52,7 +52,9 @@ pnpm test
 ```
 
 测试通过只说明插件自身逻辑没有回归，不保证与最新 dsh 运行时兼容。
-最终确认需要在真实 dsh 0.1.2-alpha.2 环境中加载插件并验证 mobile.info RPC。
+最终确认需要在真实 dsh 0.1.5-rc.1 环境中加载插件并验证 mobile.info RPC。
+
+宿主服务面以外，还要顺带核对 durable 事件名（0.1.5 把 `tool/code-dispatch*` 改成 `tool/ptc-dispatch*`）：插件按帧原样透传，改名由 App 侧归一层处理，登记位置见 dsh-mobile 的 `skills/dsh-sync-check`。
 
 ## 第五步：版本兼容性声明
 

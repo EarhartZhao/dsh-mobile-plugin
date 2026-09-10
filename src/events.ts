@@ -40,7 +40,7 @@ export interface EventBridgeOptions {
 type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow'
 
 /**
- * Adapts the dsh 0.1.3-alpha.1 Typert Gateway `$events` stream to the legacy
+ * Adapts the dsh 0.1.5-rc.1 Typert Gateway `$events` stream to the legacy
  * `EventStreams` interface (mux + host). The wire format on NATS stays the
  * same, so the mobile app protocol layer needs no changes.
  */

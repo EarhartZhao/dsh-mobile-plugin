@@ -6,7 +6,7 @@
 
 安装进本地 deepseek-harness `web` profile 的**树外 Cordis 插件**。它解决一个问题：harness 在家庭内网 NAT 后，外网手机连不进来。办法是插件在 harness 进程内连接本机 NATS Leaf 节点（订阅路由经 Leaf 自动同步到公网 Hub），把 harness 已有的 `/api` 协议（一元 RPC + 下行事件帧）原样桥接到 NATS subject 上。
 
-App wire 保持稳定，但宿主接入已迁移到 dsh 0.1.2-alpha.5 的 Typert Remote。插件负责 Remote 参数映射、follow/control/workspace 流适配、事件回答、传输、认证与配对（映射见 dsh-mobile/docs/02-protocol.md）。
+App wire 保持稳定，但宿主接入已迁移到 dsh 0.1.5-rc.1 的 Typert Remote（0.1.2-alpha.2 起移除 ApiProxy，此后接入面未再变化）。插件负责 Remote 参数映射、follow/control/workspace 流适配、事件回答、传输、认证与配对（映射见 dsh-mobile/docs/02-protocol.md）。
 
 ## 职责
 
