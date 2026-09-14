@@ -294,7 +294,8 @@ describe('RpcBridge', () => {
         namespace: 'messageFeedback', method: 'delete',
         args: { request: { sessionId: 's1', messageId: 'm1', ifVersion: 'v1' } },
       },
-      { namespace: 'workspaceFiles', method: 'list', args: { workspaceFileScopeId: 's1', path: '' } },
+      // The workspace root is `.`: a live host rejects an empty path.
+      { namespace: 'workspaceFiles', method: 'list', args: { workspaceFileScopeId: 's1', path: '.' } },
       { namespace: 'workspaceFiles', method: 'list', args: { workspaceFileScopeId: 's1', path: 'src' } },
       {
         namespace: 'workspaceFiles', method: 'read',

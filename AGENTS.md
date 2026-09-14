@@ -21,6 +21,13 @@ pnpm test
 pnpm run build
 ```
 
+对运行中的宿主做端到端验收（需要本机 NATS 与已加载插件的 dsh web profile）：
+
+```bash
+node scripts/fake-app.mjs nats://127.0.0.1:4222 <pairCode> home
+node scripts/watch-probe.mjs nats://127.0.0.1:4222 home <scratchPath>
+```
+
 本机依赖检查不稳定时加 `$env:CI='true'`。
 
 ## 安全与兼容性约定

@@ -28,3 +28,13 @@ plugin 0.2 起提供可选的 `mobile.inventory`（需要设备 token），桥�
 - **目录列表没有游标。** `workspaceFiles/list` 按宿主 `maxEntries`（默认 2000）截断，插件只透传 `truncated`；缓解方式是调大宿主的 `workspaceFiles.maxEntries`。真正的续读需要上游先给文件系统 seam 的 `listDir` 加上限，再给 Remote 加 offset/游标。
 - **CA 指纹没有强制。** 配对二维码里的 `caFp` 会被保存并出现在诊断里，但 RN 的 WebSocket 拿不到对端证书，校验需要原生实现；诊断 payload 显式带 `caFpEnforced: false`，不要把它当作已生效的信任锚。
 - **后台推送未接入。** 审批/提问提醒目前只在 App 前台有效；系统级推送需要 FCM/APNs 凭据与宿主到推送服务的链路，插件只有 NATS 出站，没有可用凭据。
+- **变更流不是文件系统监视器。** 宿主只把它自己 instrumented 的 `fs/observed` 操作（agent 工具读写）变成 `workspace-files/change` 帧，不监听操作系统；别的程序在宿主上直接改文件不会触发刷新。真机联调实测确认，探针见 `scripts/watch-probe.mjs`。
+
+## 联调验收
+
+两脚本对**运行中的宿主 + 本地 NATS**做端到端验收（token 用 `DSH_MOBILE_TOKEN` 或 `DSH_MOBILE_TOKEN_FILE`，后者由 `fake-app.mjs` 首次配对后写入，避免反复占用 `maxDevices`）：
+
+```sh
+node scripts/fake-app.mjs      nats://127.0.0.1:4222 <pairCode> home   # 门控 + mobile.info/goal.get/feedback.list/file.list|read|stat|watch|unwatch
+node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.watch → ready 转发 → file.unwatch 释放
+```

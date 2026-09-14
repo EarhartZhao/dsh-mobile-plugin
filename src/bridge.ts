@@ -265,10 +265,14 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
   }
   if (method === 'file.list') {
     // `workspaceFiles` speaks workspace paths and resolves its scope from the
-    // Session header, so the empty path lists the workspace root.
+    // Session header. The root is spelled `'.'`: the host rejects an empty
+    // path as a missing argument (verified against a live host).
     return {
       namespace: 'workspaceFiles', method: 'list',
-      args: { workspaceFileScopeId: request.sessionId, path: typeof request.path === 'string' ? request.path : '' },
+      args: {
+        workspaceFileScopeId: request.sessionId,
+        path: typeof request.path === 'string' && request.path !== '' ? request.path : '.',
+      },
     }
   }
   if (method === 'file.read') {
