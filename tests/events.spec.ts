@@ -283,6 +283,42 @@ describe('GatewayEventAdapter', () => {
     await iterator.return?.()
   })
 
+  it('caps concurrent file watches and releases the least recent', async () => {
+    const controller = new AbortController()
+    const signals = new Map<string, AbortSignal>()
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      invoke: async () => ({ items: [] }),
+      stream: async (request) => {
+        const scope = request.args['workspaceFileScopeId']
+        const signal = request.signal ?? controller.signal
+        if (request.namespace === 'workspaceFiles' && typeof scope === 'string') signals.set(scope, signal)
+        return objectStream([], signal)
+      },
+    })
+    const iterator = adapter.events.host({ rpcId: 'host' }, controller.signal)[Symbol.asyncIterator]()
+    // Prime the generator: the host sinks (and therefore the watch seats) only
+    // exist once the stream body starts running.
+    const primed = iterator.next()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    for (const sessionId of ['s1', 's2', 's3', 's4', 's5']) adapter.watchFiles(sessionId)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const active = ['s1', 's2', 's3', 's4', 's5']
+      .filter(sessionId => signals.get(sessionId)?.aborted === false)
+    // Five watches, a cap of four: the oldest is released, the rest stay live.
+    expect(active).toEqual(['s2', 's3', 's4', 's5'])
+
+    adapter.unwatchFiles('s5')
+    expect(signals.get('s5')?.aborted).toBe(true)
+    expect(['s2', 's3', 's4'].filter(sessionId => signals.get(sessionId)?.aborted === false))
+      .toEqual(['s2', 's3', 's4'])
+
+    controller.abort()
+    await primed
+    await iterator.return?.()
+  })
+
   it('follows the complete subagent address after history opens it', async () => {
     const controller = new AbortController()
     const calls: unknown[] = []

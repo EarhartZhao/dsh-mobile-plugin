@@ -39,6 +39,11 @@ export interface EventBridgeOptions {
 
 type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow' | 'workspace files'
 
+/** Concurrent workspace-file watches one bridge keeps open; the least recently
+ *  armed Session is released first, because a phone browses one directory at a
+ *  time and every watch is a live Host stream. */
+const FILE_WATCH_LIMIT = 4
+
 /**
  * Adapts the dsh 0.1.5-rc.1 Typert Gateway `$events` stream to the legacy
  * `EventStreams` interface (mux + host). The wire format on NATS stays the
@@ -51,7 +56,7 @@ export class GatewayEventAdapter {
   private hostLifetime: AbortSignal | undefined
   private readonly wantedSessions = new Map<string, SessionAddress>()
   private readonly sessionWatchers = new Map<string, AbortController>()
-  private readonly wantedFileSessions = new Set<string>()
+  private readonly wantedFileSessions: string[] = []
   private readonly fileWatchers = new Map<string, AbortController>()
   private readonly workspaceRoots = new Map<string, string | undefined>()
   private readonly pendingEvents = new Map<string, { event: string; agentId: string }>()
@@ -85,8 +90,28 @@ export class GatewayEventAdapter {
    */
   watchFiles(sessionId: string): void {
     if (sessionId.length === 0) return
-    this.wantedFileSessions.add(sessionId)
+    const known = this.wantedFileSessions.indexOf(sessionId)
+    if (known !== -1) this.wantedFileSessions.splice(known, 1)
+    this.wantedFileSessions.push(sessionId)
+    while (this.wantedFileSessions.length > FILE_WATCH_LIMIT) {
+      const evicted = this.wantedFileSessions.shift()
+      if (evicted !== undefined) this.stopFileWatcher(evicted)
+    }
     if (this.hostSink !== undefined && this.hostLifetime !== undefined) this.startFileWatcher(sessionId)
+  }
+
+  /** Release one Session's watch; the App calls this when its browser closes. */
+  unwatchFiles(sessionId: string): void {
+    const known = this.wantedFileSessions.indexOf(sessionId)
+    if (known !== -1) this.wantedFileSessions.splice(known, 1)
+    this.stopFileWatcher(sessionId)
+  }
+
+  private stopFileWatcher(sessionId: string): void {
+    const controller = this.fileWatchers.get(sessionId)
+    if (controller === undefined) return
+    this.fileWatchers.delete(sessionId)
+    controller.abort()
   }
 
   /** Read the current Workspace baseline without reaching into Host internals. */

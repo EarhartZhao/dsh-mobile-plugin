@@ -110,6 +110,7 @@ describe('RpcBridge', () => {
     workspaces?: unknown
     onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
     onFileWatch?: (sessionId: string) => void
+    onFileUnwatch?: (sessionId: string) => void
   } = {}): { calls: any[] } {
     const calls: any[] = []
     const gateway: GatewayCarrier = {
@@ -130,6 +131,7 @@ describe('RpcBridge', () => {
       onWorkspaceList: () => options.workspaces,
       ...(options.onRespond === undefined ? {} : { onRespond: options.onRespond }),
       ...(options.onFileWatch === undefined ? {} : { onFileWatch: options.onFileWatch }),
+      ...(options.onFileUnwatch === undefined ? {} : { onFileUnwatch: options.onFileUnwatch }),
     })
     return { calls }
   }
@@ -314,6 +316,25 @@ describe('RpcBridge', () => {
     await drive(msg)
     expect(replyJson(msg).result.ok).toBe(false)
     expect(replyJson(msg).result.error.message).toBe('mobile-forbidden')
+  })
+
+  it('releases the workspace file watch without failing a closing browser', async () => {
+    const released: string[] = []
+    useGateway({ onFileUnwatch: sessionId => { released.push(sessionId) } })
+    let msg = makeMsg(`${PREFIX}file.unwatch`, {
+      type: 'client-request', rpcId: 'unwatch-1', method: 'file.unwatch', payload: { sessionId: 's1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual({ watching: false })
+    expect(released).toEqual(['s1'])
+
+    // No hook and no session id are both non-errors: releasing is best-effort.
+    msg = makeMsg(`${PREFIX}file.unwatch`, {
+      type: 'client-request', rpcId: 'unwatch-2', method: 'file.unwatch', payload: {},
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.ok).toBe(true)
+    expect(released).toEqual(['s1'])
   })
 
   it('serves removed host/workspace baselines and converts session follow snapshots', async () => {

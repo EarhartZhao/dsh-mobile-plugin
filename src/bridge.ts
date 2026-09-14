@@ -70,6 +70,7 @@ const ALLOWED_METHODS = new Set([
   'file.related',
   'file.stat',
   'file.watch',
+  'file.unwatch',
   'file.reveal',
   'subagent.list',
   'subagent.history',
@@ -140,6 +141,8 @@ export interface BridgeOptions {
   onSessionSeen?: (address: SessionAddress) => void
   /** Start (or re-arm) the workspace file-change stream of one Session. */
   onFileWatch?: (sessionId: string) => void
+  /** Release one Session's workspace file-change stream. */
+  onFileUnwatch?: (sessionId: string) => void
   /** Settle one Gateway Remote Event using its original event-stream generation. */
   onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
 }
@@ -601,6 +604,14 @@ export class RpcBridge {
           }
           this.options.onFileWatch(request.sessionId)
           msg.respond(new TextEncoder().encode(serverResult(id, { watching: true })))
+          return
+        }
+        if (method === 'file.unwatch') {
+          const request = isRecord(payload) ? payload : {}
+          // Releasing is best-effort: an unknown Session or an absent hook must
+          // not fail the caller that is merely closing its browser.
+          if (typeof request.sessionId === 'string') this.options.onFileUnwatch?.(request.sessionId)
+          msg.respond(new TextEncoder().encode(serverResult(id, { watching: false })))
           return
         }
         if (method === 'session.history' || method === 'subagent.history') {
