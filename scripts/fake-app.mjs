@@ -59,9 +59,11 @@ if (!token) {
 
 // 2. gated RPCs
 const describe = await call('host.describe', {}, token)
-console.log('host.describe ok?', describe.result?.ok === true)
+console.log('host.describe ok?', describe.result?.ok === true,
+  describe.result?.ok === true ? `(host dsh ${describe.result.value?.version ?? 'unknown'})` : '')
 const list = await call('session.list', {}, token)
-console.log('session.list ok?', list.result?.ok === true)
+console.log('session.list ok?', list.result?.ok === true,
+  `(${Array.isArray(list.result?.value?.items) ? list.result.value.items.length : 0} sessions)`)
 
 // 3. bridge self-description and the 0.1.5 Remote surfaces
 const probe = async (label, method, payload) => {
