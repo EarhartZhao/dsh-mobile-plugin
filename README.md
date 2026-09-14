@@ -21,3 +21,10 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 plugin 0.2 起提供可选的 `mobile.inventory`（需要设备 token），桥接宿主 `pluginInventory.list()`；App 在 `features` 含 `plugin-inventory` 时会在设置页显示只读插件清单。宿主未挂载清单服务时，设置页显示“当前桥未提供插件清单”，不影响连接和其它功能。
 
 `mobile.health` 是需要设备 token 的只读诊断 RPC，返回当前桥连接状态、实际加载路径、构建 ID、实例 ID、有效设备数、启动及最近重连时间。NATS 连接要在 `flush()` 成功后才标记为已连接；Gateway 事件流失败时在同一 NATS generation 内退避重开，避免启动期服务抖动反复重建桥，并在对应流重新取得 ready/baseline 后清除已经恢复的最近错误。Web 设置卡显示同一份状态；响应和复制诊断均不包含 NATS 密码或设备 token。
+
+## 已知边界
+
+- **大文件不出网桥。** NATS 单条消息约 1 MiB：`file.read`/`file.bytes` 只传有界的页与窗口，而宿主的 `/api/file` HTTP 路由位于宿主机本地，手机经公网 Hub 够不到。要支持大文件需要 Hub 侧中继或局域网专用下载端点（带设备 token），目前未实现；App 对超出窗口的图片会明确提示，而不是渲染半张图。
+- **目录列表没有游标。** `workspaceFiles/list` 按宿主 `maxEntries`（默认 2000）截断，插件只透传 `truncated`；缓解方式是调大宿主的 `workspaceFiles.maxEntries`。真正的续读需要上游先给文件系统 seam 的 `listDir` 加上限，再给 Remote 加 offset/游标。
+- **CA 指纹没有强制。** 配对二维码里的 `caFp` 会被保存并出现在诊断里，但 RN 的 WebSocket 拿不到对端证书，校验需要原生实现；诊断 payload 显式带 `caFpEnforced: false`，不要把它当作已生效的信任锚。
+- **后台推送未接入。** 审批/提问提醒目前只在 App 前台有效；系统级推送需要 FCM/APNs 凭据与宿主到推送服务的链路，插件只有 NATS 出站，没有可用凭据。
