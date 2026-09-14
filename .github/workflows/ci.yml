@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify plugin
+    runs-on: ubuntu-latest
+    env:
+      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # tests/integration.spec.ts spawns a real nats-server child process.
+      - name: Install NATS server
+        run: |
+          set -euo pipefail
+          version=2.14.6
+          work="$RUNNER_TEMP/nats-server"
+          mkdir -p "$work"
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.tar.gz" | tar -xz -C "$work" --strip-components=1
+          sudo install -m 0755 "$work/nats-server" /usr/local/bin
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck host half
+        run: pnpm run typecheck
+      # The browser half needs no dsh checkout: src/client/client-shims.d.ts
+      # declares the one host import it uses.
+      - name: Typecheck client half
+        run: pnpm run typecheck:client
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm run build
