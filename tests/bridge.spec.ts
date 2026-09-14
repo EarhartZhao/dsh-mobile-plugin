@@ -262,6 +262,11 @@ describe('RpcBridge', () => {
     const gateway = useGateway({ value: { activation: 'armed' } })
     for (const [rpcId, method, payload] of [
       ['goal-get', 'goal.get', { sessionId: 's1' }],
+      ['feedback-list', 'feedback.list', { sessionId: 's1' }],
+      ['feedback-put', 'feedback.put', {
+        sessionId: 's1', messageId: 'm1', rating: 'positive', ifVersion: null,
+      }],
+      ['feedback-delete', 'feedback.delete', { sessionId: 's1', messageId: 'm1', ifVersion: 'v1' }],
       ['file-list-root', 'file.list', { sessionId: 's1' }],
       ['file-list-path', 'file.list', { sessionId: 's1', path: 'src' }],
       ['file-read', 'file.read', { sessionId: 's1', path: 'src/a.ts', offset: 5, limit: 20 }],
@@ -277,6 +282,18 @@ describe('RpcBridge', () => {
     }
     expect(gateway.calls).toEqual([
       { namespace: 'goals', method: 'get', args: { agentId: 's1' } },
+      {
+        namespace: 'messageFeedback', method: 'list',
+        args: { request: { sessionId: 's1' } },
+      },
+      {
+        namespace: 'messageFeedback', method: 'put',
+        args: { request: { sessionId: 's1', messageId: 'm1', rating: 'positive', ifVersion: null } },
+      },
+      {
+        namespace: 'messageFeedback', method: 'delete',
+        args: { request: { sessionId: 's1', messageId: 'm1', ifVersion: 'v1' } },
+      },
       { namespace: 'workspaceFiles', method: 'list', args: { workspaceFileScopeId: 's1', path: '' } },
       { namespace: 'workspaceFiles', method: 'list', args: { workspaceFileScopeId: 's1', path: 'src' } },
       {
@@ -457,13 +474,13 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.5',
+      pluginVersion: '0.2.6',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
         'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
         'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
-        'workspace-files', 'workspace-watch', 'workspace-stat', 'goal-state', 'open-path',
+        'workspace-files', 'workspace-watch', 'workspace-stat', 'message-feedback', 'goal-state', 'open-path',
       ],
     })
     expect(carrierCalls).toHaveLength(0)

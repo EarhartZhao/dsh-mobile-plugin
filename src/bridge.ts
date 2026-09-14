@@ -58,6 +58,9 @@ const ALLOWED_METHODS = new Set([
   'reference.sessions',
   'skill.list',
   'goal.get',
+  'feedback.list',
+  'feedback.put',
+  'feedback.delete',
   'goal.create',
   'goal.edit',
   'goal.pause',
@@ -90,7 +93,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.5'
+export const PLUGIN_VERSION = '0.2.6'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -109,6 +112,7 @@ export const PLUGIN_FEATURES = [
   'workspace-files',
   'workspace-watch',
   'workspace-stat',
+  'message-feedback',
   'goal-state',
   'open-path',
 ] as const
@@ -232,6 +236,32 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
   }
   if (method === 'goal.get') {
     return { namespace: 'goals', method: 'get', args: { agentId: request.sessionId } }
+  }
+  if (method === 'feedback.list') {
+    return { namespace: 'messageFeedback', method: 'list', args: { request: { sessionId: request.sessionId } } }
+  }
+  if (method === 'feedback.put') {
+    // The host answers with a business result ({ok:true|false}), not a Remote
+    // error, so `ifVersion` is forwarded verbatim for compare-and-set.
+    return {
+      namespace: 'messageFeedback', method: 'put',
+      args: {
+        request: {
+          sessionId: request.sessionId,
+          messageId: request.messageId,
+          rating: request.rating,
+          ...(typeof request.note === 'string' ? { note: request.note } : {}),
+          ...(typeof request.category === 'string' ? { category: request.category } : {}),
+          ifVersion: request.ifVersion ?? null,
+        },
+      },
+    }
+  }
+  if (method === 'feedback.delete') {
+    return {
+      namespace: 'messageFeedback', method: 'delete',
+      args: { request: { sessionId: request.sessionId, messageId: request.messageId, ifVersion: request.ifVersion } },
+    }
   }
   if (method === 'file.list') {
     // `workspaceFiles` speaks workspace paths and resolves its scope from the
