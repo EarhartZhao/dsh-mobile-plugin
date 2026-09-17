@@ -35,6 +35,31 @@ describe('TokenStore', () => {
     expect(await store.redeemPairingCode('NOPE1234', 'a', 90, 10)).toBeNull()
   })
 
+  it('lets the wizard mint past the pending bound by retiring the oldest code', async () => {
+    const first = store.createPairingCode(120)
+    store.createPairingCode(120)
+    store.createPairingCode(120)
+
+    // The fourth mint is a regeneration, not an attack: it must succeed.
+    const fourth = store.createPairingCode(120)
+
+    // ...at the cost of the oldest code, leaving 3 simultaneously valid.
+    expect(await store.redeemPairingCode(first.code, 'a', 90, 10)).toBeNull()
+    expect(await store.redeemPairingCode(fourth.code, 'b', 90, 10)).not.toBeNull()
+  })
+
+  it('never keeps more than the pending bound valid at once', async () => {
+    const codes = Array.from({ length: 6 }, () => store.createPairingCode(120).code)
+
+    // Only the newest three survive; the earlier ones are gone.
+    for (const stale of codes.slice(0, 3)) {
+      expect(await store.redeemPairingCode(stale, 'a', 90, 100)).toBeNull()
+    }
+    for (const live of codes.slice(3)) {
+      expect(await store.redeemPairingCode(live, 'a', 90, 100)).not.toBeNull()
+    }
+  })
+
   it('rejects expired codes', async () => {
     const { code } = store.createPairingCode(-1)
     expect(await store.redeemPairingCode(code, 'a', 90, 10)).toBeNull()

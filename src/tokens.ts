@@ -85,8 +85,16 @@ export class TokenStore {
    */
   createPairingCode(ttlSec: number): { code: string, expiresAt: number } {
     this.prunePairingCodes()
-    if (this.pairingCodes.size >= MAX_PENDING_CODES) {
-      throw new Error('too many pending pairing codes')
+    // Regenerating is the normal owner action — the previous code expired, it
+    // went stale mid-scan, or it was shown on the wrong screen. Refusing the
+    // mint with an opaque error only strands the wizard, so the oldest code
+    // gives way. What limits a guesser is how many codes are valid at once,
+    // and that stays MAX_PENDING_CODES.
+    while (this.pairingCodes.size >= MAX_PENDING_CODES) {
+      const oldest = [...this.pairingCodes]
+        .sort((left, right) => left[1].expiresAt - right[1].expiresAt)[0]
+      if (oldest === undefined) break
+      this.pairingCodes.delete(oldest[0])
     }
     const raw = randomBytes(8)
     let code = ''

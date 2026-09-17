@@ -68,6 +68,17 @@ websocket {
 
 改完 `systemctl restart nats`。
 
+### 密码丢了怎么办
+
+`setup-hub.sh` 只在创建时打印一次密码（`openssl rand -hex 16`，32 位十六进制），之后不再回显；它存在的唯一位置是 Hub 上的 `/etc/nats/hub.conf`。用 `scripts/hub-credential.sh` 在 Hub 上读回或轮换：
+
+```bash
+ssh root@115.159.57.137 'bash -s show'   < scripts/hub-credential.sh   # 读回当前密码
+ssh root@115.159.57.137 'bash -s rotate' < scripts/hub-credential.sh   # 换成新随机密码
+```
+
+`rotate` 会先备份 `hub.conf`、只改那一个账号行、用 `nats-server -t` 校验，任何一步失败都原样回滚。轮换是安全的：App 不内置该凭证（经二维码下发），Leaf 用的是独立账号（`leaf-a`），已配对设备持有的是应用层 token——所以轮换后只需把新值填进插件设置卡，不必重新配对。
+
 > **单用户多终端**（2026-08-26 确认）：只有一个用户，所有终端共用 `c-end-dsh` 这一个账号，无需按机主/实例拆分账号。终端粒度的管理在应用层设备 token（见 01-auth-pairing.md）。账号不打进 App——经配对二维码传递。
 
 ### 4. 安全组
