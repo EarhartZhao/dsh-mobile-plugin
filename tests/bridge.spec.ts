@@ -275,6 +275,7 @@ describe('RpcBridge', () => {
       ['file-related', 'file.related', { sessionId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' }],
       ['file-reveal', 'file.reveal', { sessionId: 's1', path: 'C:/repo/a.ts' }],
       ['host-open', 'host.openPath', { path: 'C:/repo/a.ts' }],
+      ['workspace-unarchive', 'workspace.unarchiveSession', { sessionId: 's1' }],
     ] as const) {
       const msg = makeMsg(`${PREFIX}${method}`, { type: 'client-request', rpcId, method, payload }, validToken)
       await drive(msg)
@@ -312,6 +313,7 @@ describe('RpcBridge', () => {
       },
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts', action: 'reveal' } } },
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts' } } },
+      { namespace: 'workspace', method: 'unarchiveSession', args: { request: { sessionId: 's1' } } },
     ])
   })
 
@@ -475,13 +477,13 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.6',
+      pluginVersion: '0.2.7',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
         'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
         'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
-        'workspace-files', 'workspace-watch', 'workspace-stat', 'message-feedback', 'goal-state', 'open-path',
+        'workspace-files', 'workspace-watch', 'workspace-stat', 'message-feedback', 'workspace-unarchive', 'goal-state', 'open-path',
       ],
     })
     expect(carrierCalls).toHaveLength(0)

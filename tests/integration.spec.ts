@@ -12,7 +12,9 @@ import { RpcBridge, TOKEN_HEADER, type FetchCarrier } from '../src/bridge.js'
 import { EventBridge, type EventStreams, type StreamFrame } from '../src/events.js'
 import { TokenStore } from '../src/tokens.js'
 
-const PORT = 14222 + Math.floor(Math.random() * 1000)
+// A wide, suite-local port range keeps this server clear of the other suites'
+// servers; the readiness wait below tolerates a loaded machine.
+const PORT = 14222 + Math.floor(Math.random() * 2000)
 const SERVER_URL = `nats://127.0.0.1:${PORT}`
 const INSTANCE = 'itest'
 
@@ -39,7 +41,7 @@ beforeAll(async () => {
   const debug = process.env.NATS_TRACE === '1'
   server = spawn('nats-server', ['-p', String(PORT), ...(debug ? ['-DV'] : [])], { stdio: debug ? ['ignore', 'inherit', 'inherit'] : 'ignore' })
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('nats-server start timeout')), 8000)
+    const timer = setTimeout(() => reject(new Error('nats-server start timeout')), 20_000)
     const probe = setInterval(async () => {
       try {
         const nc = await connect({ servers: SERVER_URL, timeout: 500, maxReconnectAttempts: 0 })

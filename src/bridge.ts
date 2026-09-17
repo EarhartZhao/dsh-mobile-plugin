@@ -36,6 +36,7 @@ const ALLOWED_METHODS = new Set([
   'workspace.rename',
   'workspace.delete',
   'workspace.archiveSession',
+  'workspace.unarchiveSession',
   'workspace.insertBefore',
   'workspace.insertSessionBefore',
   'session.list',
@@ -93,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.6'
+export const PLUGIN_VERSION = '0.2.7'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -113,6 +114,7 @@ export const PLUGIN_FEATURES = [
   'workspace-watch',
   'workspace-stat',
   'message-feedback',
+  'workspace-unarchive',
   'goal-state',
   'open-path',
 ] as const
@@ -170,6 +172,7 @@ const DIRECT_REQUEST_METHODS = new Set([
   'session.fork', 'session.attachment', 'session.updateQueue', 'session.cancel',
   'workspace.create', 'workspace.rename', 'workspace.delete',
   'workspace.insertBefore', 'workspace.insertSessionBefore', 'workspace.archiveSession',
+  'workspace.unarchiveSession',
   'skill.list',
 ])
 
