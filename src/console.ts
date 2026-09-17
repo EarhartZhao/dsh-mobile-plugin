@@ -11,7 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import type { MobileBridge } from './index.js'
 import type { Config } from './config.js'
-import { checkHubCredentials, type HubCheckResult } from './hub-check.js'
+import { checkHubPath, type HubCheckResult } from './hub-check.js'
 
 export interface WebRouter {
   register(route: {
@@ -75,7 +75,11 @@ export function isLoopbackRequest(req: IncomingMessage): boolean {
 
 /** Register all console routes on the webserver; returns the disposer. */
 export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBackend): () => void {
-  const checkHub = backend.checkHub ?? ((config: Config) => checkHubCredentials(config))
+  // The default check covers the whole phone path, including whether the Hub
+  // can reach this instance — the link a credential-only test cannot see.
+  const checkHub = backend.checkHub ?? ((config: Config) => checkHubPath(config, {
+    localConnected: backend.bridge().status().connection === 'connected',
+  }))
   const disposers = [
     webServer.register({
       kind: 'exact',
@@ -159,6 +163,9 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         // so it mints with a warning instead.
         const hub = await checkHub(backend.currentConfig())
         if (hub.reason === 'rejected') return json(res, 400, { error: hub.message })
+        // A Hub that cannot reach this instance means the phone will get a bare
+        // no-responders 503. Unlike a credential typo this can heal on its own
+        // (the Leaf reconnects), so warn instead of refusing to mint.
         try {
           const pairing = backend.bridge().createPairingQr()
           const text = JSON.stringify(pairing.payload)
@@ -282,7 +289,7 @@ const CONSOLE_HTML = `<!doctype html>
   <button id="hubCheckBtn" class="secondary">测试 Hub 账号</button>
   <span id="saveMsg"></span>
 </div>
-<p id="hubCheckMsg" style="font-size:12px;margin:6px 0 0"></p>
+<p id="hubCheckMsg" style="font-size:12px;margin:6px 0 0;white-space:pre-line"></p>
 
 <h2>配对新设备</h2>
 <div class="row">
@@ -404,11 +411,18 @@ $('saveBtn').onclick = async () => {
 }
 
 async function checkHub() {
-  $('hubCheckMsg').className = ''; $('hubCheckMsg').textContent = '正在校验 Hub 账号…'
+  $('hubCheckMsg').className = ''; $('hubCheckMsg').textContent = '正在校验整条链路…'
   const r = await api('hub-check', {})
   const ok = r.reason === 'ok'
+  const mark = (step) => (step.ok ? '✓ ' : '✗ ')
+  const lines = (r.steps || []).map(step => mark(step) + step.message)
   $('hubCheckMsg').className = ok ? 'ok' : (r.reason === 'unreachable' ? '' : 'error')
-  $('hubCheckMsg').textContent = (ok ? '✓ ' : (r.reason === 'unreachable' ? '⚠ ' : '✗ ')) + r.message
+  // Double-escaped on purpose: this code lives inside the page's own template
+  // literal, where a single newline escape would become a real line break and
+  // break the generated script.
+  $('hubCheckMsg').textContent = lines.length > 0
+    ? lines.join('\\n')
+    : (ok ? '✓ ' : (r.reason === 'unreachable' ? '⚠ ' : '✗ ')) + r.message
 }
 
 $('hubCheckBtn').onclick = () => { void checkHub() }
