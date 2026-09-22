@@ -348,6 +348,7 @@ export class GatewayEventAdapter {
     if (frame.type === 'queue') this.publishQueue(sessionId, frame.items)
     else if (frame.type === 'jobs') this.publishJobs(sessionId, frame.jobs)
     else if (frame.type === 'projection' && typeof frame.key === 'string' && typeof frame.seq === 'number') {
+      if (frame.key === 'inbox') this.publishQueueFromInbox(sessionId, frame.value)
       this.muxSink?.({
         rpcId: randomUUID(),
         payload: { type: 'session/projection', sessionId, key: frame.key, value: frame.value, seq: frame.seq },
@@ -370,11 +371,32 @@ export class GatewayEventAdapter {
   private publishProjectionBaseline(sessionId: string, value: unknown): void {
     if (!isRecord(value) || typeof value.asOfSeq !== 'number' || !isRecord(value.values)) return
     for (const [key, projection] of Object.entries(value.values)) {
+      if (key === 'inbox') this.publishQueueFromInbox(sessionId, projection)
       this.muxSink?.({
         rpcId: randomUUID(),
         payload: { type: 'session/projection', sessionId, key, value: projection, seq: value.asOfSeq },
       })
     }
+  }
+
+  /**
+   * Legacy mobile queue frames from the `inbox` projection.
+   *
+   * dsh 0.1.6-alpha.2 removed the dedicated `queue` control frames and the
+   * baseline's `queues` table; clients now derive pending input from the
+   * Session's `inbox` projection, which is what the Web client reads. The App
+   * still consumes `session/queue`, so the bridge keeps the frozen wire stable
+   * by translating the projection the same way the Host used to.
+   */
+  private publishQueueFromInbox(sessionId: string, value: unknown): void {
+    if (!isRecord(value)) return
+    const nextTurn = Array.isArray(value['next-turn']) ? value['next-turn'] : []
+    const nextStep = Array.isArray(value['next-step']) ? value['next-step'] : []
+    const items = [
+      ...nextTurn.map(message => queuedItem(message, 'next-turn')),
+      ...nextStep.map(message => queuedItem(message, 'next-step')),
+    ].filter(item => item !== null)
+    this.muxSink?.({ rpcId: randomUUID(), payload: { type: 'session/queue', sessionId, items } })
   }
 
   private async pumpWorkspace(signal: AbortSignal): Promise<void> {
@@ -668,6 +690,32 @@ function workspaceValue(value: Record<string, unknown>): { items: unknown[]; arc
   return {
     items: Array.isArray(value.items) ? [...value.items] : [],
     archivedSessionIds: Array.isArray(value.archivedSessionIds) ? [...value.archivedSessionIds] : [],
+  }
+}
+
+/**
+ * One legacy queue row from one pending `inbox` message. `next-turn` entries
+ * are queued turns; `next-step` entries are steering when the human authored
+ * them and context when a plugin injected them, matching the Host's own
+ * derivation before it dropped the queue frames.
+ */
+function queuedItem(value: unknown, target: 'next-turn' | 'next-step'): Record<string, unknown> | null {
+  if (!isRecord(value) || typeof value.id !== 'string') return null
+  const source = isRecord(value.source) ? value.source : {}
+  const sourceKind = typeof source.kind === 'string' ? source.kind : ''
+  const placement = target === 'next-turn' ? 'queued' : sourceKind === 'user' ? 'steering' : 'context'
+  return {
+    id: value.id,
+    placement,
+    message: {
+      id: value.id,
+      role: 'user',
+      content: Array.isArray(value.content) ? value.content : [],
+      source: {
+        kind: 'user',
+        ...(typeof source.rpcId === 'string' ? { rpcId: source.rpcId } : {}),
+      },
+    },
   }
 }
 

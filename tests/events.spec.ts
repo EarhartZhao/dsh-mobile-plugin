@@ -214,6 +214,69 @@ describe('GatewayEventAdapter', () => {
     await iterator.return?.()
   })
 
+  it('derives legacy queue frames from the inbox projection (0.1.6-alpha.2+)', async () => {
+    const controller = new AbortController()
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async ({ namespace, method, signal = controller.signal }) => {
+        expect([namespace, method]).toEqual(['session', 'control'])
+        return objectStream([
+          {
+            type: 'baseline',
+            value: {
+              jobs: {},
+              projections: {
+                s1: {
+                  asOfSeq: 7,
+                  values: {
+                    inbox: {
+                      'next-turn': [{ id: 'm1', content: [{ type: 'text', text: 'queued turn' }], source: { kind: 'user', rpcId: 'r1' } }],
+                      'next-step': [
+                        { id: 'm2', content: [{ type: 'text', text: 'steer' }], source: { kind: 'user' } },
+                        { id: 'm3', content: [{ type: 'text', text: 'injected' }], source: { kind: 'plugin' } },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        ], signal)
+      },
+    })
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const frames = await take(iterator, 2)
+    const queueFrame = frames[0]
+    expect(queueFrame.payload).toMatchObject({ type: 'session/queue', sessionId: 's1' })
+    expect(queueFrame.payload.items).toEqual([
+      {
+        id: 'm1', placement: 'queued',
+        message: {
+          id: 'm1', role: 'user', content: [{ type: 'text', text: 'queued turn' }],
+          source: { kind: 'user', rpcId: 'r1' },
+        },
+      },
+      {
+        id: 'm2', placement: 'steering',
+        message: {
+          id: 'm2', role: 'user', content: [{ type: 'text', text: 'steer' }],
+          source: { kind: 'user' },
+        },
+      },
+      {
+        id: 'm3', placement: 'context',
+        message: {
+          id: 'm3', role: 'user', content: [{ type: 'text', text: 'injected' }],
+          source: { kind: 'user' },
+        },
+      },
+    ])
+    expect(frames[1].payload).toMatchObject({ type: 'session/projection', key: 'inbox', seq: 7 })
+    controller.abort()
+    await iterator.return?.()
+  })
+
   it('projects workspace follow frames and retains the latest snapshot', async () => {
     const controller = new AbortController()
     const workspace = { workspaceId: 'w1', name: 'One' }
@@ -281,6 +344,42 @@ describe('GatewayEventAdapter', () => {
     ])
     controller.abort()
     await iterator.return?.()
+  })
+
+  it('relays the plugin-manager events the host forwards from 0.1.6-alpha.2', async () => {
+    const controller = new AbortController()
+    const adapter = new GatewayEventAdapter({
+      wireStream: {
+        open: async (_endpoint, _payload, signal) => objectStream([
+          { type: 'ready', clientId: 'client-1' },
+          { type: 'emit', event: 'plugin-manager/changed', args: [{ entryId: 'dsh-mobile-plugin', enabled: false }] },
+          { type: 'emit', event: 'plugin-manager/install-state', args: [{ entryId: 'dsh-mobile-plugin', state: 'installing' }] },
+        ], signal),
+      },
+      invoke: async () => ({ items: [] }),
+      stream: async ({ signal = controller.signal }) => objectStream([], signal),
+    })
+
+    const mux = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const host = adapter.events.host({ rpcId: 'host' }, controller.signal)[Symbol.asyncIterator]()
+    // The `$events` pump belongs to the mux body, so the host stream only sees
+    // relayed events once the mux generation has started.
+    const primed = mux.next()
+    const frames = await take(host, 2)
+    expect(frames.map(frame => frame.payload)).toEqual([
+      {
+        type: 'host/remote-event', event: 'plugin-manager/changed',
+        args: [{ entryId: 'dsh-mobile-plugin', enabled: false }],
+      },
+      {
+        type: 'host/remote-event', event: 'plugin-manager/install-state',
+        args: [{ entryId: 'dsh-mobile-plugin', state: 'installing' }],
+      },
+    ])
+    controller.abort()
+    await primed
+    await mux.return?.()
+    await host.return?.()
   })
 
   it('caps concurrent file watches and releases the least recent', async () => {

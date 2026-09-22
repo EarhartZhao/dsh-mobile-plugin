@@ -72,6 +72,14 @@ app 侧的 `packages/core/src/compatibility.ts` 会通过 `mobile.info` RPC 校�
 
 ## 已知迁移场景
 
+### dsh 0.1.6-alpha.2：移除 `session/control` 队列帧
+
+**问题**：`SessionControlBaseline.queues` 与 `{type:'queue'}` 控制帧被删除，宿主只发布会话的 `inbox` 投影（`InboxState = {'next-turn': UserMessage[], 'next-step': UserMessage[]}`，Web 端经 `session.projections.faceOf('inbox')` 读取）。按旧 wire 转发队列的桥会让 App 的队列 UI 静默失效。
+
+**迁移**（插件 0.2.8+）：`GatewayEventAdapter` 在 `inbox` 投影的 baseline 与增量帧上调用 `publishQueueFromInbox`，把 `next-turn` 映射为 `placement: 'queued'`、`next-step` 按 `source.kind === 'user'` 映射为 `steering`，否则 `context`，再以既有的 `session/queue` 帧下发；旧的 `queueItem()` 保留，继续服务仍发队列帧的老宿主。
+
+**注意**：`inbox` 投影只在会话挂着活动 Agent 时存在，与 alpha.1 只在 `agent?.session === session` 时填充 `queues` 的语义一致——没有活动会话时观察不到队列帧属于预期。
+
 ### dsh 0.1.2-alpha.2：移除 ApiProxy
 
 **问题**：`toFetchHandler` 和 `HostApiProxy` 不再存在，`ctx.get('apiProxy')` 返回 undefined。

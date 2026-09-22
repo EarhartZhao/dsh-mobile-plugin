@@ -16,6 +16,8 @@
 
 0.2.7 接入 `workspace.unarchiveSession` → `workspace/unarchiveSession`（dsh 0.1.6 新增的 Remote），把归档会话恢复到列表；白名单与 direct-request 映射同步更新，能力位 `workspace-unarchive` 让 App 在旧插件上隐藏该入口。
 
+0.2.8 适配 dsh 0.1.6-alpha.2 删除的 `session/control` 队列帧：宿主改为只发布会话的 `inbox` 投影（Web 端就读它），插件把该投影翻译回既有的 `session/queue` 帧，App 的队列 UI 与冻结 wire 都不用改；`inbox` 投影只在会话挂着活动 Agent 时存在，与 alpha.1 的 `queues[session]` 语义一致。同时把宿主 0.1.6-alpha.2 新增转发的 `plugin-manager/changed|install-state|install-log` 事件透传到既有的 `host/remote-event`（本身无需改动，只是登记在案），App 插件页据此免手动刷新。
+
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
 
 ## 首次配置（顺序不能颠倒）
