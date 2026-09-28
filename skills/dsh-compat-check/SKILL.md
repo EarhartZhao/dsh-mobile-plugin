@@ -72,6 +72,29 @@ app 侧的 `packages/core/src/compatibility.ts` 会通过 `mobile.info` RPC 校�
 
 ## 已知迁移场景
 
+### dsh 0.1.7：Gateway 上行、文件面收窄、子代理目录与 jobs 换源
+
+**问题**：五处破坏性变更会让桥「看起来还活着，功能静默消失」。
+
+| 变更 | 症状 |
+|---|---|
+| `TypertGatewayWireStream.open` 变成 `(endpoint, payload, uplink, peer, signal)` | 仍传三参数的桥把 AbortSignal 当 uplink，`$events` 报 `signals[0] must be an instance of AbortSignal`；审批、提问、`host/session-*`、`commands/change`、`plugin-manager/*`、`workspace-files/*` 全部失效 |
+| `workspaceFiles/readBytes` 的窗口移入 `options`，`data` 变原生字节 | `gateway/arguments-invalid: missing "options"`；即使参数对上，原样 JSON 化会把字节变成 `{"0":137,...}` |
+| `workspaceFiles/readRelated` 删除 | `gateway/invocation-unavailable`；Markdown 预览的相对图片全丢 |
+| `workspaceFiles/changes` 需要 `path`（单目标 watch） | 不带 path 的调用参数校验失败；带 path 后只报该目标自身的失效 |
+| `subagents/list` 删除 | `gateway/invocation-unavailable`；子代理面板空白 |
+| `session/control` 的 jobs 基线与 `{type:'jobs'}` 帧删除 | 后台任务条永久为空（与 0.1.6-alpha.2 删 queue 帧同一套路） |
+
+**迁移**（插件 0.2.9+）：
+
+1. `openEventStream` 按 `open.length > 3` 选择新/旧调用形状。
+2. `file.bytes` 发 `options.range`、`file.related` 发 `options.baseFile`，返回值统一把原生字节编回 base64；宿主回 `gateway/arguments-invalid` / `gateway/invocation-unavailable` 时 `invokeRemote` 退回旧形状。
+3. `file.watch`/`file.unwatch` 带可选 `path`，桥按 (session, path) LRU 4 条流。
+4. `subagent.list` = `session/projections` 的 `subagentCatalog` ∩ `session/list`（合成 `activity`/`hasChildren`/`parentAvailable`），宿主不认识时回退 `subagents/list`。
+5. jobs = `job` 命名空间的 `list` 流（Service 键是 `jobController`，wire namespace 是 `job`），在 App 打开会话时挂流，翻译回 `session/jobs`。
+
+**排查提示**：`wireStream.open` 这类签名变化没有版本握手，插件只能靠 arity 或能力探测；真机复现最快的办法是读 `/mobile-bridge/api/status` 的 `lastError`，以及用 `scripts/compat-probe.mjs` / `scripts/queue-probe.mjs` 直连 NATS 打一遍方法。
+
 ### dsh 0.1.6-alpha.2：移除 `session/control` 队列帧
 
 **问题**：`SessionControlBaseline.queues` 与 `{type:'queue'}` 控制帧被删除，宿主只发布会话的 `inbox` 投影（`InboxState = {'next-turn': UserMessage[], 'next-step': UserMessage[]}`，Web 端经 `session.projections.faceOf('inbox')` 读取）。按旧 wire 转发队列的桥会让 App 的队列 UI 静默失效。

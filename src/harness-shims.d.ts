@@ -26,7 +26,13 @@ declare module '@deepseek-ai/dsh-client-connection' {
 declare module '@deepseek-ai/dsh-api-gateway' {
   /** Carrier-facing access to decoded Remote streams. */
   export interface TypertGatewayWireStream {
-    open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>
+    /**
+     * dsh 0.1.6-alpha.2 and older: `(endpoint, payload, signal)`. dsh 0.1.7
+     * inserted the Client uplink and the speaking Peer:
+     * `(endpoint, payload, uplink, peer, signal)`. The plugin picks the shape
+     * by declared arity; see `openEventStream` in `src/events.ts`.
+     */
+    open(...args: never[]): Promise<AsyncIterable<unknown>>
     failure(error: unknown): { code: string, message: string, details: object }
   }
 

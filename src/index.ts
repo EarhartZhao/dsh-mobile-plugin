@@ -379,7 +379,12 @@ export class MobileBridge extends Service {
       tokens: this.tokens,
       tokenTtlDays: this.current.tokenTtlDays,
       maxDevices: this.current.maxDevices,
-      onHello: () => this.eventBridge?.replayPending(),
+      onHello: () => {
+        this.eventBridge?.replayPending()
+        // The App's store starts empty after a reconnect: without the roster
+        // replay its job strip would stay blank until some job changed.
+        eventAdapter.replayJobs()
+      },
       onInventory: async () => gateway.invoke({ namespace: 'pluginInventory', method: 'list', args: {} }).catch(() => null),
       onHealth: () => ({ status: 'ok', ...this.status() }),
       onHostDescribe: async () => {
@@ -399,8 +404,9 @@ export class MobileBridge extends Service {
       },
       onWorkspaceList: () => eventAdapter.workspaceSnapshot(),
       onSessionSeen: address => eventAdapter.watchSession(address),
-      onFileWatch: sessionId => eventAdapter.watchFiles(sessionId),
-      onFileUnwatch: sessionId => eventAdapter.unwatchFiles(sessionId),
+      onFileWatch: (sessionId, path) => eventAdapter.watchFiles(sessionId, path),
+      onFileUnwatch: (sessionId, path) => eventAdapter.unwatchFiles(sessionId, path),
+      onSessionOpened: sessionId => eventAdapter.watchJobs(sessionId),
       onRespond: (rpcId, result) => eventAdapter.respond(rpcId, result),
     })
     this.rpcBridge.start()

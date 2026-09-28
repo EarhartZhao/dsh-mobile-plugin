@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.8'
+export const PLUGIN_VERSION = '0.2.9'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -145,10 +145,19 @@ export interface BridgeOptions {
   onWorkspaceList?: () => unknown | Promise<unknown>
   /** Called when a Session address becomes relevant to the mobile client. */
   onSessionSeen?: (address: SessionAddress) => void
-  /** Start (or re-arm) the workspace file-change stream of one Session. */
-  onFileWatch?: (sessionId: string) => void
-  /** Release one Session's workspace file-change stream. */
-  onFileUnwatch?: (sessionId: string) => void
+  /**
+   * Called when the App opens one Session's transcript. Job rosters are host
+   * streams, so they are armed here rather than for every listed Session.
+   */
+  onSessionOpened?: (sessionId: string) => void
+  /**
+   * Start (or re-arm) one workspace file-change stream. dsh 0.1.7 watches a
+   * single target, so the browser names the directory it shows; an empty path
+   * means the workspace root.
+   */
+  onFileWatch?: (sessionId: string, path?: string) => void
+  /** Release one target watch; the same path the arming call named. */
+  onFileUnwatch?: (sessionId: string, path?: string) => void
   /** Settle one Gateway Remote Event using its original event-stream generation. */
   onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
 }
@@ -297,10 +306,9 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
       args: {
         workspaceFileScopeId: request.sessionId,
         path: request.path,
-        range: {
-          ...(typeof request.offset === 'number' ? { offset: request.offset } : {}),
-          ...(typeof request.length === 'number' ? { length: request.length } : {}),
-        },
+        // dsh 0.1.7 moved the window under `options`; the top-level `range`
+        // this bridge used through 0.1.6-alpha.2 now fails argument validation.
+        options: { range: byteRange(request) },
       },
     }
   }
@@ -313,14 +321,15 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
     }
   }
   if (method === 'file.related') {
-    // Resolves one path relative to another file's directory, so Markdown
-    // previews can pull the images they reference.
+    // dsh 0.1.7 folded `readRelated` into `readBytes`: the target stays
+    // relative and the base file names the directory it resolves against.
+    // Markdown previews pull the images they reference through this.
     return {
-      namespace: 'workspaceFiles', method: 'readRelated',
+      namespace: 'workspaceFiles', method: 'readBytes',
       args: {
         workspaceFileScopeId: request.sessionId,
-        path: request.path,
-        relativePath: request.relativePath,
+        path: request.relativePath,
+        options: { baseFile: request.path },
       },
     }
   }
@@ -377,6 +386,97 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
   return null
 }
 
+/**
+ * The App's frozen subagent catalog, built from the parent's `subagentCatalog`
+ * projection and the current Session list.
+ *
+ * A projection row carries identity, creation time, mode, and label. The App
+ * also renders liveness (`activity`) and nesting (`hasChildren`), which the
+ * Session list answers: a child's own running turn, and its presence as some
+ * other Session's `parentSessionId`. The parent's `agentAvailable` is the
+ * delivery-time hint the App gates continuation on.
+ * @param parentSessionId - Session whose direct children are requested.
+ * @param projection - `session/projections` value for that Session, or null.
+ * @param sessions - `session/list` value for the whole Host.
+ * @returns the catalog shape `subagents/list` published through 0.1.6-alpha.2.
+ */
+function subagentCatalogValue(parentSessionId: string, projection: unknown, sessions: unknown): unknown {
+  const values = isRecord(projection) && isRecord(projection.values) ? projection.values : {}
+  const rows = Array.isArray(values['subagentCatalog']) ? values['subagentCatalog'] : []
+  const summaries = isRecord(sessions) && Array.isArray(sessions.items)
+    ? sessions.items.filter(isRecord)
+    : []
+  const parent = summaries.find(summary => summary['sessionId'] === parentSessionId)
+  const entries = rows.flatMap((row) => {
+    if (!isRecord(row) || typeof row.id !== 'string') return []
+    const child = summaries.find(summary => summary['sessionId'] === row.id)
+    return [{
+      kind: 'child',
+      id: row.id,
+      // A mode the record could not determine is not continuable, and the App
+      // only distinguishes those two; it stays readable as a one-shot child.
+      mode: row.mode === 'continuable' ? 'continuable' : 'one-shot',
+      ...(typeof row.label === 'string' ? { label: row.label } : {}),
+      activity: child?.['running'] === true ? 'running' : 'inactive',
+      hasChildren: summaries.some(summary => summary['parentSessionId'] === row.id),
+    }]
+  })
+  return { entries, parentAvailable: parent?.['agentAvailable'] === true }
+}
+
+/** The byte window one mobile `file.bytes` request asks for, as the Host spells it. */
+function byteRange(request: Record<string, unknown>): Record<string, number> {
+  return {
+    ...(typeof request.offset === 'number' ? { offset: request.offset } : {}),
+    ...(typeof request.length === 'number' ? { length: request.length } : {}),
+  }
+}
+
+/**
+ * The workspace-relative target one `file.watch` request names. The empty
+ * string is the workspace root, which the Host spells `'.'`; dsh 0.1.7 watches
+ * exactly one target per stream, so the App sends the directory it shows.
+ */
+function watchPath(request: Record<string, unknown>): string {
+  return typeof request.path === 'string' ? request.path : ''
+}
+
+/**
+ * The pre-0.1.7 shape of the two file-read mappings, or null for every method
+ * whose arguments dsh has not changed.
+ */
+function legacyRemoteCall(method: string, payload: unknown, _rpcId: string): RemoteCall | null {
+  const request = isRecord(payload) ? payload : {}
+  if (method === 'file.bytes') {
+    return {
+      namespace: 'workspaceFiles', method: 'readBytes',
+      args: { workspaceFileScopeId: request.sessionId, path: request.path, range: byteRange(request) },
+    }
+  }
+  if (method === 'file.related') {
+    return {
+      namespace: 'workspaceFiles', method: 'readRelated',
+      args: { workspaceFileScopeId: request.sessionId, path: request.path, relativePath: request.relativePath },
+    }
+  }
+  return null
+}
+
+/**
+ * Mobile wire keeps one byte window base64-encoded, because its carrier is
+ * JSON. dsh 0.1.7 returns native bytes from `workspaceFiles/readBytes`, which
+ * JSON would encode as an index map and the App's frozen schema would reject.
+ * @param value - the Host's `WorkspaceFileBytes`.
+ * @returns the same window with a base64 `data` field.
+ */
+function fileBytesValue(value: unknown): unknown {
+  if (!isRecord(value) || typeof value.data === 'string') return value
+  const bytes = value.data instanceof Uint8Array
+    ? value.data
+    : Array.isArray(value.data) ? Uint8Array.from(value.data as number[]) : undefined
+  return bytes === undefined ? value : { ...value, data: Buffer.from(bytes).toString('base64') }
+}
+
 export interface SessionAddress {
   kind: 'session' | 'subagent'
   sessionId?: string
@@ -401,6 +501,13 @@ function addressKey(address: SessionAddress): string {
   return address.kind === 'session'
     ? `session:${String(address.sessionId ?? '')}`
     : `subagent:${String(address.parentSessionId ?? '')}:${String(address.childSessionId ?? '')}:${String(address.mode ?? '')}`
+}
+
+/** The Session a history read targets: the child for a subagent address. */
+function sessionAddressTarget(address: SessionAddress): string {
+  return address.kind === 'subagent'
+    ? String(address.childSessionId ?? '')
+    : String(address.sessionId ?? '')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -639,7 +746,7 @@ export class RpcBridge {
             msg.respond(new TextEncoder().encode(gateFailure(rpcId, 'mobile-forbidden')))
             return
           }
-          this.options.onFileWatch(request.sessionId)
+          this.options.onFileWatch(request.sessionId, watchPath(request))
           msg.respond(new TextEncoder().encode(serverResult(id, { watching: true })))
           return
         }
@@ -647,7 +754,7 @@ export class RpcBridge {
           const request = isRecord(payload) ? payload : {}
           // Releasing is best-effort: an unknown Session or an absent hook must
           // not fail the caller that is merely closing its browser.
-          if (typeof request.sessionId === 'string') this.options.onFileUnwatch?.(request.sessionId)
+          if (typeof request.sessionId === 'string') this.options.onFileUnwatch?.(request.sessionId, watchPath(request))
           msg.respond(new TextEncoder().encode(serverResult(id, { watching: false })))
           return
         }
@@ -656,6 +763,7 @@ export class RpcBridge {
           const address = addressFromHistory(method, request)
           const key = addressKey(address)
           this.options.onSessionSeen?.(address)
+          this.options.onSessionOpened?.(sessionAddressTarget(address))
           const beforeSeq = typeof request.beforeSeq === 'number' ? request.beforeSeq : undefined
           if (beforeSeq !== undefined) {
             let throughSeq = this.historyCursors.get(key)
@@ -687,6 +795,12 @@ export class RpcBridge {
           msg.respond(new TextEncoder().encode(serverResult(id, historyValue(first))))
           return
         }
+        if (method === 'subagent.list') {
+          const request = isRecord(payload) ? payload : {}
+          const parentSessionId = typeof request.parentSessionId === 'string' ? request.parentSessionId : ''
+          msg.respond(new TextEncoder().encode(serverResult(id, await this.subagentCatalog(parentSessionId))))
+          return
+        }
         if (method === 'respond') {
           const accepted = await this.options.onRespond?.(id, envelope.result) ?? false
           msg.respond(new TextEncoder().encode(JSON.stringify(accepted
@@ -696,7 +810,7 @@ export class RpcBridge {
         } else {
           const call = remoteCall(method, payload, id)
           if (call !== null) {
-            const value = await this.options.gateway.invoke(call)
+            const value = await this.invokeRemote(call, method, payload, id)
             if (method === 'session.list' && isRecord(value) && Array.isArray(value.items)) {
               for (const item of value.items) {
                 if (isRecord(item) && typeof item.sessionId === 'string') {
@@ -719,6 +833,8 @@ export class RpcBridge {
                 ? { commands: value }
                 : method === 'agentPreset.select' && typeof value === 'string'
                   ? { agentPreset: value }
+                  : method === 'file.bytes' || method === 'file.related'
+                    ? fileBytesValue(value)
               : value
             msg.respond(new TextEncoder().encode(serverResult(id, normalized)))
             return
@@ -744,5 +860,72 @@ export class RpcBridge {
     const response = await this.options.carrier.fetch(request)
     const bytes = new Uint8Array(await response.arrayBuffer())
     msg.respond(bytes)
+  }
+
+  /**
+   * Invoke one mapped Remote call, retrying the pre-0.1.7 argument shape when
+   * a Host rejects the current one.
+   *
+   * dsh 0.1.7 moved the `readBytes` window under `options` and folded
+   * `readRelated` into it, so the two file-read mappings are the only ones
+   * carrying a legacy shape. A Host that predates the change answers
+   * `gateway/arguments-invalid` or `gateway/invocation-unavailable`; anything
+   * else (a missing file, an oversized page) is a real failure and surfaces
+   * unchanged.
+   * @param call - the current Remote call for this mobile method.
+   * @param method - mobile method name, used to pick the legacy shape.
+   * @param payload - original mobile payload.
+   * @param rpcId - correlation id the prompt-RPC-identity args reuse.
+   * @returns the Remote value from whichever shape this Host accepts.
+   */
+  private async invokeRemote(call: RemoteCall, method: string, payload: unknown, rpcId: string): Promise<unknown> {
+    const gateway = this.options.gateway
+    if (gateway === undefined) throw new Error('host gateway unavailable')
+    try {
+      return await gateway.invoke(call)
+    } catch (error: unknown) {
+      const legacy = legacyRemoteCall(method, payload, rpcId)
+      if (legacy === null) throw error
+      const code = gateway.wireStream.failure(error).code
+      if (code !== 'gateway/arguments-invalid' && code !== 'gateway/invocation-unavailable') throw error
+      return await gateway.invoke(legacy)
+    }
+  }
+
+  /**
+   * The direct-child catalog the mobile wire expects, derived from the sources
+   * dsh 0.1.7 still publishes.
+   *
+   * 0.1.7 removed the `subagents/list` Remote: a parent now owns its children
+   * as the durable `subagentCatalog` projection, readable without activating
+   * either side through `session/projections`. The App's frozen catalog also
+   * shows each child's liveness and whether it has children of its own, which
+   * no projection carries, so those come from the Session list the same
+   * generation answers with. A Host older than 0.1.7 still serves
+   * `subagents/list`, and only that call failing as an unknown endpoint falls
+   * back to it.
+   * @param parentSessionId - Session whose direct children are requested.
+   * @returns the catalog the App's frozen wire describes.
+   */
+  private async subagentCatalog(parentSessionId: string): Promise<unknown> {
+    const gateway = this.options.gateway
+    if (gateway === undefined) throw new Error('host gateway unavailable')
+    if (parentSessionId === '') return { entries: [], parentAvailable: false }
+    try {
+      const [projection, sessions] = await Promise.all([
+        gateway.invoke({
+          namespace: 'session', method: 'projections',
+          args: { request: { sessionId: parentSessionId } },
+        }),
+        gateway.invoke({ namespace: 'session', method: 'list', args: { _request: {} } }),
+      ])
+      return subagentCatalogValue(parentSessionId, projection, sessions)
+    } catch (error: unknown) {
+      const code = gateway.wireStream.failure(error).code
+      if (code !== 'gateway/arguments-invalid' && code !== 'gateway/invocation-unavailable') throw error
+      return await gateway.invoke({
+        namespace: 'subagents', method: 'list', args: { parentSessionId },
+      })
+    }
   }
 }

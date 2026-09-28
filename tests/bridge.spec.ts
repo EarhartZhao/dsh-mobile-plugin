@@ -111,16 +111,28 @@ describe('RpcBridge', () => {
     onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
     onFileWatch?: (sessionId: string) => void
     onFileUnwatch?: (sessionId: string) => void
+    onSessionOpened?: (sessionId: string) => void
+    /** Per-call override, for hosts that reject the first shape they are sent. */
+    invoke?: (request: { namespace: string, method: string, args: Record<string, unknown> }, calls: any[]) => Promise<unknown>
+    /** Carrier-side failure decoding, so tests exercise codes instead of messages. */
+    failure?: (error: unknown) => { code: string, message: string, details: object }
   } = {}): { calls: any[] } {
     const calls: any[] = []
     const gateway: GatewayCarrier = {
-      invoke: async request => { calls.push(request); return options.value ?? { accepted: true } },
+      invoke: async request => {
+        calls.push(request)
+        return options.invoke === undefined ? options.value ?? { accepted: true } : await options.invoke(request, calls)
+      },
       stream: async request => {
         calls.push(request)
         const values = options.stream ?? []
         return (async function* () { yield* values })()
       },
-      wireStream: { failure: error => ({ code: 'gateway/internal', message: String(error), details: {} }) },
+      wireStream: {
+        failure: options.failure ?? (error => {
+          return { code: 'gateway/internal', message: String(error), details: {} }
+        }),
+      },
     }
     const nc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(nc, {
@@ -132,6 +144,7 @@ describe('RpcBridge', () => {
       ...(options.onRespond === undefined ? {} : { onRespond: options.onRespond }),
       ...(options.onFileWatch === undefined ? {} : { onFileWatch: options.onFileWatch }),
       ...(options.onFileUnwatch === undefined ? {} : { onFileUnwatch: options.onFileUnwatch }),
+      ...(options.onSessionOpened === undefined ? {} : { onSessionOpened: options.onSessionOpened }),
     })
     return { calls }
   }
@@ -304,12 +317,17 @@ describe('RpcBridge', () => {
       },
       {
         namespace: 'workspaceFiles', method: 'readBytes',
-        args: { workspaceFileScopeId: 's1', path: 'shot.png', range: { length: 1024 } },
+        args: { workspaceFileScopeId: 's1', path: 'shot.png', options: { range: { length: 1024 } } },
       },
       { namespace: 'workspaceFiles', method: 'stat', args: { workspaceFileScopeId: 's1', path: 'src/a.ts' } },
       {
-        namespace: 'workspaceFiles', method: 'readRelated',
-        args: { workspaceFileScopeId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' },
+        // dsh 0.1.7 folded `readRelated` into `readBytes` with a base file.
+        namespace: 'workspaceFiles', method: 'readBytes',
+        args: {
+          workspaceFileScopeId: 's1',
+          path: 'img/shot.png',
+          options: { baseFile: 'docs/readme.md' },
+        },
       },
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts', action: 'reveal' } } },
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts' } } },
@@ -317,15 +335,191 @@ describe('RpcBridge', () => {
     ])
   })
 
+  it('arms the job roster of the Session the App opens', async () => {
+    const opened: string[] = []
+    useGateway({
+      stream: [{
+        type: 'snapshot', cursor: 1, records: [], hasMore: false, projections: { asOfSeq: 1, values: {} },
+      }],
+      onSessionOpened: sessionId => { opened.push(sessionId) },
+    })
+    const msg = makeMsg(`${PREFIX}subagent.history`, {
+      type: 'client-request', rpcId: 'open-1', method: 'subagent.history',
+      payload: { parentSessionId: 'p1', childSessionId: 'c1', mode: 'continuable', maxMessages: 5 },
+    }, validToken)
+    await drive(msg)
+    // A subagent transcript arms the child's own roster, not the parent's.
+    expect(opened).toEqual(['c1'])
+  })
+
+  it('derives the subagent catalog from the parent projection on 0.1.7 hosts', async () => {
+    const gateway = useGateway({
+      invoke: async request => {
+        if (request.method === 'projections') {
+          return {
+            asOfSeq: 4,
+            values: {
+              subagentCatalog: [
+                { id: 'child-1', createdAt: 1, mode: 'continuable', label: 'worker' },
+                { id: 'child-2', createdAt: 2, mode: 'unknown' },
+              ],
+            },
+          }
+        }
+        return {
+          items: [
+            { sessionId: 'p1', agentAvailable: true, running: true, blank: false, updatedAt: 9 },
+            { sessionId: 'child-1', parentSessionId: 'p1', agentAvailable: true, running: true, blank: false, updatedAt: 9 },
+            { sessionId: 'child-2', parentSessionId: 'child-1', agentAvailable: false, running: false, blank: false, updatedAt: 9 },
+          ],
+        }
+      },
+    })
+    const msg = makeMsg(`${PREFIX}subagent.list`, {
+      type: 'client-request', rpcId: 'sub-list', method: 'subagent.list', payload: { parentSessionId: 'p1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual({
+      entries: [
+        { kind: 'child', id: 'child-1', mode: 'continuable', label: 'worker', activity: 'running', hasChildren: true },
+        { kind: 'child', id: 'child-2', mode: 'one-shot', activity: 'inactive', hasChildren: false },
+      ],
+      parentAvailable: true,
+    })
+    expect(gateway.calls.map(call => `${call.namespace}/${call.method}`))
+      .toEqual(['session/projections', 'session/list'])
+  })
+
+  it('falls back to subagents/list on Hosts that predate the parent projection', async () => {
+    const legacyCatalog = {
+      entries: [{ kind: 'child', id: 'c1', mode: 'one-shot', activity: 'inactive', hasChildren: false }],
+      parentAvailable: false,
+    }
+    const gateway = useGateway({
+      invoke: async request => {
+        if (request.namespace === 'session') {
+          throw Object.assign(new Error('no active Remote method exports this endpoint'), {
+            code: 'gateway/invocation-unavailable',
+          })
+        }
+        return legacyCatalog
+      },
+      failure: error => ({
+        code: (error as { code?: string }).code ?? 'gateway/internal',
+        message: String(error),
+        details: {},
+      }),
+    })
+    const msg = makeMsg(`${PREFIX}subagent.list`, {
+      type: 'client-request', rpcId: 'sub-legacy', method: 'subagent.list', payload: { parentSessionId: 'p1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.value).toEqual(legacyCatalog)
+    expect(gateway.calls.at(-1)).toEqual({
+      namespace: 'subagents', method: 'list', args: { parentSessionId: 'p1' },
+    })
+  })
+
+  it('base64-encodes the native bytes dsh 0.1.7 returns from a file read', async () => {
+    useGateway({
+      value: {
+        absolutePath: '/repo/shot.png', version: 'v1', bytes: 3, offset: 0,
+        data: new Uint8Array([1, 2, 250]), eof: true,
+      },
+    })
+    const msg = makeMsg(`${PREFIX}file.bytes`, {
+      type: 'client-request', rpcId: 'bytes-1', method: 'file.bytes',
+      payload: { sessionId: 's1', path: 'shot.png', length: 3 },
+    }, validToken)
+    await drive(msg)
+    const reply = replyJson(msg)
+    expect(reply.result.ok).toBe(true)
+    expect(reply.result.value.data).toBe(Buffer.from([1, 2, 250]).toString('base64'))
+    expect(reply.result.value.version).toBe('v1')
+  })
+
+  it('retries the pre-0.1.7 readBytes and readRelated shapes when a Host rejects them', async () => {
+    const legacy = { absolutePath: '/repo/shot.png', version: 'v1', offset: 0, data: 'AAE=', eof: true }
+    const gateway = useGateway({
+      invoke: async request => {
+        // A Host older than 0.1.7 answers the current shape with a validation
+        // failure: the window is top-level, and a related read has its own method.
+        if (request.args.options !== undefined) {
+          throw Object.assign(new Error('args fields do not match the descriptor'), { code: 'gateway/arguments-invalid' })
+        }
+        return request.method === 'readRelated' ? legacy : legacy
+      },
+      failure: error => ({
+        code: (error as { code?: string }).code ?? 'gateway/internal',
+        message: String(error),
+        details: {},
+      }),
+    })
+
+    const bytes = makeMsg(`${PREFIX}file.bytes`, {
+      type: 'client-request', rpcId: 'bytes-legacy', method: 'file.bytes',
+      payload: { sessionId: 's1', path: 'shot.png', length: 16 },
+    }, validToken)
+    await drive(bytes)
+    expect(replyJson(bytes).result.ok).toBe(true)
+
+    const related = makeMsg(`${PREFIX}file.related`, {
+      type: 'client-request', rpcId: 'related-legacy', method: 'file.related',
+      payload: { sessionId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' },
+    }, validToken)
+    await drive(related)
+    expect(replyJson(related).result.ok).toBe(true)
+
+    expect(gateway.calls).toEqual([
+      {
+        namespace: 'workspaceFiles', method: 'readBytes',
+        args: { workspaceFileScopeId: 's1', path: 'shot.png', options: { range: { length: 16 } } },
+      },
+      {
+        namespace: 'workspaceFiles', method: 'readBytes',
+        args: { workspaceFileScopeId: 's1', path: 'shot.png', range: { length: 16 } },
+      },
+      {
+        namespace: 'workspaceFiles', method: 'readBytes',
+        args: { workspaceFileScopeId: 's1', path: 'img/shot.png', options: { baseFile: 'docs/readme.md' } },
+      },
+      {
+        namespace: 'workspaceFiles', method: 'readRelated',
+        args: { workspaceFileScopeId: 's1', path: 'docs/readme.md', relativePath: 'img/shot.png' },
+      },
+    ])
+  })
+
+  it('surfaces a real file failure instead of retrying the legacy shape', async () => {
+    useGateway({
+      invoke: async () => {
+        throw Object.assign(new Error('no entry at "gone.png"'), { code: 'workspace-file/not-found' })
+      },
+      failure: error => ({
+        code: (error as { code?: string }).code ?? 'gateway/internal',
+        message: String(error),
+        details: {},
+      }),
+    })
+    const msg = makeMsg(`${PREFIX}file.bytes`, {
+      type: 'client-request', rpcId: 'bytes-missing', method: 'file.bytes',
+      payload: { sessionId: 's1', path: 'gone.png', length: 16 },
+    }, validToken)
+    await drive(msg)
+    const reply = replyJson(msg)
+    expect(reply.result.ok).toBe(false)
+    expect(reply.result.error.code).toBe('workspace-file/not-found')
+  })
+
   it('arms the workspace file watch through the bridge hook', async () => {
-    const watched: string[] = []
-    useGateway({ onFileWatch: sessionId => { watched.push(sessionId) } })
+    const watched: { sessionId: string, path: string | undefined }[] = []
+    useGateway({ onFileWatch: (sessionId, path) => { watched.push({ sessionId, path }) } })
     const msg = makeMsg(`${PREFIX}file.watch`, {
-      type: 'client-request', rpcId: 'watch-1', method: 'file.watch', payload: { sessionId: 's1' },
+      type: 'client-request', rpcId: 'watch-1', method: 'file.watch', payload: { sessionId: 's1', path: 'src' },
     }, validToken)
     await drive(msg)
     expect(replyJson(msg).result.value).toEqual({ watching: true })
-    expect(watched).toEqual(['s1'])
+    expect(watched).toEqual([{ sessionId: 's1', path: 'src' }])
   })
 
   it('refuses the workspace file watch when no watcher is wired', async () => {
@@ -477,7 +671,7 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.8',
+      pluginVersion: '0.2.9',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',

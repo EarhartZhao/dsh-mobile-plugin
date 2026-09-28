@@ -39,10 +39,56 @@ export interface EventBridgeOptions {
 
 type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow' | 'workspace files'
 
+/**
+ * Structural view of the Host wire carrier's stream opener. Declared with
+ * method syntax so any concrete arity — the legacy `(endpoint, payload,
+ * signal)` and the 0.1.7 `(endpoint, payload, uplink, peer, signal)` both
+ * assign to it.
+ */
+export interface EventWireStream {
+  open(...args: never[]): Promise<AsyncIterable<unknown>>
+}
+
+/**
+ * The uplink a Gateway-owned stream never reads. dsh 0.1.7 inserted the Client
+ * uplink and the speaking Peer before the signal of
+ * `TypertGatewayWireStream.open`, so a carrier opening `$events` must pass an
+ * already-ended iterable in that slot.
+ */
+const NO_UPLINK: AsyncIterable<unknown> = {
+  [Symbol.asyncIterator]: () => ({ next: () => Promise.resolve({ value: undefined, done: true }) }),
+}
+
+/**
+ * Open the Gateway-owned `$events` stream on either carrier generation.
+ *
+ * 0.1.7 changed the tail of `wireStream.open` from `signal` to
+ * `uplink, peer, signal`, and a Host offers no version handshake before the
+ * call; the declared arity is the only pre-call signal that distinguishes
+ * them. Passing an AbortSignal where the new carrier reads its uplink fails
+ * the stream with `signals[0] must be an instance of AbortSignal`, which takes
+ * approvals, questions, and every forwarded event down with it.
+ * @param wireStream - the Host's wire carrier.
+ * @param signal - generation cancellation for the opened stream.
+ * @returns the decoded event frames of one generation.
+ */
+export async function openEventStream(
+  wireStream: EventWireStream,
+  signal: AbortSignal,
+): Promise<AsyncIterable<unknown>> {
+  const open = wireStream.open as (...args: unknown[]) => Promise<AsyncIterable<unknown>>
+  const payload = { args: {} }
+  return open.length > 3
+    ? open('$events', payload, NO_UPLINK, undefined, signal)
+    : open('$events', payload, signal)
+}
+
 /** Concurrent workspace-file watches one bridge keeps open; the least recently
- *  armed Session is released first, because a phone browses one directory at a
- *  time and every watch is a live Host stream. */
+ *  armed target is released first, because every watch is a live Host stream. */
 const FILE_WATCH_LIMIT = 4
+
+/** Concurrent job rosters one bridge follows; armed by the Sessions the App opens. */
+const JOB_WATCH_LIMIT = 8
 
 /**
  * Adapts the dsh 0.1.5-rc.1 Typert Gateway `$events` stream to the legacy
@@ -56,8 +102,12 @@ export class GatewayEventAdapter {
   private hostLifetime: AbortSignal | undefined
   private readonly wantedSessions = new Map<string, SessionAddress>()
   private readonly sessionWatchers = new Map<string, AbortController>()
-  private readonly wantedFileSessions: string[] = []
+  private readonly wantedFileWatches: { sessionId: string, path: string }[] = []
   private readonly fileWatchers = new Map<string, AbortController>()
+  private readonly wantedJobSessions: string[] = []
+  private readonly jobWatchers = new Map<string, AbortController>()
+  /** Last roster published per followed Session, replayed to a reconnecting App. */
+  private readonly jobRosters = new Map<string, unknown[]>()
   private readonly workspaceRoots = new Map<string, string | undefined>()
   private readonly pendingEvents = new Map<string, { event: string; agentId: string }>()
   private readonly hostBacklog: StreamFrame[] = []
@@ -67,7 +117,7 @@ export class GatewayEventAdapter {
   private readonly failedStreams = new Set<GatewayStreamName>()
 
   constructor(private readonly gateway: {
-    wireStream: { open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> }
+    wireStream: EventWireStream
     invoke(request: { namespace: string, method: string, args: Record<string, unknown> }): Promise<unknown>
     stream(request: { namespace: string, method: string, args: Record<string, unknown>, signal?: AbortSignal }): Promise<AsyncIterable<unknown>>
   }, private readonly carrier?: { fetch(request: Request): Promise<Response> }, private readonly onStreamError?: (name: GatewayStreamName, error: unknown) => void, private readonly onStreamRecovered?: (name: GatewayStreamName) => void, private readonly retryDelayMs = 1_000) {}
@@ -82,35 +132,108 @@ export class GatewayEventAdapter {
   }
 
   /**
-   * Watch one Session's workspace files so the phone can refresh a listing
-   * without polling. Frames ride the host stream as `workspace-files/*`
-   * forwarded events: that vocabulary is already published in the frozen
-   * mobile wire, while a brand-new mux frame type would be dropped by the
-   * App's carrier schema.
+   * Follow one Session's background-job roster.
+   *
+   * dsh 0.1.6-alpha.2 published jobs inside the Session control baseline, and
+   * 0.1.7 removed them for a dedicated `jobController/list` stream whose first
+   * frame is already the complete set. The mobile wire keeps the old
+   * `session/jobs` frame either way, so the App's job strip needs no change.
+   * @param sessionId - Session whose visible roster is followed.
    */
-  watchFiles(sessionId: string): void {
+  watchJobs(sessionId: string): void {
     if (sessionId.length === 0) return
-    const known = this.wantedFileSessions.indexOf(sessionId)
-    if (known !== -1) this.wantedFileSessions.splice(known, 1)
-    this.wantedFileSessions.push(sessionId)
-    while (this.wantedFileSessions.length > FILE_WATCH_LIMIT) {
-      const evicted = this.wantedFileSessions.shift()
-      if (evicted !== undefined) this.stopFileWatcher(evicted)
+    const known = this.wantedJobSessions.indexOf(sessionId)
+    if (known !== -1) this.wantedJobSessions.splice(known, 1)
+    this.wantedJobSessions.push(sessionId)
+    while (this.wantedJobSessions.length > JOB_WATCH_LIMIT) {
+      const evicted = this.wantedJobSessions.shift()
+      if (evicted !== undefined) this.stopJobWatcher(evicted)
     }
-    if (this.hostSink !== undefined && this.hostLifetime !== undefined) this.startFileWatcher(sessionId)
+    if (this.muxSink !== undefined && this.muxLifetime !== undefined) this.startJobWatcher(sessionId)
   }
 
-  /** Release one Session's watch; the App calls this when its browser closes. */
-  unwatchFiles(sessionId: string): void {
-    const known = this.wantedFileSessions.indexOf(sessionId)
-    if (known !== -1) this.wantedFileSessions.splice(known, 1)
-    this.stopFileWatcher(sessionId)
-  }
-
-  private stopFileWatcher(sessionId: string): void {
-    const controller = this.fileWatchers.get(sessionId)
+  private stopJobWatcher(sessionId: string): void {
+    const controller = this.jobWatchers.get(sessionId)
+    this.jobRosters.delete(sessionId)
     if (controller === undefined) return
-    this.fileWatchers.delete(sessionId)
+    this.jobWatchers.delete(sessionId)
+    controller.abort()
+  }
+
+  /**
+   * Re-publish the rosters a reconnecting App lost with its previous store.
+   *
+   * A roster stream only speaks on open and on lifecycle changes, and the
+   * App's own store starts empty after a reconnect, so without this replay the
+   * job strip would stay blank until some job happened to change.
+   */
+  replayJobs(): void {
+    for (const [sessionId, jobs] of this.jobRosters) {
+      this.muxSink?.({ rpcId: randomUUID(), payload: { type: 'session/jobs', sessionId, jobs } })
+    }
+  }
+
+  private startJobWatcher(sessionId: string): void {
+    if (this.jobWatchers.has(sessionId) || this.muxLifetime === undefined) return
+    const controller = new AbortController()
+    this.jobWatchers.set(sessionId, controller)
+    const signal = AbortSignal.any([this.muxLifetime, controller.signal])
+    void (async () => {
+      try {
+        const stream = await this.gateway.stream({
+          // The owning Service is `jobController`; its wire namespace is `job`.
+          namespace: 'job', method: 'list',
+          args: { request: { sessionId } }, signal,
+        })
+        for await (const item of stream) {
+          if (!isRecord(item) || item['type'] !== 'rows' || !Array.isArray(item['jobs'])) continue
+          this.publishJobs(sessionId, item['jobs'].flatMap(jobRow))
+        }
+      } catch {
+        // A Host before 0.1.7 has no `jobController`: its control stream still
+        // carries the roster, and an absent optional feature is not an error
+        // the phone should show.
+      } finally {
+        this.jobWatchers.delete(sessionId)
+      }
+    })()
+  }
+
+  /**
+   * Watch one workspace target so the phone can refresh a listing without
+   * polling. dsh 0.1.7 watches a single target per stream — a file or one
+   * directory's own entries — so the caller names the directory it shows, and
+   * the empty path means the workspace root.
+   *
+   * Frames ride the host stream as `workspace-files/*` forwarded events: that
+   * vocabulary is already published in the frozen mobile wire, while a
+   * brand-new mux frame type would be dropped by the App's carrier schema.
+   */
+  watchFiles(sessionId: string, path = ''): void {
+    if (sessionId.length === 0) return
+    const key = fileWatchKey(sessionId, path)
+    const known = this.wantedFileWatches.findIndex(watch => fileWatchKey(watch.sessionId, watch.path) === key)
+    if (known !== -1) this.wantedFileWatches.splice(known, 1)
+    this.wantedFileWatches.push({ sessionId, path })
+    while (this.wantedFileWatches.length > FILE_WATCH_LIMIT) {
+      const evicted = this.wantedFileWatches.shift()
+      if (evicted !== undefined) this.stopFileWatcher(fileWatchKey(evicted.sessionId, evicted.path))
+    }
+    if (this.hostSink !== undefined && this.hostLifetime !== undefined) this.startFileWatcher(sessionId, path)
+  }
+
+  /** Release one target watch; the App calls this when its browser closes or navigates. */
+  unwatchFiles(sessionId: string, path = ''): void {
+    const key = fileWatchKey(sessionId, path)
+    const known = this.wantedFileWatches.findIndex(watch => fileWatchKey(watch.sessionId, watch.path) === key)
+    if (known !== -1) this.wantedFileWatches.splice(known, 1)
+    this.stopFileWatcher(key)
+  }
+
+  private stopFileWatcher(key: string): void {
+    const controller = this.fileWatchers.get(key)
+    if (controller === undefined) return
+    this.fileWatchers.delete(key)
     controller.abort()
   }
 
@@ -176,6 +299,7 @@ export class GatewayEventAdapter {
     this.muxSink = frame => queue.push(frame)
     this.muxLifetime = combinedSignal
     for (const address of this.wantedSessions.values()) this.startSessionWatcher(address)
+    for (const sessionId of this.wantedJobSessions) this.startJobWatcher(sessionId)
     const pumps = Promise.allSettled([
       this.runPump('remote events', combinedSignal, lifetime, queue, () => this.pumpRemoteEvents(combinedSignal)),
       this.runPump('session control', combinedSignal, lifetime, queue, () => this.pumpControl(combinedSignal)),
@@ -190,6 +314,8 @@ export class GatewayEventAdapter {
       this.eventClientId = undefined
       for (const watcher of this.sessionWatchers.values()) watcher.abort()
       this.sessionWatchers.clear()
+      for (const watcher of this.jobWatchers.values()) watcher.abort()
+      this.jobWatchers.clear()
     }
   }
 
@@ -202,7 +328,7 @@ export class GatewayEventAdapter {
     for (const frame of this.hostBacklog.splice(0)) queue.push(frame)
     // The file watcher publishes onto this stream, so its lifetime is the
     // host generation, not the mux one.
-    for (const sessionId of this.wantedFileSessions) this.startFileWatcher(sessionId)
+    for (const watch of this.wantedFileWatches) this.startFileWatcher(watch.sessionId, watch.path)
     const pump = this.runPump(
       'workspace follow', combinedSignal, lifetime, queue,
       () => this.pumpWorkspace(combinedSignal),
@@ -251,7 +377,7 @@ export class GatewayEventAdapter {
   }
 
   private async pumpRemoteEvents(signal: AbortSignal): Promise<void> {
-    const stream = await this.gateway.wireStream.open('$events', { args: {} }, signal)
+    const stream = await openEventStream(this.gateway.wireStream, signal)
     for await (const item of stream) {
       this.adaptRemoteFrame(item)
     }
@@ -362,9 +488,11 @@ export class GatewayEventAdapter {
   }
 
   private publishJobs(sessionId: string, value: unknown): void {
+    const jobs = Array.isArray(value) ? value : []
+    if (this.jobWatchers.has(sessionId)) this.jobRosters.set(sessionId, jobs)
     this.muxSink?.({
       rpcId: randomUUID(),
-      payload: { type: 'session/jobs', sessionId, jobs: Array.isArray(value) ? value : [] },
+      payload: { type: 'session/jobs', sessionId, jobs },
     })
   }
 
@@ -528,17 +656,21 @@ export class GatewayEventAdapter {
     })()
   }
 
-  private startFileWatcher(sessionId: string): void {
-    if (this.fileWatchers.has(sessionId) || this.hostLifetime === undefined) return
+  private startFileWatcher(sessionId: string, watchTarget: string): void {
+    const key = fileWatchKey(sessionId, watchTarget)
+    if (this.fileWatchers.has(key) || this.hostLifetime === undefined) return
     const controller = new AbortController()
-    this.fileWatchers.set(sessionId, controller)
+    this.fileWatchers.set(key, controller)
     const signal = AbortSignal.any([this.hostLifetime, controller.signal])
     void (async () => {
       try {
         const root = await this.workspaceRootOf(sessionId)
         const stream = await this.gateway.stream({
           namespace: 'workspaceFiles', method: 'changes',
-          args: { workspaceFileScopeId: sessionId }, signal,
+          // The Host resolves this against the Session's workspace root and
+          // keeps directory targets inside it. `'.'` is the root: an empty
+          // path is rejected as a missing argument.
+          args: { workspaceFileScopeId: sessionId, path: watchTarget === '' ? '.' : watchTarget }, signal,
         })
         for await (const item of stream) {
           if (!isRecord(item)) continue
@@ -580,8 +712,8 @@ export class GatewayEventAdapter {
           },
         })
       } finally {
-        // A later file.watch call re-arms the stream for this Session.
-        this.fileWatchers.delete(sessionId)
+        // A later file.watch call re-arms the stream for this target.
+        this.fileWatchers.delete(key)
       }
     })()
   }
@@ -742,6 +874,35 @@ function queueItem(value: unknown): Record<string, unknown> | null {
  * outside the root (or the root is unknown). Comparison is case-insensitive so
  * Windows drive-letter casing never splits a path that is actually inside.
  */
+/**
+ * One mobile job row from the Host's job view. The frozen mobile schema keeps
+ * only what a phone list renders, so registry internals — owner, progress,
+ * output coordinates, spill paths — stay on the Host.
+ * @param job - one `JobView` from the `jobController/list` stream.
+ * @returns the row as a single-element array, or nothing when it is unusable.
+ */
+function jobRow(job: unknown): Record<string, unknown>[] {
+  if (!isRecord(job) || typeof job['id'] !== 'string' || typeof job['kind'] !== 'string'
+    || typeof job['label'] !== 'string' || typeof job['status'] !== 'string'
+    || typeof job['startedAt'] !== 'number') {
+    return []
+  }
+  return [{
+    id: job['id'],
+    kind: job['kind'],
+    label: job['label'],
+    status: job['status'],
+    ...(typeof job['detail'] === 'string' ? { detail: job['detail'] } : {}),
+    startedAt: job['startedAt'],
+    ...(typeof job['finishedAt'] === 'number' ? { finishedAt: job['finishedAt'] } : {}),
+  }]
+}
+
+/** Stable identity of one armed workspace-file watch: one Session and target. */
+function fileWatchKey(sessionId: string, path: string): string {
+  return `${sessionId}\u0000${path}`
+}
+
 function workspaceRelativePath(root: string | undefined, absolutePath: string): string | undefined {
   if (root === undefined) return undefined
   const normalizedRoot = root.replace(/\\/g, '/').replace(/\/+$/, '')

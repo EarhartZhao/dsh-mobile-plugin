@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EventBridge, GatewayEventAdapter, type EventStreams, type StreamFrame } from '../src/events.js'
+import { EventBridge, GatewayEventAdapter, openEventStream, type EventStreams, type StreamFrame } from '../src/events.js'
 
 function fakeNc() {
   const published: { subject: string, body: string }[] = []
@@ -51,6 +51,41 @@ async function take(
   }
   return frames
 }
+
+describe('openEventStream', () => {
+  it('passes the 0.1.7 uplink and peer ahead of the signal', async () => {
+    const controller = new AbortController()
+    const calls: unknown[][] = []
+    const stream = await openEventStream({
+      // Exactly the arity the 0.1.7 Gateway publishes.
+      open: (endpoint: never, payload: never, uplink: never, peer: never, signal: never) => {
+        calls.push([endpoint, payload, uplink, peer, signal])
+        return Promise.resolve(objectStream([], controller.signal))
+      },
+    }, controller.signal)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.slice(0, 2)).toEqual(['$events', { args: {} }])
+    expect(calls[0]?.[3]).toBeUndefined()
+    expect(calls[0]?.[4]).toBe(controller.signal)
+    // The Gateway releases a Gateway-owned stream's uplink immediately, so the
+    // iterable handed over must already be finished instead of throwing.
+    const uplink = calls[0]?.[2] as AsyncIterable<unknown>
+    await expect(uplink[Symbol.asyncIterator]().next()).resolves.toEqual({ value: undefined, done: true })
+    expect(stream).toBeDefined()
+  })
+
+  it('keeps the legacy three-argument call for older Hosts', async () => {
+    const controller = new AbortController()
+    const calls: unknown[][] = []
+    await openEventStream({
+      open(endpoint: never, payload: never, signal: never): Promise<AsyncIterable<unknown>> {
+        calls.push([endpoint, payload, signal])
+        return Promise.resolve(objectStream([], controller.signal))
+      },
+    }, controller.signal)
+    expect(calls).toEqual([['$events', { args: {} }, controller.signal]])
+  })
+})
 
 describe('EventBridge', () => {
   it('publishes frames with the ServerRequest envelope', async () => {
@@ -306,6 +341,57 @@ describe('GatewayEventAdapter', () => {
     await iterator.return?.()
   })
 
+  it('follows the 0.1.7 job roster and republishes it as session/jobs frames', async () => {
+    const controller = new AbortController()
+    const calls: { namespace: string, method: string, args: Record<string, unknown> }[] = []
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      invoke: async () => ({ items: [] }),
+      stream: async (request) => {
+        calls.push({ namespace: request.namespace, method: request.method, args: request.args })
+        const signal = request.signal ?? controller.signal
+        if (request.namespace === 'job') {
+          return objectStream([
+            {
+              type: 'rows',
+              jobs: [{
+                id: 'bash-1', kind: 'bash', label: 'npm test', status: 'running', startedAt: 5,
+                owner: 's1', progress: '2/3', output: { total: 0, earliest: 0, spillPaths: ['C:/tmp/spill'] },
+              }],
+            },
+            { type: 'rows', jobs: [] },
+          ], signal)
+        }
+        return objectStream([], signal)
+      },
+    })
+    // The bridge arms this when the App opens a transcript, not for every row
+    // a session list mentions: each roster is a live Host stream.
+    adapter.watchJobs('s1')
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const frames = await take(iterator, 2)
+    expect(calls).toContainEqual({
+      namespace: 'job', method: 'list', args: { request: { sessionId: 's1' } },
+    })
+    // Registry internals (owner, progress, output, spill paths) stay on the Host.
+    expect(frames.map(frame => frame.payload)).toEqual([
+      {
+        type: 'session/jobs', sessionId: 's1',
+        jobs: [{ id: 'bash-1', kind: 'bash', label: 'npm test', status: 'running', startedAt: 5 }],
+      },
+      { type: 'session/jobs', sessionId: 's1', jobs: [] },
+    ])
+
+    // A reconnecting App starts from an empty store and would otherwise see no
+    // roster until a job changed.
+    adapter.replayJobs()
+    const replayed = await take(iterator, 1)
+    expect(replayed[0]?.payload).toEqual({ type: 'session/jobs', sessionId: 's1', jobs: [] })
+    controller.abort()
+    await iterator.return?.()
+  })
+
   it('forwards workspace file observations as host remote events', async () => {
     const controller = new AbortController()
     const calls: { namespace: string; method: string; args: Record<string, unknown> }[] = []
@@ -328,8 +414,9 @@ describe('GatewayEventAdapter', () => {
 
     const iterator = adapter.events.host({ rpcId: 'host' }, controller.signal)[Symbol.asyncIterator]()
     const frames = await take(iterator, 3)
+    // dsh 0.1.7 watches one target: the root the App armed is spelled `.`.
     expect(calls).toContainEqual({
-      namespace: 'workspaceFiles', method: 'changes', args: { workspaceFileScopeId: 's1' },
+      namespace: 'workspaceFiles', method: 'changes', args: { workspaceFileScopeId: 's1', path: '.' },
     })
     expect(frames.map(frame => frame.payload)).toEqual([
       { type: 'host/remote-event', event: 'workspace-files/ready', args: [{ sessionId: 's1' }] },
