@@ -26,6 +26,11 @@
 4. `subagents/list` 被删除：子代理目录改为父会话的 `subagentCatalog` 投影（durable 事件 `subagent/catalog`），可由 `session/projections` 在不激活 Agent 的情况下读取。插件把投影行与 `session/list` 的 `running`/`agentAvailable`/`parentSessionId` 合成 App 冻结的目录（`kind`/`mode`/`label`/`activity`/`hasChildren`/`parentAvailable`）；宿主不认识 `session/projections` 时回退到旧的 `subagents/list`。
 5. `session/control` 的 jobs 基线表与 `{type:'jobs'}` 帧被删除，改为 `job` 命名空间（Service 名 `jobController`）的 `list` 流：整集替换、开流即首帧。插件在 App 打开某个会话时（`session.history`）挂一条 roster 流，翻译回既有的 `session/jobs` 帧，旧宿主仍走 control 帧。
 
+0.2.10 开始填 `session/event` 帧的 `view` 槽（`src/tool-views.ts`）：宿主进程内按 Agent scope 调用每个工具声明的 `presentCall`/`presentResult`，把 Terminal/Diff/Read/Search/Web 这些声明式卡片真正送给 App。此前该槽无人填——Web 端用自己的 `ui-tool` 卡片模型从工具名、参数与结果 `meta` 现场推导，手机没有工具定义，于是所有工具卡在真机上都退化成了原文。要点有二：
+
+1. 工具注册表按 **Agent scope** 注册（内置 `read`/`pwsh` 等都在 scope 层），只查 `ctx.tools.get(name)` 会得到"未注册"；桥用 `ctx.agents.get(sessionId)` 取该会话的 Agent 作为 scope，全局层仅作兜底。
+2. 不猜：无注册表、未注册、无 presenter、参数不是 JSON、presenter 抛错，一律返回"无 view"，App 回退原文；每种原因在宿主日志里各打一行（首次出现才打），便于定位"某个工具为什么显示成原文"。
+
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
 
 ## 首次配置（顺序不能颠倒）

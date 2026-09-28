@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.9'
+export const PLUGIN_VERSION = '0.2.10'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -145,6 +145,12 @@ export interface BridgeOptions {
   onWorkspaceList?: () => unknown | Promise<unknown>
   /** Called when a Session address becomes relevant to the mobile client. */
   onSessionSeen?: (address: SessionAddress) => void
+  /**
+   * Projects one durable event into the `session/event` frame's `view` slot, so
+   * the App renders a tool's declared card instead of raw text. Absent when the
+   * host exposes no tool registry.
+   */
+  toolViews?: { project: (sessionId: string, event: unknown) => unknown }
   /**
    * Called when the App opens one Session's transcript. Job rosters are host
    * streams, so they are armed here rather than for every listed Session.
@@ -562,28 +568,41 @@ function expandChunkEvent(event: Record<string, unknown>): Record<string, unknow
   })
 }
 
-function historyEntries(value: unknown): { event: Record<string, unknown> }[] {
+/**
+ * One page's or snapshot's records as wire entries.
+ *
+ * @param value - the Remote snapshot or page being translated.
+ * @param view - the tool-view projector for this Session, when the host has one.
+ * @returns history entries; each carries the `view` slot when a tool can present it.
+ */
+function historyEntries(
+  value: unknown,
+  view?: (event: Record<string, unknown>) => unknown,
+): { event: Record<string, unknown>, view?: unknown }[] {
   if (!isRecord(value) || !Array.isArray(value.records)) return []
   return value.records.flatMap((record) => {
     if (!isRecord(record) || !isRecord(record.event)) return []
-    return expandChunkEvent(record.event).map(event => ({ event }))
+    return expandChunkEvent(record.event).map(event => {
+      const projected = view?.(event)
+      return projected === undefined ? { event } : { event, view: projected }
+    })
   })
 }
 
-function historyValue(snapshot: unknown): unknown {
+function historyValue(snapshot: unknown, project?: (event: Record<string, unknown>) => unknown): unknown {
   if (!isRecord(snapshot) || snapshot.type !== 'snapshot') {
     throw new Error('session follow did not begin with a snapshot')
   }
   return {
-    events: historyEntries(snapshot),
+    events: historyEntries(snapshot, project),
     hasMore: snapshot.hasMore === true,
     ...(isRecord(snapshot.projections) ? { projections: snapshot.projections } : {}),
   }
 }
 
-function pageValue(page: unknown): unknown {
+function pageValue(page: unknown, project?: (event: Record<string, unknown>) => unknown): unknown {
   if (!isRecord(page)) throw new Error('session page returned an invalid value')
-  return { events: historyEntries(page), hasMore: page.hasMore === true }
+  return { events: historyEntries(page, project), hasMore: page.hasMore === true }
 }
 
 async function firstValue(stream: AsyncIterable<unknown>): Promise<unknown> {
@@ -627,6 +646,12 @@ function pairFailure(rpcId: unknown, message: 'mobile-pair-failed' | 'mobile-dev
 
 export class RpcBridge {
   private readonly historyCursors = new Map<string, number>()
+
+  /** This Session's tool-view projection, when the host exposed a tool registry. */
+  private projector(sessionId: string): ((event: Record<string, unknown>) => unknown) | undefined {
+    const toolViews = this.options.toolViews
+    return toolViews === undefined ? undefined : event => toolViews.project(sessionId, event)
+  }
   private readonly prefix: string
   private subscription: ReturnType<NatsConnection['subscribe']> | null = null
 
@@ -788,7 +813,8 @@ export class RpcBridge {
               namespace: 'session', method: 'page',
               args: { request: { address, throughSeq, beforeSeq, maxMessages: request.maxMessages } },
             })
-            msg.respond(new TextEncoder().encode(serverResult(id, pageValue(page))))
+            const target = sessionAddressTarget(address)
+            msg.respond(new TextEncoder().encode(serverResult(id, pageValue(page, this.projector(target)))))
             return
           }
           const stream = await this.options.gateway.stream({
@@ -797,7 +823,7 @@ export class RpcBridge {
           })
           const first = await firstValue(stream)
           if (isRecord(first) && typeof first.cursor === 'number') this.historyCursors.set(key, first.cursor)
-          msg.respond(new TextEncoder().encode(serverResult(id, historyValue(first))))
+          msg.respond(new TextEncoder().encode(serverResult(id, historyValue(first, this.projector(sessionAddressTarget(address))))))
           return
         }
         if (method === 'subagent.list') {

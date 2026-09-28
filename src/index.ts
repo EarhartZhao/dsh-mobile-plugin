@@ -21,6 +21,7 @@ import { Config } from './config.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
+import { ToolViews, type ToolRegistryLike } from './tool-views.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
 
 declare module '@deepseek-ai/cordis' {
@@ -93,6 +94,18 @@ export class MobileBridge extends Service {
   private lastReconnectAt: string | null = null
   private lastError: string | null = null
   private readonly streamErrors = new Map<string, string>()
+  /**
+   * Host tool registry, when the composition provides one. Reached lazily (like
+   * `settings`/`webServer`) so a host without `ctx.tools` still loads.
+   */
+  private toolRegistry: unknown
+  /** Agent registry, to resolve the tool scope (the Agent) for a Session. */
+  private agentRegistry: { get: (id: string) => object | undefined } | undefined
+  /** Projects tool calls and results into the wire `view` slot. */
+  private readonly toolViews = new ToolViews(
+    () => this.toolRegistry as ToolRegistryLike | undefined,
+    sessionId => this.agentRegistry?.get(sessionId),
+  )
   private readonly tokens: TokenStore
   /** A process started from the local console. NATS is a host service, so it
    * intentionally survives bridge restarts and is never killed by stop(). */
@@ -131,6 +144,20 @@ export class MobileBridge extends Service {
         updateConfig: patch => this.updateConfig(patch),
         startNats: () => this.startLocalNats(),
       })
+    })
+
+    // Tool presentation: the registry holds each tool's declared
+    // `presentCall`/`presentResult`, which is what lets the phone render a
+    // tool's card instead of its raw text. Optional — a host without tools still
+    // serves events, just without cards.
+    ctx.inject(['tools'], (sctx) => {
+      this.toolRegistry = sctx.get('tools')
+    })
+
+    // Tools are registered per Agent scope, so a session's Agent is what makes
+    // its tools' presenters reachable.
+    ctx.inject(['agents'], (sctx) => {
+      this.agentRegistry = sctx.get('agents') as unknown as { get: (id: string) => object | undefined }
     })
 
     ctx.effect(() => {
@@ -365,6 +392,8 @@ export class MobileBridge extends Service {
       carrier,
       (name, error) => this.setStreamError(name, error),
       name => this.clearStreamError(name),
+      1_000,
+      this.toolViews,
     )
     this.eventBridge = new EventBridge(nc, eventAdapter, {
       instanceId: this.current.instanceId,
@@ -387,6 +416,7 @@ export class MobileBridge extends Service {
       },
       onInventory: async () => gateway.invoke({ namespace: 'pluginInventory', method: 'list', args: {} }).catch(() => null),
       onHealth: () => ({ status: 'ok', ...this.status() }),
+      toolViews: this.toolViews,
       onHostDescribe: async () => {
         const sessions = await gateway.invoke({
           namespace: 'session', method: 'list', args: { _request: {} },

@@ -120,7 +120,7 @@ export class GatewayEventAdapter {
     wireStream: EventWireStream
     invoke(request: { namespace: string, method: string, args: Record<string, unknown> }): Promise<unknown>
     stream(request: { namespace: string, method: string, args: Record<string, unknown>, signal?: AbortSignal }): Promise<AsyncIterable<unknown>>
-  }, private readonly carrier?: { fetch(request: Request): Promise<Response> }, private readonly onStreamError?: (name: GatewayStreamName, error: unknown) => void, private readonly onStreamRecovered?: (name: GatewayStreamName) => void, private readonly retryDelayMs = 1_000) {}
+  }, private readonly carrier?: { fetch(request: Request): Promise<Response> }, private readonly onStreamError?: (name: GatewayStreamName, error: unknown) => void, private readonly onStreamRecovered?: (name: GatewayStreamName) => void, private readonly retryDelayMs = 1_000, private readonly toolViews?: { project: (sessionId: string, event: unknown) => unknown }) {}
 
   /** Ensure live events for a Session continue after its history snapshot. */
   watchSession(address: SessionAddress): void {
@@ -650,9 +650,15 @@ export class GatewayEventAdapter {
               }
             }
           } else if (record['type'] === 'event' && typeof record['event'] === 'object' && record['event'] !== null) {
+            // The App's structured tool cards ride this slot; without it every
+            // card degrades to the raw result text.
+            const view = this.toolViews?.project(sessionId, record['event'])
             this.muxSink?.({
               rpcId: randomUUID(),
-              payload: { type: 'session/event', sessionId, event: record['event'] },
+              payload: {
+                type: 'session/event', sessionId, event: record['event'],
+                ...(view === undefined ? {} : { view }),
+              },
             })
           } else if (record['type'] === 'assistant-stream' && isRecord(record['frame'])) {
             const frame = record['frame']
