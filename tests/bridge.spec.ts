@@ -109,6 +109,7 @@ describe('RpcBridge', () => {
     host?: unknown
     workspaces?: unknown
     onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
+    onStaleRespond?: (eventId: string, result: unknown) => void
     onFileWatch?: (sessionId: string) => void
     onFileUnwatch?: (sessionId: string) => void
     onSessionOpened?: (sessionId: string) => void
@@ -142,6 +143,7 @@ describe('RpcBridge', () => {
       onHostDescribe: () => options.host,
       onWorkspaceList: () => options.workspaces,
       ...(options.onRespond === undefined ? {} : { onRespond: options.onRespond }),
+      ...(options.onStaleRespond === undefined ? {} : { onStaleRespond: options.onStaleRespond }),
       ...(options.onFileWatch === undefined ? {} : { onFileWatch: options.onFileWatch }),
       ...(options.onFileUnwatch === undefined ? {} : { onFileUnwatch: options.onFileUnwatch }),
       ...(options.onSessionOpened === undefined ? {} : { onSessionOpened: options.onSessionOpened }),
@@ -333,6 +335,25 @@ describe('RpcBridge', () => {
       { namespace: 'session', method: 'openWorkspacePath', args: { request: { path: 'C:/repo/a.ts' } } },
       { namespace: 'workspace', method: 'unarchiveSession', args: { request: { sessionId: 's1' } } },
     ])
+  })
+
+  it('reports a refused answer so the bridge can retire the App’s stale card', async () => {
+    const stale: { eventId: string, result: unknown }[] = []
+    useGateway({
+      onRespond: async () => false,
+      onStaleRespond: (eventId, result) => { stale.push({ eventId, result }) },
+    })
+    const msg = makeMsg(`${PREFIX}respond`, {
+      type: 'client-response',
+      rpcId: 'event-9',
+      result: { ok: true, value: { sessionId: 's1', approvalId: 'event-9', outcome: 'allowed-once' } },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg)).toEqual({ accepted: false, reason: 'not-pending' })
+    expect(stale).toEqual([{
+      eventId: 'event-9',
+      result: { ok: true, value: { sessionId: 's1', approvalId: 'event-9', outcome: 'allowed-once' } },
+    }])
   })
 
   it('arms the job roster of the Session the App opens', async () => {

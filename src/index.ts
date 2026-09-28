@@ -408,6 +408,7 @@ export class MobileBridge extends Service {
       onFileUnwatch: (sessionId, path) => eventAdapter.unwatchFiles(sessionId, path),
       onSessionOpened: sessionId => eventAdapter.watchJobs(sessionId),
       onRespond: (rpcId, result) => eventAdapter.respond(rpcId, result),
+      onStaleRespond: (eventId, result) => eventAdapter.resolveStale(eventId, result),
     })
     this.rpcBridge.start()
   }

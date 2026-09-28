@@ -160,6 +160,11 @@ export interface BridgeOptions {
   onFileUnwatch?: (sessionId: string, path?: string) => void
   /** Settle one Gateway Remote Event using its original event-stream generation. */
   onRespond?: (rpcId: string, result: unknown) => Promise<boolean>
+  /**
+   * Called when an answer arrives for a request this generation no longer
+   * tracks, so the bridge can publish the resolution the App missed.
+   */
+  onStaleRespond?: (eventId: string, result: unknown) => void
 }
 
 interface ClientEnvelope {
@@ -803,6 +808,9 @@ export class RpcBridge {
         }
         if (method === 'respond') {
           const accepted = await this.options.onRespond?.(id, envelope.result) ?? false
+          // The card the App is holding may belong to an earlier generation:
+          // publish the resolution it missed so it cannot stay unanswerable.
+          if (!accepted) this.options.onStaleRespond?.(id, envelope.result)
           msg.respond(new TextEncoder().encode(JSON.stringify(accepted
             ? { accepted: true }
             : { accepted: false, reason: 'not-pending' })))

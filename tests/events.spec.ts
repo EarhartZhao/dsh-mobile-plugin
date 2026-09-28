@@ -433,6 +433,32 @@ describe('GatewayEventAdapter', () => {
     await iterator.return?.()
   })
 
+  it('retires a held approval or question the current generation no longer tracks', async () => {
+    const controller = new AbortController()
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      invoke: async () => ({ items: [] }),
+      stream: async ({ signal = controller.signal }) => objectStream([], signal),
+    })
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    // Consuming first installs the mux sink the resolutions ride.
+    const pending = take(iterator, 2)
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    adapter.resolveStale('event-1', { ok: true, value: { sessionId: 's1', approvalId: 'event-1', outcome: 'allowed-once' } })
+    adapter.resolveStale('event-2', { ok: true, value: { sessionId: 's1', answer: { selected: [] } } })
+    // A cancel carries no value, so nothing can be attributed to a Session.
+    adapter.resolveStale('event-3', { ok: false, error: { code: 'cancelled', message: 'cancelled' } })
+
+    const frames = await pending
+    expect(frames.map(frame => frame.payload)).toEqual([
+      { type: 'approval/resolved', sessionId: 's1', approvalId: 'event-1', outcome: 'cancelled' },
+      { type: 'question/resolved', sessionId: 's1', questionRpcId: 'event-2', outcome: 'cancelled' },
+    ])
+    controller.abort()
+    await iterator.return?.()
+  })
+
   it('relays the plugin-manager events the host forwards from 0.1.6-alpha.2', async () => {
     const controller = new AbortController()
     const adapter = new GatewayEventAdapter({

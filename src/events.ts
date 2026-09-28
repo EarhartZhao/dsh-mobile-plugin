@@ -283,6 +283,31 @@ export class GatewayEventAdapter {
     return true
   }
 
+  /**
+   * Retire one answerable request the App answers after this generation
+   * stopped tracking it.
+   *
+   * A bridge restart or a finished turn leaves the phone holding a card whose
+   * live event is gone: the Host refuses such an answer either way, so the
+   * bridge publishes the resolution the App missed instead of leaving an
+   * unanswerable card on screen. An approval answer carries `approvalId`;
+   * question answers and cancellations carry only the request's own id.
+   * @param eventId - the request identity the App answered.
+   * @param result - the App's client-response result, whose value names the Session.
+   */
+  resolveStale(eventId: string, result: unknown): void {
+    const value = isRecord(result) && isRecord(result['value']) ? result['value'] : undefined
+    const sessionId = typeof value?.['sessionId'] === 'string' ? value['sessionId'] : undefined
+    if (sessionId === undefined) return
+    const approvalId = value?.['approvalId']
+    this.muxSink?.({
+      rpcId: randomUUID(),
+      payload: typeof approvalId === 'string'
+        ? { type: 'approval/resolved', sessionId, approvalId, outcome: 'cancelled' }
+        : { type: 'question/resolved', sessionId, questionRpcId: eventId, outcome: 'cancelled' },
+    })
+  }
+
   readonly events = {
     mux: async function* (this: GatewayEventAdapter, _request: { rpcId: string }, signal: AbortSignal): AsyncGenerator<StreamFrame> {
       yield* this.openMux(signal)
