@@ -14,7 +14,11 @@
 
 **一、插件页安装（推荐）。** 本包声明了 `dsh.bundle`（即随包发布的 `cordis.patch.yml`），插件页可以直接装：在「插件」页填包名、git 地址或绝对路径，宿主先 inspect spec，再交给 pnpm 安装，装好后提供「启用」。按包名安装需要先发到 npm（当前 `pnpm view dsh-mobile-plugin` 返回 404），没发布之前用 git 地址或本地路径即可。
 
+**装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
+
 装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是另一层（`$DSH_HOME/settings.yaml` 的 `mobile-bridge` 命名空间），优先级在组合层之上。
+
+开发机上用 `link:` 引用本仓库时还要留意：宿主启动会按 profile 依赖做一次同步安装，pnpm 可能把它物化成**副本**而不是 junction——副本会让后续源码改动不生效（我们踩到的那次副本还是残缺的，没有 `lib/`，manifest 停在旧版本）。症状是插件版本不跟随、或 `/mobile-bridge` 404；在 profile 目录里重跑一次 `pnpm install` 即可恢复成 junction。
 
 **二、手工装进 profile（当前实际使用的方式）。** 在 `$DSH_HOME/profiles/<profile>` 里把本包加成依赖，并在该 profile 自己的 `cordis.patch.yml` 写一行 insert：
 
