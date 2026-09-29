@@ -78,6 +78,12 @@ dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原
 
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
 
+0.2.13 三处收口，移动端 wire 不变：
+
+1. Hub 密码不再随每 5 秒的状态轮询下发：`/api/status` 只回「是否已配置」，新增 `POST /api/reveal`（走改状态那道门）供控制台点「显示」时按需取一次。密码此前常年挂在后台响应里，本机任意进程随时可以读到。
+2. 迟到回答的消解帧改成回真实结果：审批按 App 的词表回 `allowed-once`/`rejected`/`cancelled`/`unavailable`（此前一律 `cancelled`，把「允许一次」标成了取消），提问按 `answered`/`cancelled`；词表外的值仍降级为 `cancelled`，避免 App 的 schema 拒帧。
+3. 下行流重试改成指数退避（1 秒起、逐次翻倍、上限 30 秒），且一次故障只发一帧 `stream/error`（原来每次重试都发，流长期挂掉时每秒刷一帧）；流恢复后再次故障会重新计一次。
+
 0.2.12 收口一轮评审发现的问题，移动端 wire 不变：
 
 1. 回环控制台的每个 JSON 路由都要过统一的门：peer 必须是回环、`Host` 必须是本机名（挡 DNS rebinding）、`Origin` 必须同源；改状态的请求还要带 `x-dsh-mobile-console: 1` 和 JSON body（浏览器里属非简单请求，跨站页面无法盲发）。此前只有「启动本地 NATS」检查来源，改配置、吊销设备、发配对码三条路都没有。

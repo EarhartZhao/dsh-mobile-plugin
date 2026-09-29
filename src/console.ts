@@ -161,18 +161,29 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const bridge = backend.bridge()
         const config = backend.currentConfig()
+        // The password is deliberately absent here: this response is polled
+        // every few seconds, and a secret that rides a poll is available to any
+        // local process at any moment. It comes from `/api/reveal` instead, only
+        // when the owner asks to see it.
         json(res, 200, {
           ...bridge.status(),
           config: {
             hubWssUrl: config.hubWssUrl,
             hubUser: config.hubUser,
             hubPassConfigured: config.hubPass.length > 0,
-            // Loopback surfaces get the password itself so the field can show
-            // what is actually stored; every other peer keeps the boolean.
-            ...(isLoopbackRequest(req) ? { hubPass: config.hubPass } : {}),
             instanceId: config.instanceId,
           },
         })
+      },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: '/mobile-bridge/api/reveal',
+      handler: (req, res) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
+        json(res, 200, { hubPass: backend.currentConfig().hubPass })
       },
     }),
     webServer.register({
@@ -390,13 +401,20 @@ const $ = id => document.getElementById(id)
 /** The code currently on screen, or null once it has expired. */
 let pairing = null
 
-/** Set once the owner edits the password field, so the 5s status poll stops
- *  refilling it. Cleared after a successful save. */
-let hubPassDirty = false
-$('hubPass').addEventListener('input', () => { hubPassDirty = true })
-$('hubPassToggle').onclick = () => {
+$('hubPassToggle').onclick = async () => {
   const field = $('hubPass')
   const reveal = field.type === 'password'
+  // The stored password is fetched only when the owner asks to see it: the
+  // status poll never carries it, so it does not sit in a background response.
+  if (reveal && field.value === '' && field.placeholder.indexOf('已配置') === 0) {
+    const looked = await api('reveal', {})
+    if (looked.error) {
+      $('saveMsg').className = 'error'
+      $('saveMsg').textContent = looked.error
+      return
+    }
+    field.value = typeof looked.hubPass === 'string' ? looked.hubPass : ''
+  }
   field.type = reveal ? 'text' : 'password'
   $('hubPassToggle').textContent = reveal ? '隐藏' : '显示'
 }
@@ -427,9 +445,8 @@ async function refreshStatus() {
     $('hubWssUrl').value = s.config.hubWssUrl
     $('hubUser').value = s.config.hubUser
     $('instanceId').value = s.config.instanceId
-    // Prefill from the saved value, but never while the field is being edited
-    // or holds unsaved input — status is polled every 5s.
-    if (!hubPassDirty && typeof s.config.hubPass === 'string') $('hubPass').value = s.config.hubPass
+    // Never prefill the password here — this response is polled every 5s and
+    // 「显示」 is the one call that fetches the stored value.
     $('hubPass').placeholder = s.config.hubPassConfigured ? '已配置（留空保持不变）' : '未配置'
     // A QR minted without the Hub credential is dead on arrival, so the
     // credential gate comes before the connection gate.
@@ -474,7 +491,6 @@ $('saveBtn').onclick = async () => {
   })
   if (r.ok) {
     $('saveMsg').className = 'ok'; $('saveMsg').textContent = '已保存'
-    hubPassDirty = false
     refreshStatus()
     // Verify right after saving: a wrong password is invisible until the
     // phone fails, and that is the whole reason this round was confusing.

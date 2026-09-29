@@ -108,6 +108,28 @@ const JOB_WATCH_LIMIT = 8
  */
 const SESSION_WATCH_LIMIT = 16
 
+/** Ceiling for one stream's retry delay, so a wedged stream stays cheap. */
+const RETRY_DELAY_CAP_MS = 30_000
+
+/**
+ * Retry delay for one stream: the base doubled per consecutive failure, capped.
+ * @param baseMs - configured first delay.
+ * @param streak - consecutive failures, 1 for the first.
+ * @returns the delay in milliseconds.
+ */
+export function retryDelayFor(baseMs: number, streak: number): number {
+  const steps = Math.max(1, Math.min(streak, 20))
+  return Math.min(baseMs * 2 ** (steps - 1), RETRY_DELAY_CAP_MS)
+}
+
+/** The App's approval vocabulary; anything else resolves as cancelled. */
+const APPROVAL_OUTCOMES: readonly string[] = ['allowed-once', 'rejected', 'cancelled', 'unavailable']
+
+/** One approval outcome the App's schema accepts. */
+function approvalOutcome(value: unknown): string {
+  return typeof value === 'string' && APPROVAL_OUTCOMES.includes(value) ? value : 'cancelled'
+}
+
 /**
  * Adapts the dsh 0.1.5-rc.1 Typert Gateway `$events` stream to the legacy
  * `EventStreams` interface (mux + host). The wire format on NATS stays the
@@ -331,11 +353,28 @@ export class GatewayEventAdapter {
     const sessionId = typeof value?.['sessionId'] === 'string' ? value['sessionId'] : undefined
     if (sessionId === undefined) return
     const approvalId = value?.['approvalId']
+    if (typeof approvalId === 'string') {
+      // Publish what the owner actually tapped when the App's vocabulary can
+      // spell it: the App validates this frame, and 「cancelled」 for an answer
+      // that said 「允许一次」 would mislabel the decision on any surface that
+      // reads the outcome.
+      this.muxSink?.({
+        rpcId: randomUUID(),
+        payload: {
+          type: 'approval/resolved', sessionId, approvalId,
+          outcome: approvalOutcome(value?.['outcome']),
+        },
+      })
+      return
+    }
     this.muxSink?.({
       rpcId: randomUUID(),
-      payload: typeof approvalId === 'string'
-        ? { type: 'approval/resolved', sessionId, approvalId, outcome: 'cancelled' }
-        : { type: 'question/resolved', sessionId, questionRpcId: eventId, outcome: 'cancelled' },
+      payload: {
+        type: 'question/resolved', sessionId, questionRpcId: eventId,
+        // The frame carries no answer body, so 「answered」 versus 「cancelled」
+        // is the only honest pair; the answers themselves stay on the phone.
+        outcome: value?.['answer'] === undefined ? 'cancelled' : 'answered',
+      },
     })
   }
 
@@ -408,26 +447,34 @@ export class GatewayEventAdapter {
     queue: FrameQueue,
     pump: () => Promise<void>,
   ): Promise<void> {
+    let streak = 0
     while (!signal.aborted) {
       try {
         await pump()
         if (!signal.aborted) throw new Error(`${name} stream ended unexpectedly`)
       } catch (error) {
         if (signal.aborted) return
+        // A stream that recovered since its last failure starts a fresh streak:
+        // its baseline/ready frame cleared the entry in `failedStreams`.
+        streak = this.failedStreams.has(name) ? streak + 1 : 1
         this.failedStreams.add(name)
         if (name === 'remote events') {
           this.eventClientId = undefined
           this.pendingEvents.clear()
         }
-        queue.push({
-          rpcId: randomUUID(),
-          payload: {
-            type: 'stream/error',
-            error: { code: 'internal', message: errorMessage(error, name), details: {} },
-          },
-        })
+        // One frame per outage, not one per attempt: the App shows the failure
+        // when it starts, and the retries stay invisible behind the backoff.
+        if (streak === 1) {
+          queue.push({
+            rpcId: randomUUID(),
+            payload: {
+              type: 'stream/error',
+              error: { code: 'internal', message: errorMessage(error, name), details: {} },
+            },
+          })
+        }
         this.onStreamError?.(name, error)
-        await waitForRetry(signal, this.retryDelayMs)
+        await waitForRetry(signal, retryDelayFor(this.retryDelayMs, streak))
       }
     }
   }

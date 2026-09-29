@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { EventBridge, GatewayEventAdapter, openEventStream, type EventStreams, type StreamFrame } from '../src/events.js'
+import {
+  EventBridge, GatewayEventAdapter, openEventStream, retryDelayFor, type EventStreams, type StreamFrame,
+} from '../src/events.js'
 
 function fakeNc() {
   const published: { subject: string, body: string }[] = []
@@ -186,6 +188,16 @@ describe('openEventStream fallback', () => {
       }) as never,
     }, controller.signal)).rejects.toThrow('gateway down')
     expect(calls).toBe(2)
+  })
+})
+
+describe('retryDelayFor', () => {
+  it('doubles the base per consecutive failure and caps the wait', () => {
+    expect(retryDelayFor(1000, 0)).toBe(1000)
+    expect(retryDelayFor(1000, 1)).toBe(1000)
+    expect(retryDelayFor(1000, 2)).toBe(2000)
+    expect(retryDelayFor(1000, 4)).toBe(8000)
+    expect(retryDelayFor(1000, 20)).toBe(30_000)
   })
 })
 
@@ -510,18 +522,25 @@ describe('GatewayEventAdapter', () => {
     })
     const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
     // Consuming first installs the mux sink the resolutions ride.
-    const pending = take(iterator, 2)
+    const pending = take(iterator, 4)
     await new Promise(resolve => setTimeout(resolve, 10))
 
     adapter.resolveStale('event-1', { ok: true, value: { sessionId: 's1', approvalId: 'event-1', outcome: 'allowed-once' } })
     adapter.resolveStale('event-2', { ok: true, value: { sessionId: 's1', answer: { selected: [] } } })
+    // An outcome outside the App's vocabulary degrades to cancelled rather than
+    // publishing a frame its schema rejects.
+    adapter.resolveStale('event-4', { ok: true, value: { sessionId: 's2', approvalId: 'event-4', outcome: 'approved' } })
+    // A question answer with no body, and a cancel: cancelled is the honest pair.
+    adapter.resolveStale('event-5', { ok: true, value: { sessionId: 's2' } })
     // A cancel carries no value, so nothing can be attributed to a Session.
     adapter.resolveStale('event-3', { ok: false, error: { code: 'cancelled', message: 'cancelled' } })
 
     const frames = await pending
     expect(frames.map(frame => frame.payload)).toEqual([
-      { type: 'approval/resolved', sessionId: 's1', approvalId: 'event-1', outcome: 'cancelled' },
-      { type: 'question/resolved', sessionId: 's1', questionRpcId: 'event-2', outcome: 'cancelled' },
+      { type: 'approval/resolved', sessionId: 's1', approvalId: 'event-1', outcome: 'allowed-once' },
+      { type: 'question/resolved', sessionId: 's1', questionRpcId: 'event-2', outcome: 'answered' },
+      { type: 'approval/resolved', sessionId: 's2', approvalId: 'event-4', outcome: 'cancelled' },
+      { type: 'question/resolved', sessionId: 's2', questionRpcId: 'event-5', outcome: 'cancelled' },
     ])
     controller.abort()
     await iterator.return?.()
@@ -714,5 +733,41 @@ describe('GatewayEventAdapter', () => {
     expect(recoveries).toEqual(['remote events'])
     controller.abort()
     await iterator.return?.()
+  })
+
+  it('says a failing stream failed once, while the retries back off', async () => {
+    const controller = new AbortController()
+    const failures: string[] = []
+    let attempts = 0
+    const adapter = new GatewayEventAdapter({
+      wireStream: {
+        open: async () => {
+          attempts += 1
+          throw new Error('gateway down')
+        },
+      },
+      stream: async ({ signal = controller.signal }) => objectStream([], signal),
+    }, undefined, name => failures.push(name), undefined, 2)
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const errorFrames: StreamFrame[] = []
+    const deadline = Date.now() + 90
+    while (Date.now() < deadline) {
+      const next = await Promise.race([
+        iterator.next(),
+        new Promise<'idle'>(resolve => setTimeout(() => resolve('idle'), 20)),
+      ])
+      if (next === 'idle') continue
+      if (next.done === true) break
+      if (next.value.payload.type === 'stream/error') errorFrames.push(next.value)
+    }
+    controller.abort()
+    await iterator.return?.(undefined)
+
+    // The retries kept coming (2, 4, 8, 16, 32 ms inside the window)…
+    expect(attempts).toBeGreaterThan(2)
+    expect(failures.length).toBeGreaterThan(2)
+    // …but the App hears about the outage once, not once per attempt.
+    expect(errorFrames).toHaveLength(1)
   })
 })

@@ -118,11 +118,11 @@ describe('console status route', () => {
   const configOf = (body: Record<string, unknown>): Record<string, unknown> =>
     body.config as Record<string, unknown>
 
-  it('hands the saved password to a loopback caller so the field can show it', async () => {
+  it('keeps the password out of the polled status response', async () => {
     const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
     const call = exchange('127.0.0.1')
     await route(call.req, call.res)
-    expect(configOf(call.json()).hubPass).toBe('secret-pass')
+    expect(configOf(call.json()).hubPass).toBeUndefined()
     expect(configOf(call.json()).hubPassConfigured).toBe(true)
   })
 
@@ -134,6 +134,23 @@ describe('console status route', () => {
       expect(call.status()).toBe(403)
       expect(JSON.stringify(call.json())).not.toContain('secret-pass')
     }
+  })
+})
+
+describe('console reveal route', () => {
+  it('hands over the stored password on demand', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/reveal')!
+    const call = exchange('127.0.0.1', 'POST')
+    await route(call.req, call.res)
+    expect(call.status()).toBe(200)
+    expect(call.json().hubPass).toBe('secret-pass')
+  })
+
+  it('refuses a read that would hand the password out on a polled path', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/reveal')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    expect(call.status()).toBe(405)
   })
 })
 
@@ -196,6 +213,7 @@ describe('console request gate', () => {
   const writePaths = [
     '/mobile-bridge/api/config',
     '/mobile-bridge/api/pair',
+    '/mobile-bridge/api/reveal',
     '/mobile-bridge/api/revoke',
     '/mobile-bridge/api/nats/start',
   ]
