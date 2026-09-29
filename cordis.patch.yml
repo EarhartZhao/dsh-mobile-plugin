@@ -1,0 +1,11 @@
+# This package's own composition layer: the row a profile gets by installing the
+# bundle from the Plugins page. Per-deployment values — Hub address, account,
+# password, instance id — stay out of the package. A profile's own patch
+# overrides this row by id (without `insert`, which would append a second row),
+# and the console writes the same namespace into the user settings layer.
+- insert:
+    - id: mobile-bridge
+      name: dsh-mobile-plugin
+      config:
+        natsUrl: 'nats://127.0.0.1:4222'
+        instanceId: 'home'

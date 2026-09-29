@@ -12,7 +12,9 @@
 
 本仓库是**树外插件**，不在 dsh 官方 bundle 里，接入有两条路径：
 
-**一、插件页安装（新用户该走的路，但本仓库目前还不支持）。** dsh 插件页只安装 *bundle*：宿主在跑 pnpm 之前先 inspect spec，包里没有 `dsh.bundle`（随包发布的 `cordis.patch.yml`）就直接拒绝，界面显示 `not-a-bundle`。本仓库当前既没声明 `dsh.bundle`，也没发布到 npm（`pnpm view dsh-mobile-plugin` 返回 404），所以插件页装不上。要开这条路，需要在包内加 `cordis.patch.yml`（把下面那段 insert 变成包自带的默认层，凭证留空）、package.json 补 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`、`files` 里带上该文件，然后发布或用 git 地址安装。
+**一、插件页安装（推荐）。** 本包声明了 `dsh.bundle`（即随包发布的 `cordis.patch.yml`），插件页可以直接装：在「插件」页填包名、git 地址或绝对路径，宿主先 inspect spec，再交给 pnpm 安装，装好后提供「启用」。按包名安装需要先发到 npm（当前 `pnpm view dsh-mobile-plugin` 返回 404），没发布之前用 git 地址或本地路径即可。
+
+装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是另一层（`$DSH_HOME/settings.yaml` 的 `mobile-bridge` 命名空间），优先级在组合层之上。
 
 **二、手工装进 profile（当前实际使用的方式）。** 在 `$DSH_HOME/profiles/<profile>` 里把本包加成依赖，并在该 profile 自己的 `cordis.patch.yml` 写一行 insert：
 
@@ -77,6 +79,11 @@ dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原
 2. 不猜：无注册表、未注册、无 presenter、参数不是 JSON、presenter 抛错，一律返回"无 view"，App 回退原文；每种原因在宿主日志里各打一行（首次出现才打），便于定位"某个工具为什么显示成原文"。
 
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
+
+0.2.14 让这个包成为可被插件页管理的组合包（bundle），移动端 wire 不变：
+
+1. 包内新增 `cordis.patch.yml`，声明 `mobile-bridge` 那一行（只带非密的 `natsUrl` 与 `instanceId`，凭证留空）；package.json 补 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`，并把该文件加进 `files`。此前宿主在插件页 inspect 时会以「这个包没有声明组合包，不能作为插件管理」拒掉。
+2. 每个部署的 Hub 凭证仍由部署方提供：profile patch 按 id 覆盖这一行（`- id: mobile-bridge` + `name` + `config:`，不要用 `insert:`），或者装好后在控制台里填（写进 settings 用户层）。
 
 0.2.13 三处收口，移动端 wire 不变：
 
