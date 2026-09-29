@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-plugin",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "dsh-mobile bridge: NATS outbound bridge plugin for deepseek-harness (mobile client transport, pairing, device tokens)",
   "type": "module",
   "main": "lib/index.js",
@@ -18,7 +18,7 @@
   "dsh": {
     "client": {
       "platform": "web",
-      "inject": ["@deepseek-ai/dsh-client-ui-settings-plugins"]
+      "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager"]
     }
   },
   "files": [

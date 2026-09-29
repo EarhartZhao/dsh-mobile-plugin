@@ -8,6 +8,51 @@
 - [01-auth-pairing.md](docs/01-auth-pairing.md) — 认证与配对设计
 - [02-nats-server.md](docs/02-nats-server.md) — 复用既有 NATS Hub 的改动清单（websocket/TLS/账号/Leaf 部署）
 
+## 安装与接入
+
+本仓库是**树外插件**，不在 dsh 官方 bundle 里，接入有两条路径：
+
+**一、插件页安装（新用户该走的路，但本仓库目前还不支持）。** dsh 插件页只安装 *bundle*：宿主在跑 pnpm 之前先 inspect spec，包里没有 `dsh.bundle`（随包发布的 `cordis.patch.yml`）就直接拒绝，界面显示 `not-a-bundle`。本仓库当前既没声明 `dsh.bundle`，也没发布到 npm（`pnpm view dsh-mobile-plugin` 返回 404），所以插件页装不上。要开这条路，需要在包内加 `cordis.patch.yml`（把下面那段 insert 变成包自带的默认层，凭证留空）、package.json 补 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`、`files` 里带上该文件，然后发布或用 git 地址安装。
+
+**二、手工装进 profile（当前实际使用的方式）。** 在 `$DSH_HOME/profiles/<profile>` 里把本包加成依赖，并在该 profile 自己的 `cordis.patch.yml` 写一行 insert：
+
+```yaml
+- insert:
+    - id: mobile-bridge
+      name: dsh-mobile-plugin
+      config:
+        natsUrl: 'nats://127.0.0.1:4222'
+        hubWssUrl: 'wss://<hub-host>:8443'
+        hubUser: '<c-end 账号>'
+        instanceId: 'home'
+```
+
+依赖用 `link:<本仓库路径>`（开发机）或 git/tarball spec（其它机器）。**Windows 上用 `link:` 时，本仓库的 `node_modules` 必须无符号链接**：profile 的 `nodeLinker` 是 `hoisted`，每次安装都会把整个仓库目录复制进 profile，复制里遇到符号链接就要重建，而非提权的 dsh 宿主没有建符号链接的权限，会以 `ERR_PNPM_EPERM` 失败（界面只显示「没有写入权限，无法安装」）。本仓库因此在 `pnpm-workspace.yaml` 固定 `nodeLinker: hoisted`，别把它删掉。
+
+## 凭证放哪：配置分层与推荐做法
+
+各层各司其职：
+
+| 层 | 位置 | 该放什么 |
+|---|---|---|
+| 组合层 | bundle / profile 的 `cordis.patch.yml` | 结构与非密默认值：`natsUrl`、`hubWssUrl`、`instanceId`、TTL。**不放真实密码** |
+| 用户层 | `$DSH_HOME/settings.yaml` 的 `mobile-bridge` 命名空间 | 本机用户自己的值；控制台「保存」写的就是这一层 |
+| 引用层（官方推荐） | credentials seam：`dsh-credentials-local`（`.credentials.yaml`）、进程环境或 `.env` | 真正的密文；配置里只留引用名 |
+
+`hubPass` 现在是 `z.string().role('secret')`（见 `src/config.ts`）。`role('secret')` 只保证**不把默认值带进表单、不下发到 wire**——宿主 `redactSecrets` 会把值换成占位，所以非本机请求只拿得到「是否已配置」。值本身仍以明文写在 `$DSH_HOME/settings.yaml`。
+
+dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原则是「**secret 不进配置**」：settings 与 `cordis.yml` 只写引用名（环境变量名），值由 `@deepseek-ai/dsh-credentials-local` 这类 provider 持有，消费方按需 `ctx.credentials.resolve(ref)`，配置 UI 只用 `describe(ref)` 报「是否配置 / 来源 / 可写」，永不回显值。需要同步、共享或渲染配置 UI 的部署，官方推荐走这条。
+
+按 seam 迁移的方向（**尚未实现**）：
+
+| 现在 | 迁移后 |
+|---|---|
+| `hubPass: z.string().role('secret')` | `hubPassRef: z.string().default('DSH_MOBILE_HUB_PASS')`，值走 `ctx.credentials.set/unset` |
+| 控制台预填并明文显示密码 | 控制台显示「已配置 / 来源 / 可写」+「设置 / 清除」按钮 |
+| 启动时读一次配置 | 每次发码与 hub-check 前 `resolve` 一次，轮换凭证无需重启 |
+
+代价也要说清楚：现在的回环控制台会把已保存的密码预填、默认明文显示，方便当场核对是不是 Hub 上那个值；改走 seam 之后这条路没有了，只能看到「已配置」，值只能由 bridge 自己在发码时 resolve。
+
 ## 移动端兼容自述
 
 `mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
@@ -33,11 +78,16 @@
 
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
 
+0.2.11 修两处跟宿主演进有关的接入问题，移动端 wire 不变：
+
+1. dsh 0.1.7 起把插件配置从「设置」搬到了侧边栏的「插件」页，`settings.plugin.item` 槽位退役。浏览器半边改为注册进 `plugins.bundle.config`（以包名 `dsh-mobile-plugin` 为 key），渲染在 bundle 详情页的配置区；`dsh.client.inject` 相应改为 `@deepseek-ai/dsh-client-ui-plugin-manager`。
+2. profile 用 `nodeLinker: hoisted` 加 `link:` 引用本仓库时，pnpm 会把整个目录复制进 profile，本仓库 `node_modules` 里的符号链接在非提权的 dsh 宿主上无法重建，安装会以 `ERR_PNPM_EPERM` 失败。本仓库因此改用 `nodeLinker: hoisted`，保持目录无符号链接。
+
 ## 首次配置（顺序不能颠倒）
 
 手机连 Hub 用的是**插件里配置的 Hub 账号凭证**——它随配对二维码下发，App 不内置任何账号。所以首次必须先配置、再发码：
 
-1. 打开设置里的「移动端」卡片（或 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码并保存。密码是 `role('secret')` 字段，落在 `$DSH_HOME/settings.yaml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"。
+1. 打开**侧边栏 → 插件 → `dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码并保存。密码是 `role('secret')` 字段，落在 `$DSH_HOME/settings.yaml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"。
 2. 确认状态为「已连接」（本地 NATS 就绪）。
 3. 再点「生成配对二维码」。
 

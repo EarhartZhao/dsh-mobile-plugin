@@ -1,3 +1,10 @@
+# The dsh web profile installs with `node-linker=hoisted` and declares this
+# package as a `link:` dependency, so its install re-materializes this whole
+# directory. An isolated install would leave a `.pnpm` symlink farm here, and
+# rebuilding those symlinks inside the copy needs the Windows "create symbolic
+# link" privilege the unelevated dsh host lacks — the profile install then
+# fails with EPERM. Keep this tree symlink-free.
+nodeLinker: hoisted
 allowBuilds:
   esbuild: true
 onlyBuiltDependencies:
