@@ -9,7 +9,7 @@
  * onboarding wizard. See docs/00-plugin-plan.md.
  */
 import { homedir } from 'node:os'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -23,6 +23,7 @@ import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from '.
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
+import { natsEndpoint, probePort } from './nats-launch.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -65,6 +66,26 @@ interface SettingsService {
 
 function dshHome(): string {
   return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+}
+
+/**
+ * Version of the host that composed this plugin, for `host.describe`.
+ *
+ * The launcher runs `node --import tsx`, which sets no `npm_package_version`,
+ * so the App used to read "dev" from every real deployment. The harness starts
+ * the plugin with its own root as the working directory, so its manifest is the
+ * answer; cached because a host upgrade needs a restart anyway.
+ */
+let hostVersionCache: string | undefined
+function hostVersion(): string {
+  if (hostVersionCache !== undefined) return hostVersionCache
+  try {
+    const manifest = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as { version?: unknown }
+    hostVersionCache = typeof manifest.version === 'string' ? manifest.version : 'dev'
+  } catch {
+    hostVersionCache = 'dev'
+  }
+  return hostVersionCache
 }
 
 function sameConfig(left: Config, right: Config): boolean {
@@ -256,6 +277,13 @@ export class MobileBridge extends Service {
       return { ok: false, message: `找不到 NATS 配置文件：${configPath}` }
     }
 
+    // A server already answering on the client port is the whole reason a fresh
+    // nats-server exits a moment later, so the port decides before spawning.
+    const endpoint = natsEndpoint(this.current.natsUrl)
+    if (await probePort(endpoint.host, endpoint.port)) {
+      return { ok: true, message: `本地 NATS 已在 ${endpoint.host}:${endpoint.port} 监听（不是本插件启动的进程）` }
+    }
+
     let child: ChildProcess
     try {
       child = spawn(command, ['-c', configPath], {
@@ -284,15 +312,37 @@ export class MobileBridge extends Service {
       setTimeout(() => finish(null), 250)
     })
     child.unref()
-    if (spawnError !== null) {
+    const drop = (): void => {
       if (this.localNatsProcess === child) this.localNatsProcess = null
+    }
+    if (spawnError !== null) {
+      drop()
       return { ok: false, message: `启动 NATS 失败：${spawnError.message}` }
     }
-    if (child.exitCode !== null) {
-      if (this.localNatsProcess === child) this.localNatsProcess = null
-      return { ok: false, message: `NATS 已退出（代码 ${child.exitCode}），请检查配置文件：${configPath}` }
+    // Readiness, not the spawn result: the port opening is the proof the server
+    // is up, and the child exiting is the proof it is not.
+    const deadline = Date.now() + 3000
+    for (;;) {
+      if (child.exitCode !== null) {
+        drop()
+        return {
+          ok: false,
+          message: `NATS 已退出（代码 ${child.exitCode}），${endpoint.host}:${endpoint.port} 没有开始监听：`
+            + `端口可能已被别的进程占用，或 ${configPath} 被拒绝。`,
+        }
+      }
+      if (await probePort(endpoint.host, endpoint.port, 300)) {
+        return { ok: true, message: `NATS 已监听 ${endpoint.host}:${endpoint.port}（配置：${configPath}）` }
+      }
+      if (Date.now() >= deadline) {
+        return {
+          ok: false,
+          message: `NATS 进程已启动，但 ${endpoint.host}:${endpoint.port} 在 3 秒内没有开始监听；`
+            + `请检查 ${configPath} 与 nats-server 日志。`,
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 150))
     }
-    return { ok: true, message: `NATS 启动命令已执行（配置：${configPath}），正在连接…` }
   }
 
   /**
@@ -422,7 +472,7 @@ export class MobileBridge extends Service {
           namespace: 'session', method: 'list', args: { _request: {} },
         }).catch(() => ({ items: [] }))
         return {
-          version: process.env.npm_package_version ?? 'dev',
+          version: hostVersion(),
           cwd: process.cwd(),
           attachedSessions: typeof sessions === 'object' && sessions !== null
             && Array.isArray((sessions as { items?: unknown }).items)

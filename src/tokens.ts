@@ -2,7 +2,11 @@
  * Device tokens and one-time pairing codes, per docs/01-auth-pairing.md.
  *
  * Tokens are random 32-byte values; only their SHA-256 hash is persisted.
- * Pairing codes are short-lived, in-memory only, one-time, and rate-limited.
+ * Pairing codes are short-lived, in-memory only, and one-time. Guessing is
+ * bounded by the code itself — 8 characters over a 32-letter alphabet
+ * (32^8 ≈ 1.1e12), a 120-second lifetime, and at most three pending codes at
+ * once — not by a per-code attempt counter: a wrong guess names no code, so
+ * there is nothing to count against.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
@@ -25,7 +29,6 @@ interface TokenFile {
 interface PairingCode {
   code: string
   expiresAt: number
-  failures: number
 }
 
 export interface PairedDeviceToken {
@@ -39,8 +42,14 @@ export type PairingRedemption =
   | { ok: false, reason: 'invalid-code' | 'device-limit' }
 
 const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // no 0/O/1/I
-const MAX_PAIRING_FAILURES = 5
 const MAX_PENDING_CODES = 3
+
+/**
+ * Device records kept on disk. Revoked and expired devices stay listed (the
+ * console shows them as history), so without a cap a long-lived bridge would
+ * grow `tokens.json` with every pairing it ever saw.
+ */
+const DEVICE_HISTORY_LIMIT = 200
 
 function hashToken(token: string): string {
   return 'sha256:' + createHash('sha256').update(token, 'utf8').digest('hex')
@@ -72,11 +81,32 @@ export class TokenStore {
 
   private async save(): Promise<void> {
     if (!this.loaded) return
+    this.pruneDevices()
     const data: TokenFile = { version: 1, devices: [...this.devices.values()] }
     await mkdir(dirname(this.filePath), { recursive: true })
     const tmp = this.filePath + '.tmp'
     await writeFile(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 })
     await rename(tmp, this.filePath)
+  }
+
+  /** Drop the oldest records past the cap, dead ones first, keeping memory and disk in step. */
+  private pruneDevices(): void {
+    if (this.devices.size <= DEVICE_HISTORY_LIMIT) return
+    const now = Date.now()
+    const isDead = (device: DeviceEntry): boolean => device.revoked || Date.parse(device.expiresAt) <= now
+    const byNewest = (left: DeviceEntry, right: DeviceEntry): number =>
+      Date.parse(right.createdAt) - Date.parse(left.createdAt)
+    const all = [...this.devices.values()]
+    const keep = [
+      ...all.filter(device => !isDead(device)).sort(byNewest),
+      ...all.filter(isDead).sort(byNewest),
+    ].slice(0, DEVICE_HISTORY_LIMIT)
+    const kept = new Set(keep.map(device => device.id))
+    for (const device of all) {
+      if (kept.has(device.id)) continue
+      this.devices.delete(device.id)
+      this.tokenIndex.delete(device.tokenHash)
+    }
   }
 
   /**
@@ -99,7 +129,7 @@ export class TokenStore {
     const raw = randomBytes(8)
     let code = ''
     for (let i = 0; i < 8; i++) code += PAIRING_ALPHABET[raw[i] % PAIRING_ALPHABET.length]
-    const entry: PairingCode = { code, expiresAt: Date.now() + ttlSec * 1000, failures: 0 }
+    const entry: PairingCode = { code, expiresAt: Date.now() + ttlSec * 1000 }
     this.pairingCodes.set(code, entry)
     return { code, expiresAt: entry.expiresAt }
   }
@@ -181,7 +211,7 @@ export class TokenStore {
   private prunePairingCodes(): void {
     const now = Date.now()
     for (const [code, entry] of this.pairingCodes) {
-      if (entry.expiresAt <= now || entry.failures > MAX_PAIRING_FAILURES) this.pairingCodes.delete(code)
+      if (entry.expiresAt <= now) this.pairingCodes.delete(code)
     }
   }
 }

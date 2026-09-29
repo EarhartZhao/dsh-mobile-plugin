@@ -78,9 +78,20 @@ export async function openEventStream(
 ): Promise<AsyncIterable<unknown>> {
   const open = wireStream.open as (...args: unknown[]) => Promise<AsyncIterable<unknown>>
   const payload = { args: {} }
-  return open.length > 3
-    ? open('$events', payload, NO_UPLINK, undefined, signal)
-    : open('$events', payload, signal)
+  const modern = (): Promise<AsyncIterable<unknown>> => open('$events', payload, NO_UPLINK, undefined, signal)
+  const legacy = (): Promise<AsyncIterable<unknown>> => open('$events', payload, signal)
+  const preferred = open.length > 3 ? modern : legacy
+  const other = open.length > 3 ? legacy : modern
+  // Declared arity is a pre-call hint, not a contract: a carrier that declares
+  // optional or rest parameters reports 0 while still expecting the 0.1.7 tail.
+  // A refusal from the guessed shape therefore retries the other one, instead of
+  // taking approvals, questions, and every forwarded event down with it.
+  try {
+    return await preferred()
+  } catch (error) {
+    if (signal.aborted) throw error
+    return await other()
+  }
 }
 
 /** Concurrent workspace-file watches one bridge keeps open; the least recently
@@ -89,6 +100,13 @@ const FILE_WATCH_LIMIT = 4
 
 /** Concurrent job rosters one bridge follows; armed by the Sessions the App opens. */
 const JOB_WATCH_LIMIT = 8
+
+/**
+ * Concurrent Session streams one bridge follows. Every history read arms one
+ * long-lived `session/follow`, so browsing many Sessions and subagents would
+ * otherwise accumulate host streams for the whole mux generation.
+ */
+const SESSION_WATCH_LIMIT = 16
 
 /**
  * Adapts the dsh 0.1.5-rc.1 Typert Gateway `$events` stream to the legacy
@@ -127,7 +145,20 @@ export class GatewayEventAdapter {
     const key = sessionAddressKey(address)
     const sessionId = sessionAddressId(address)
     if (sessionId.length === 0) return
+    // Re-inserting moves the entry to the tail, so eviction follows attention:
+    // the Session the App just opened survives, the least recently opened goes.
+    this.wantedSessions.delete(key)
     this.wantedSessions.set(key, address)
+    while (this.wantedSessions.size > SESSION_WATCH_LIMIT) {
+      const oldest = this.wantedSessions.keys().next().value
+      if (oldest === undefined) break
+      this.wantedSessions.delete(oldest)
+      const controller = this.sessionWatchers.get(oldest)
+      if (controller !== undefined) {
+        this.sessionWatchers.delete(oldest)
+        controller.abort()
+      }
+    }
     if (this.muxSink !== undefined && this.muxLifetime !== undefined) this.startSessionWatcher(address)
   }
 

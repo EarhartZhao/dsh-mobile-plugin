@@ -78,6 +78,15 @@ dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原
 
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
 
+0.2.12 收口一轮评审发现的问题，移动端 wire 不变：
+
+1. 回环控制台的每个 JSON 路由都要过统一的门：peer 必须是回环、`Host` 必须是本机名（挡 DNS rebinding）、`Origin` 必须同源；改状态的请求还要带 `x-dsh-mobile-console: 1` 和 JSON body（浏览器里属非简单请求，跨站页面无法盲发）。此前只有「启动本地 NATS」检查来源，改配置、吊销设备、发配对码三条路都没有。
+2. 「启动本地 NATS」改成按端口就绪判定：先探测客户端端口是否已在监听（已有 NATS 就不再起第二个进程），启动后等它真正开始监听；子进程提前退出会带回退出码和排查提示，不再把「进程随后退出」报成成功。
+3. 删掉配对码里从未自增的 `failures` 计数——`MAX_PAIRING_FAILURES` 是一道不存在的保护。实际保护是 32^8 的码空间、120 秒有效期、同时最多 3 个待用码。
+4. `session/follow` 流加上 16 条上限（LRU，按最近打开淘汰）：此前浏览大量会话与子代理会一直累积宿主流，文件（4）和作业（8）本来就有上限。
+5. `$events` 打开的 arity 嗅探补了兜底：声明参数个数骗人时（例如 rest 参数报 0），第一种调用形状被拒就改用另一种，不再让审批、提问和全部转发事件一起失效。
+6. 设备台账上限 200 条（吊销/过期记录仍保留作历史，只是不再无限增长）、历史游标上限 64 条、子代理目录改成一次遍历加 Map（原来是每个子项扫一遍会话列表）、`host.describe` 的版本改读宿主 `package.json`（之前恒为 `dev`）。
+
 0.2.11 修两处跟宿主演进有关的接入问题，移动端 wire 不变：
 
 1. dsh 0.1.7 起把插件配置从「设置」搬到了侧边栏的「插件」页，`settings.plugin.item` 槽位退役。浏览器半边改为注册进 `plugins.bundle.config`（以包名 `dsh-mobile-plugin` 为 key），渲染在 bundle 详情页的配置区；`dsh.client.inject` 相应改为 `@deepseek-ai/dsh-client-ui-plugin-manager`。

@@ -157,7 +157,75 @@ describe('EventBridge', () => {
   })
 })
 
+describe('openEventStream fallback', () => {
+  it('retries the other tail when the declared arity lies', async () => {
+    const controller = new AbortController()
+    const calls: unknown[][] = []
+    // A rest-parameter carrier reports length 0 while expecting the 0.1.7 tail.
+    const open = (...args: unknown[]): Promise<AsyncIterable<unknown>> => {
+      calls.push(args)
+      if (args.length === 3) {
+        return Promise.reject(new Error('signals[0] must be an instance of AbortSignal'))
+      }
+      return Promise.resolve(objectStream([], args[4] as AbortSignal))
+    }
+    await openEventStream({ open: open as never }, controller.signal)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toHaveLength(3)
+    expect(calls[1]?.slice(0, 2)).toEqual(['$events', { args: {} }])
+    expect(calls[1]?.[4]).toBe(controller.signal)
+  })
+
+  it('keeps the failure when neither tail is accepted', async () => {
+    const controller = new AbortController()
+    let calls = 0
+    await expect(openEventStream({
+      open: (() => {
+        calls += 1
+        return Promise.reject(new Error('gateway down'))
+      }) as never,
+    }, controller.signal)).rejects.toThrow('gateway down')
+    expect(calls).toBe(2)
+  })
+})
+
 describe('GatewayEventAdapter', () => {
+  it('caps the Session streams it follows, releasing the least recently opened', async () => {
+    const controller = new AbortController()
+    const follows: { sessionId: string, signal: AbortSignal | undefined }[] = []
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async ({ namespace, method, args, signal }) => {
+        if (namespace === 'session' && method === 'follow') {
+          // The watcher names an address, not a bare Session id.
+          const request = args.request as { address?: { sessionId?: string } } | undefined
+          follows.push({ sessionId: String(request?.address?.sessionId ?? ''), signal })
+        }
+        return objectStream([], signal ?? controller.signal)
+      },
+    })
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const primed = iterator.next()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    for (let index = 0; index < 20; index += 1) {
+      adapter.watchSession({ kind: 'session', sessionId: `s${String(index).padStart(2, '0')}` })
+    }
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(follows).toHaveLength(20)
+    expect(follows.map(entry => entry.sessionId)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `s${String(index).padStart(2, '0')}`),
+    )
+    expect(follows.filter(entry => entry.signal?.aborted !== true)).toHaveLength(16)
+    expect(follows.slice(0, 4).every(entry => entry.signal?.aborted === true)).toBe(true)
+    expect(follows.slice(4).every(entry => entry.signal?.aborted !== true)).toBe(true)
+
+    controller.abort()
+    await iterator.return?.(undefined)
+    await primed.catch(() => undefined)
+  })
+
   it('adapts answerable events and settles them through $events/result', async () => {
     const requests: Request[] = []
     const controller = new AbortController()

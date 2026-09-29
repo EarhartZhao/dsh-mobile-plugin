@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.11'
+export const PLUGIN_VERSION = '0.2.12'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -414,13 +414,18 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
 function subagentCatalogValue(parentSessionId: string, projection: unknown, sessions: unknown): unknown {
   const values = isRecord(projection) && isRecord(projection.values) ? projection.values : {}
   const rows = Array.isArray(values['subagentCatalog']) ? values['subagentCatalog'] : []
-  const summaries = isRecord(sessions) && Array.isArray(sessions.items)
-    ? sessions.items.filter(isRecord)
-    : []
-  const parent = summaries.find(summary => summary['sessionId'] === parentSessionId)
+  const summaries = (isRecord(sessions) && Array.isArray(sessions.items) ? sessions.items : []).flatMap((item) => {
+    if (!isRecord(item) || typeof item['sessionId'] !== 'string') return []
+    return [{ id: item['sessionId'], summary: item }]
+  })
+  // One pass, one lookup per row: the catalog is built on every history read and
+  // a Host can hold hundreds of Sessions.
+  const byId = new Map(summaries.map(entry => [entry.id, entry.summary]))
+  const parents = new Set(summaries.flatMap(entry =>
+    typeof entry.summary['parentSessionId'] === 'string' ? [entry.summary['parentSessionId']] : []))
   const entries = rows.flatMap((row) => {
     if (!isRecord(row) || typeof row.id !== 'string') return []
-    const child = summaries.find(summary => summary['sessionId'] === row.id)
+    const child = byId.get(row.id)
     return [{
       kind: 'child',
       id: row.id,
@@ -429,10 +434,10 @@ function subagentCatalogValue(parentSessionId: string, projection: unknown, sess
       mode: row.mode === 'continuable' ? 'continuable' : 'one-shot',
       ...(typeof row.label === 'string' ? { label: row.label } : {}),
       activity: child?.['running'] === true ? 'running' : 'inactive',
-      hasChildren: summaries.some(summary => summary['parentSessionId'] === row.id),
+      hasChildren: parents.has(row.id),
     }]
   })
-  return { entries, parentAvailable: parent?.['agentAvailable'] === true }
+  return { entries, parentAvailable: byId.get(parentSessionId)?.['agentAvailable'] === true }
 }
 
 /** The byte window one mobile `file.bytes` request asks for, as the Host spells it. */
@@ -646,6 +651,19 @@ function pairFailure(rpcId: unknown, message: 'mobile-pair-failed' | 'mobile-dev
 
 export class RpcBridge {
   private readonly historyCursors = new Map<string, number>()
+  /** Cursors kept per address; a long-lived bridge must not grow without bound. */
+  private static readonly HISTORY_CURSOR_LIMIT = 64
+
+  /** Remember one address's cursor, evicting the least recently used entry. */
+  private rememberCursor(key: string, cursor: number): void {
+    this.historyCursors.delete(key)
+    this.historyCursors.set(key, cursor)
+    while (this.historyCursors.size > RpcBridge.HISTORY_CURSOR_LIMIT) {
+      const oldest = this.historyCursors.keys().next().value
+      if (oldest === undefined) break
+      this.historyCursors.delete(oldest)
+    }
+  }
 
   /** This Session's tool-view projection, when the host exposed a tool registry. */
   private projector(sessionId: string): ((event: Record<string, unknown>) => unknown) | undefined {
@@ -807,7 +825,7 @@ export class RpcBridge {
                 throw new Error('session follow did not provide a cursor')
               }
               throughSeq = first.cursor
-              this.historyCursors.set(key, throughSeq)
+              this.rememberCursor(key, throughSeq)
             }
             const page = await this.options.gateway.invoke({
               namespace: 'session', method: 'page',
@@ -822,7 +840,7 @@ export class RpcBridge {
             args: { request: { address, maxMessages: request.maxMessages } },
           })
           const first = await firstValue(stream)
-          if (isRecord(first) && typeof first.cursor === 'number') this.historyCursors.set(key, first.cursor)
+          if (isRecord(first) && typeof first.cursor === 'number') this.rememberCursor(key, first.cursor)
           msg.respond(new TextEncoder().encode(serverResult(id, historyValue(first, this.projector(sessionAddressTarget(address))))))
           return
         }

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -110,5 +110,39 @@ describe('TokenStore', () => {
 
     const raw = await import('node:fs/promises').then(fs => fs.readFile(join(dir, 'tokens.json'), 'utf8'))
     expect(raw).not.toContain(result!.token)
+  })
+})
+
+describe('TokenStore device history', () => {
+  it('caps the ledger when it grows past the limit, dropping the oldest records first', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mobile-tokens-cap-'))
+    try {
+      const file = join(dir, 'tokens.json')
+      const base = Date.parse('2026-01-01T00:00:00.000Z')
+      const devices = Array.from({ length: 250 }, (_, index) => ({
+        id: `d${String(index).padStart(3, '0')}`,
+        name: `device-${String(index)}`,
+        tokenHash: `sha256:${String(index)}`,
+        createdAt: new Date(base + index * 60_000).toISOString(),
+        expiresAt: new Date(base + 365 * 86_400_000).toISOString(),
+        revoked: false,
+      }))
+      await writeFile(file, JSON.stringify({ version: 1, devices }), 'utf8')
+
+      const store = new TokenStore(file)
+      await store.load()
+      // Any write prunes: revoking the oldest record is the cheapest trigger.
+      await store.revoke('d000')
+
+      expect(store.list()).toHaveLength(200)
+      const saved = JSON.parse(await readFile(file, 'utf8')) as { devices: { id: string }[] }
+      expect(saved.devices).toHaveLength(200)
+      expect(saved.devices.map(device => device.id)).toContain('d249')
+      // Newest 200 win: d050 is the last kept record, d049 the first dropped.
+      expect(saved.devices.map(device => device.id)).toContain('d050')
+      expect(saved.devices.map(device => device.id)).not.toContain('d049')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

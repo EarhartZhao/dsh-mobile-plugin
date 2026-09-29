@@ -61,16 +61,80 @@ export function missingHubCredentials(config: Config): string | null {
 
 /**
  * Whether the request arrived over the loopback interface. Fail-closed: an
- * unknown peer is treated as remote. Only the console secret below uses this
- * today — the wizard is the owner's own screen on their own machine, and
- * showing the saved password is what makes a wrong one visible, but the same
- * response served to another origin would hand it out.
+ * unknown peer is treated as remote. The wizard is the owner's own screen on
+ * their own machine, and showing the saved password is what makes a wrong one
+ * visible — but the same response served to another origin would hand it out,
+ * so every console route runs {@link consoleRequestRejection} first.
  */
 export function isLoopbackRequest(req: IncomingMessage): boolean {
   const remoteAddress = req.socket.remoteAddress
   return remoteAddress === '127.0.0.1'
     || remoteAddress === '::1'
     || remoteAddress === '::ffff:127.0.0.1'
+}
+
+/** Header a same-origin console page must carry on every state-changing call. */
+export const CONSOLE_HEADER = 'x-dsh-mobile-console'
+
+function header(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers?.[name]
+  return Array.isArray(value) ? value[0] : value
+}
+
+/** Host names that only ever address this machine. */
+function isLoopbackHost(host: string): boolean {
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0]
+  return name === '127.0.0.1' || name === '[::1]' || name === 'localhost'
+}
+
+/**
+ * Why a console request must be refused, or null when it may run.
+ *
+ * The console drives pairing and the Hub credential, so three boundaries have
+ * to hold before any handler sees a request:
+ *
+ *   - peer — the socket must be loopback; an exposed host must not serve this.
+ *   - host — a browser keeps its own `Host` while the socket is loopback, so a
+ *     name that is not this machine is a rebinding attempt, not a local page.
+ *   - origin — a cross-origin caller must not drive the wizard, even from this
+ *     machine's browser.
+ *
+ * State-changing calls additionally require the console header and a JSON
+ * body: both are non-simple for a browser, so a page that can reach the port
+ * cannot fire them blind with `no-cors`.
+ * @param req - incoming console request.
+ * @param options - whether this request changes state.
+ * @returns the refusal (status and message) or null.
+ */
+export function consoleRequestRejection(
+  req: IncomingMessage,
+  options: { mutating: boolean },
+): { status: number, error: string } | null {
+  if (!isLoopbackRequest(req)) return { status: 403, error: 'loopback only' }
+  const host = header(req, 'host')
+  if (host !== undefined && host !== '' && !isLoopbackHost(host)) {
+    return { status: 403, error: 'loopback host required' }
+  }
+  const origin = header(req, 'origin')
+  if (origin !== undefined && origin !== '' && origin !== 'null') {
+    let originHost: string
+    try {
+      originHost = new URL(origin).host
+    } catch {
+      return { status: 403, error: 'same-origin required' }
+    }
+    if (host !== undefined && host !== '' && originHost !== host) {
+      return { status: 403, error: 'same-origin required' }
+    }
+  }
+  if (!options.mutating) return null
+  if ((header(req, 'content-type') ?? '').split(';')[0]?.trim().toLowerCase() !== 'application/json') {
+    return { status: 415, error: 'application/json required' }
+  }
+  if (header(req, CONSOLE_HEADER) !== '1') {
+    return { status: 403, error: 'console header required' }
+  }
+  return null
 }
 
 /** Register all console routes on the webserver; returns the disposer. */
@@ -93,6 +157,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       kind: 'exact',
       path: '/mobile-bridge/api/status',
       handler: (req, res) => {
+        const rejected = consoleRequestRejection(req, { mutating: false })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const bridge = backend.bridge()
         const config = backend.currentConfig()
         json(res, 200, {
@@ -114,6 +180,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       path: '/mobile-bridge/api/config',
       handler: async (req, res) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         try {
           const body = await readJson(req)
           const patch: Partial<Config> = {}
@@ -133,13 +201,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       path: '/mobile-bridge/api/nats/start',
       handler: async (req, res) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        const remoteAddress = req.socket.remoteAddress
-        if (remoteAddress !== undefined
-          && remoteAddress !== '127.0.0.1'
-          && remoteAddress !== '::1'
-          && remoteAddress !== '::ffff:127.0.0.1') {
-          return json(res, 403, { error: 'loopback only' })
-        }
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         try {
           const result = await backend.startNats()
           json(res, result.ok ? 200 : 400, result)
@@ -153,6 +216,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       path: '/mobile-bridge/api/pair',
       handler: async (req, res) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         // Refuse before minting: a code handed out for an unusable payload
         // still burns one of the three pending slots.
         const missing = missingHubCredentials(backend.currentConfig())
@@ -191,7 +256,9 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
     webServer.register({
       kind: 'exact',
       path: '/mobile-bridge/api/hub-check',
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
+        const rejected = consoleRequestRejection(req, { mutating: false })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const result = await checkHub(backend.currentConfig())
         json(res, 200, result)
       },
@@ -199,7 +266,9 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
     webServer.register({
       kind: 'exact',
       path: '/mobile-bridge/api/devices',
-      handler: (_req, res) => {
+      handler: (req, res) => {
+        const rejected = consoleRequestRejection(req, { mutating: false })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         json(res, 200, { devices: backend.bridge().listDevices() })
       },
     }),
@@ -208,6 +277,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       path: '/mobile-bridge/api/revoke',
       handler: async (req, res) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const body = await readJson(req)
         const ok = await backend.bridge().revokeDevice(String(body.deviceId ?? ''))
         json(res, ok ? 200 : 404, { ok })
@@ -332,7 +403,9 @@ $('hubPassToggle').onclick = () => {
 
 async function api(path, body) {
   const res = await fetch('/mobile-bridge/api/' + path, body === undefined ? {} : {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-dsh-mobile-console': '1' },
+    body: JSON.stringify(body),
   })
   return res.json()
 }

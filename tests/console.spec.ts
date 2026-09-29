@@ -57,8 +57,18 @@ function captureRoutes(
   return routes
 }
 
-/** Minimal request/response pair: only the members the console routes touch. */
-function exchange(remoteAddress: string, method = 'GET'): {
+/**
+ * Minimal request/response pair: only the members the console routes touch.
+ *
+ * Defaults describe the real console page on this machine — loopback socket,
+ * loopback `Host`, same origin, JSON body — and a state-changing call carries
+ * the console header. Pass `undefined` for a header to drop it.
+ */
+function exchange(
+  remoteAddress: string,
+  method = 'GET',
+  headers: Record<string, string | undefined> = {},
+): {
   req: IncomingMessage
   res: ServerResponse
   json: () => Record<string, unknown>
@@ -70,8 +80,21 @@ function exchange(remoteAddress: string, method = 'GET'): {
     writeHead: (next: number) => { code = next; return res },
     end: (chunk?: unknown) => { text += typeof chunk === 'string' ? chunk : ''; return res },
   } as unknown as ServerResponse
+  const merged: Record<string, string | string[] | undefined> = method === 'POST'
+    ? {
+        host: '127.0.0.1:3080',
+        origin: 'http://127.0.0.1:3080',
+        'content-type': 'application/json',
+        'x-dsh-mobile-console': '1',
+      }
+    : { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' }
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) delete merged[name]
+    else merged[name] = value
+  }
   const req = {
     method,
+    headers: merged,
     socket: { remoteAddress },
     [Symbol.asyncIterator]: async function* () { /* route bodies parse as empty */ },
   } as unknown as IncomingMessage
@@ -103,13 +126,13 @@ describe('console status route', () => {
     expect(configOf(call.json()).hubPassConfigured).toBe(true)
   })
 
-  it('withholds the password from any other peer', async () => {
+  it('refuses a non-loopback caller outright, so the password cannot leak', async () => {
     const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
     for (const peer of ['10.0.0.7', '::ffff:10.0.0.7']) {
       const call = exchange(peer)
       await route(call.req, call.res)
-      expect(configOf(call.json()).hubPass).toBeUndefined()
-      expect(configOf(call.json()).hubPassConfigured).toBe(true)
+      expect(call.status()).toBe(403)
+      expect(JSON.stringify(call.json())).not.toContain('secret-pass')
     }
   })
 })
@@ -161,5 +184,66 @@ describe('console pairing route', () => {
     await route(call.req, call.res)
     expect(call.status()).toBe(200)
     expect(String(call.json().hubWarning)).toContain('端口不通')
+  })
+})
+
+describe('console request gate', () => {
+  const readPaths = [
+    '/mobile-bridge/api/status',
+    '/mobile-bridge/api/devices',
+    '/mobile-bridge/api/hub-check',
+  ]
+  const writePaths = [
+    '/mobile-bridge/api/config',
+    '/mobile-bridge/api/pair',
+    '/mobile-bridge/api/revoke',
+    '/mobile-bridge/api/nats/start',
+  ]
+
+  it('refuses every route for a peer that is not loopback', async () => {
+    for (const path of [...readPaths, ...writePaths]) {
+      const route = captureRoutes(baseConfig).get(path)!
+      const call = exchange('10.0.0.7', path === '/mobile-bridge/api/status' ? 'GET' : 'POST')
+      await route(call.req, call.res)
+      expect([path, call.status()]).toEqual([path, 403])
+      expect(String(call.json().error)).toBe('loopback only')
+    }
+  })
+
+  it('refuses a rebinding attempt: loopback socket carrying a foreign Host', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1', 'GET', {
+      host: 'evil.example:3080',
+      origin: 'http://evil.example:3080',
+    })
+    await route(call.req, call.res)
+    expect(call.status()).toBe(403)
+    expect(String(call.json().error)).toBe('loopback host required')
+  })
+
+  it('refuses a cross-origin caller even from this machine', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1', 'GET', { origin: 'http://evil.example' })
+    await route(call.req, call.res)
+    expect(call.status()).toBe(403)
+    expect(String(call.json().error)).toBe('same-origin required')
+  })
+
+  it('refuses a state change without the console header', async () => {
+    for (const path of writePaths) {
+      const route = captureRoutes(baseConfig).get(path)!
+      const call = exchange('127.0.0.1', 'POST', { 'x-dsh-mobile-console': undefined })
+      await route(call.req, call.res)
+      expect([path, call.status()]).toEqual([path, 403])
+      expect(String(call.json().error)).toBe('console header required')
+    }
+  })
+
+  it('refuses a state change whose body is not JSON', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/config')!
+    const call = exchange('127.0.0.1', 'POST', { 'content-type': 'text/plain' })
+    await route(call.req, call.res)
+    expect(call.status()).toBe(415)
+    expect(String(call.json().error)).toBe('application/json required')
   })
 })
