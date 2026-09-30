@@ -1,7 +1,12 @@
 # NATS 设施改动清单（复用既有 Hub）
 
-> 决策记录（2026-08-25）：不新建 NATS 服务器，复用已上线的 Hub（腾讯云 115.159.57.137，见
+> 想从零自建一套 NATS（Hub + Leaf）请看 [03-nats-self-host.md](03-nats-self-host.md)；
+> 本文是现有部署的**增量改动清单**与决策记录。
+>
+> 决策记录（2026-08-25）：不新建 NATS 服务器，复用已上线的 Hub（见
 > distributed-knowledge-architecture.md）。本文列出为接入 dsh-mobile 所需的**增量改动**。
+> 下文用 `<hub-host>` 指代 Hub 地址，照抄时替换成自己的值；本机部署实况是 Hub `115.159.57.137`
+> （腾讯云）、配置文件 `/etc/nats/hub.conf`、本机 Leaf `C:\nats\leaf.conf`。
 >
 > Hub 实测（2026-08-25，从本机）：4222 / 7422 端口可达；`nats-hub` v2.14.4；
 > `auth_required: true`；`headers: true`（设备 token 走 NATS headers 的前提成立）；
@@ -23,9 +28,10 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
 
 # 服务器证书（SAN 必须是 IP，825 天——主流客户端对服务端证书的最长接受期）
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-  -subj "/CN=115.159.57.137" -keyout server.key -out server.csr
+  -subj "/CN=<hub-host>" -keyout server.key -out server.csr
 
-printf "subjectAltName=IP:115.159.57.137" > san.ext
+# 拨 IP 写 IP:<hub-host>，拨域名写 DNS:<hub-host>
+printf "subjectAltName=IP:<hub-host>" > san.ext
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -days 825 -extfile san.ext -out server.crt
 ```
@@ -48,7 +54,7 @@ websocket {
 }
 ```
 
-手机只连 `wss://115.159.57.137:8443`。没有 Caddy、没有域名、没有证书续期任务——服务端证书到期前（约 2 年）用同一 CA 重签一张换上即可，App 无感知。
+手机只连 `wss://<hub-host>:8443`。没有 Caddy、没有域名、没有证书续期任务——服务端证书到期前（约 2 年）用同一 CA 重签一张换上即可，App 无感知。
 
 > 备选（如未来想要"零 App 侧配置"）：Let's Encrypt shortlived profile 支持 IP 证书（2026-08 核实），但 160 小时有效期意味着续期自动化必须绝对可靠，且 ACME 客户端对 RFC 8738 IP 标识的支持参差。个人部署不值得。
 
@@ -70,14 +76,14 @@ websocket {
 
 ### 密码丢了怎么办
 
-`setup-hub.sh` 只在创建时打印一次密码（`openssl rand -hex 16`，32 位十六进制），之后不再回显；它存在的唯一位置是 Hub 上的 `/etc/nats/hub.conf`。用 `scripts/hub-credential.sh` 在 Hub 上读回或轮换：
+`setup-hub.sh` 只在创建时打印一次密码（`openssl rand -hex 16`，32 位十六进制），之后不再回显；它存在的唯一位置是 Hub 上的 `/etc/nats/hub.conf`。用 `../dsh-mobile/scripts/hub-credential.sh` 在 Hub 上读回或轮换（这两个脚本都在 dsh-mobile 仓库，不在本仓库）：
 
 ```bash
-ssh root@115.159.57.137 'bash -s show'   < scripts/hub-credential.sh   # 读回当前密码
-ssh root@115.159.57.137 'bash -s rotate' < scripts/hub-credential.sh   # 换成新随机密码
+ssh root@<hub-host> 'bash -s show'   < ../dsh-mobile/scripts/hub-credential.sh   # 读回当前密码
+ssh root@<hub-host> 'bash -s rotate' < ../dsh-mobile/scripts/hub-credential.sh   # 换成新随机密码
 ```
 
-`rotate` 会先备份 `hub.conf`、只改那一个账号行、用 `nats-server -t` 校验，任何一步失败都原样回滚。轮换是安全的：App 不内置该凭证（经二维码下发），Leaf 用的是独立账号（`leaf-a`），已配对设备持有的是应用层 token——所以轮换后只需把新值填进插件设置卡，不必重新配对。
+`rotate` 会先备份 `hub.conf`、只改那一个账号行、用 `nats-server -t` 校验，任何一步失败都原样回滚。轮换不打断已有配对：App 不内置该凭证（经二维码下发），Leaf 用的是独立账号（`leaf-a`），设备持有的是应用层 token。但要记得两件事：把新值填进插件设置卡，并让手机**重新扫一次码**——手机里的 NATS 凭证来自配对时的二维码，不会自动更新。
 
 > **单用户多终端**（2026-08-26 确认）：只有一个用户，所有终端共用 `c-end-dsh` 这一个账号，无需按机主/实例拆分账号。终端粒度的管理在应用层设备 token（见 01-auth-pairing.md）。账号不打进 App——经配对二维码传递。
 
@@ -95,23 +101,26 @@ ssh root@115.159.57.137 'bash -s rotate' < scripts/hub-credential.sh   # 换成�
 2. `C:\nats\leaf.conf`：
 
 ```hcl
+host: 127.0.0.1        # 本机客户端口没有认证，只监听回环
 port: 4222
-server_name: "leaf-dsh-pc"
+server_name: "leaf-<instance>"
 
 leafnodes {
   remotes = [
-    { url: "nats://leaf-c:<密码>@115.159.57.137:7422" }
+    { url: "nats://leaf-c:<密码>@<hub-host>:7422" }
   ]
 }
 ```
+
+通用写法与 Linux 侧的写法见 [03-nats-self-host.md](03-nats-self-host.md) 第 3 节。
 
 3. 常驻运行（Windows：任务计划程序 / NSSM 注册为服务），日志出现 `Leafnode connection created` 即接入成功。
 4. 插件连接 `nats://127.0.0.1:4222`（本机无认证），Hub 不可达时 Leaf 自动重试，插件无感知。
 
 ## 三、验收清单
 
-- [ ] 服务器上 `openssl s_client -connect 115.159.57.137:8443 -CAfile ca.crt` 校验通过，且**不带** `-CAfile` 时校验失败（确认不是公共 CA 签的）。
-- [ ] 手机网络（关 WiFi 用蜂窝）下 App 内 `nats.ws` 连 `wss://115.159.57.137:8443` 用 `c-end-dsh` 能连上。
+- [ ] 服务器上 `openssl s_client -connect <hub-host>:8443 -CAfile ca.crt` 校验通过，且**不带** `-CAfile` 时校验失败（确认不是公共 CA 签的）。
+- [ ] 手机网络（关 WiFi 用蜂窝）下 App 内 `nats.ws` 连 `wss://<hub-host>:8443` 用 `c-end-dsh` 能连上。
 - [ ] `c-end-dsh` 账号 sub `svc.dsh.>` 被拒、pub `evt.dsh.>` 被拒（ACL 生效）。
 - [ ] dsh 电脑 Leaf 日志显示已连 Hub；服务器上 `curl http://127.0.0.1:8222/leafz` 能看到该 Leaf。
 - [ ] 拔掉 dsh 电脑外网 2 分钟再恢复，Leaf 自动重连，期间本机 `nats sub`/`pub` 不受影响。
@@ -125,7 +134,8 @@ leafnodes {
 <!-- android/app/src/main/res/xml/network_security_config.xml -->
 <network-security-config>
   <domain-config>
-    <domain includeSubdomains="false">115.159.57.137</domain>
+    <!-- 换成你自己的 Hub 地址（IP 或域名） -->
+    <domain includeSubdomains="false">&lt;hub-host&gt;</domain>
     <trust-anchors>
       <certificates src="@raw/dsh_root_ca" />   <!-- ca.crt 放 res/raw/dsh_root_ca.crt -->
     </trust-anchors>
@@ -133,7 +143,9 @@ leafnodes {
 </network-security-config>
 ```
 
-作用域只圈定 `115.159.57.137`：App 访问其他任何站点仍走系统公共 CA，我们的私有 CA 不会扩大系统攻击面。RN 的 WebSocket 走 OkHttp，遵守该配置。
+作用域只圈定这一个 Hub 地址：App 访问其他任何站点仍走系统公共 CA，我们的私有 CA 不会扩大系统攻击面。RN 的 WebSocket 走 OkHttp，遵守该配置。
+本仓库当前的 App 构建里，这个域写死为 `115.159.57.137`、CA 是 `res/raw/dsh_root_ca.crt`；换 Hub 必须同时改这两处并重新打包，
+详见 [03-nats-self-host.md](03-nats-self-host.md) 第 0 节。
 
 ### iOS
 

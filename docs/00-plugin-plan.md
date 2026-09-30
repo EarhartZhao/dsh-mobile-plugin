@@ -42,7 +42,7 @@ dsh 机主                                手机
 ## 架构
 
 ```text
-phone (外网) ──wss:8443──► NATS Hub (115.159.57.137, 既有)
+phone (外网) ──wss:8443──► NATS Hub (<hub-host>, 既有)
                                ▲ leaf :7422（出站长连接，既有模式）
                       本地 Leaf nats-server (dsh 电脑, localhost:4222)
                                ▲ 本机明文连接，不出网卡
@@ -61,7 +61,7 @@ phone (外网) ──wss:8443──► NATS Hub (115.159.57.137, 既有)
 
 ## NATS 设施（已定：复用既有 Hub + 本机 Leaf）
 
-- **Hub**：已上线运行（腾讯云 115.159.57.137，v2.14.4；实测 4222/7422 可达，支持 headers，max_payload 1 MiB）。与知识库等其他服务共用同一 Hub，以 subject 命名空间隔离。
+- **Hub**：已上线运行（本机部署实况：腾讯云 `115.159.57.137`，v2.14.4；实测 4222/7422 可达，支持 headers，max_payload 1 MiB）。与知识库等其他服务共用同一 Hub，以 subject 命名空间隔离。换 Hub 或自建见 [02](02-nats-server.md) 与 [03](03-nats-self-host.md)。
 - **Hub 侧需追加**（仅此一项服务端改动）：私有 CA + `websocket` 监听 8443 原生 TLS（手机只走 wss://IP:8443，不用域名，不碰明文 4222）、dsh 专用 C 端账号。改动清单见 [02-nats-server.md](02-nats-server.md)。
 - **dsh 电脑**：部署本地 Leaf 节点（沿用既有 leaf-a~d 模式，见 Hub 文档第 4.5 节），插件连接 `localhost:4222`，无需账号（本机）。
 

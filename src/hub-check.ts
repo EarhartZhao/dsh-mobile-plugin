@@ -103,7 +103,8 @@ export async function checkHubPath(
       const message = `Hub 拒绝了账号「${config.hubUser}」的这组密码：手机扫码后会连不上 Hub。`
         + '请填 Hub 上实际配置的密码后重试。'
         + '密码是建 Hub 时随机生成、只存在 /etc/nats/hub.conf 里的，忘了就用 '
-        + 'scripts/hub-credential.sh 在 Hub 上读回（`bash -s show`）或轮换（`bash -s rotate`）。'
+        + 'dsh-mobile 仓库的 scripts/hub-credential.sh 在 Hub 上读回（`bash -s show`）或轮换（`bash -s rotate`）；'
+        + '自建 NATS 的完整流程见 docs/03-nats-self-host.md。'
       steps.push({ key: 'credentials', ok: false, message })
       return {
         ok: false,

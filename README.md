@@ -7,6 +7,7 @@
 - [00-plugin-plan.md](docs/00-plugin-plan.md) — 定位（NATS 出站桥）、架构、安装与里程碑
 - [01-auth-pairing.md](docs/01-auth-pairing.md) — 认证与配对设计
 - [02-nats-server.md](docs/02-nats-server.md) — 复用既有 NATS Hub 的改动清单（websocket/TLS/账号/Leaf 部署）
+- [03-nats-self-host.md](docs/03-nats-self-host.md) — 自建 NATS 服务教程（Hub 从零 → 本机 Leaf → 验收 → 故障排查）
 
 ## 安装与接入
 

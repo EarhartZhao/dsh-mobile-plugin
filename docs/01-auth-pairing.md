@@ -34,7 +34,7 @@ PC（本机操作）                      手机（外网）
    │  ◄── { code, expires }          │
    │  屏幕显示二维码                   │
    │  qr 内容（JSON，base64url）：      │
-   │  { hub: "wss://115.159.57.137:8443",
+   │  { hub: "wss://<hub-host>:8443",
    │    user, pass,                    │
    │    instance: "home-pc",           │
    │    caFp: "sha256:...",            │
