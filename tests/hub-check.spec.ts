@@ -4,11 +4,11 @@ import type { Config } from '../src/config.js'
 
 const config: Config = {
   natsUrl: 'nats://127.0.0.1:4222',
-  hubWssUrl: 'wss://115.159.57.137:8443',
-  hubUser: 'c-end-dsh',
+  hubWssUrl: 'wss://hub.test:8443',
+  hubUser: 'c-end-test',
   hubPass: 'real-password',
   hubCaFingerprint: '',
-  instanceId: 'home-mac',
+  instanceId: 'home-test',
   tokenTtlDays: 90,
   pairCodeTtlSec: 120,
   maxDevices: 10,
@@ -33,7 +33,7 @@ const noResponders = () => Object.assign(new Error('503'), { code: '503' })
 
 describe('hubProbeAddress', () => {
   it('targets the Hub client port on the same host', () => {
-    expect(hubProbeAddress('wss://115.159.57.137:8443')).toBe('nats://115.159.57.137:4222')
+    expect(hubProbeAddress('wss://hub.test:8443')).toBe('nats://hub.test:4222')
   })
 
   it('returns null for an address it cannot parse', () => {
@@ -56,7 +56,7 @@ describe('checkHubPath', () => {
     const result = await checkHubPath(config, { connectImpl: failingConnect('AUTHORIZATION_VIOLATION') })
     expect(result.ok).toBe(false)
     expect(result.reason).toBe('rejected')
-    expect(result.message).toContain('c-end-dsh')
+    expect(result.message).toContain('c-end-test')
   })
 
   it('does not blame the password when the port is simply unreachable', async () => {

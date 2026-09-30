@@ -428,7 +428,7 @@ const CONSOLE_HTML = `<!doctype html>
 <h2>服务器信息（NATS Hub）</h2>
 <p style="font-size:12px;opacity:.7;margin:0 0 4px">配对二维码里带的就是这里的地址与账号凭证，手机靠它连 Hub，因此三项都必须先填写并保存，否则二维码扫了也连不上。</p>
 <label>Hub 地址（wss://…:8443）</label><input id="hubWssUrl" placeholder="wss://203.0.113.10:8443">
-<label>账号（Hub 的 C 端受限账号）</label><input id="hubUser" placeholder="c-end-dsh">
+<label>账号（Hub 的 C 端受限账号）</label><input id="hubUser" placeholder="你的 Hub 账号">
 <label>密码（必填；留空表示不修改）</label>
 <div style="display:flex;gap:8px;align-items:center">
   <input id="hubPass" type="text" placeholder="未配置" autocomplete="off" spellcheck="false">

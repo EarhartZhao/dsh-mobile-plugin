@@ -7,7 +7,7 @@ import type { Config } from '../src/config.js'
 const baseConfig: Config = {
   natsUrl: 'nats://127.0.0.1:4222',
   hubWssUrl: 'wss://hub.test:8443',
-  hubUser: 'c-end-dsh',
+  hubUser: 'c-end-test',
   hubPass: 'secret-pass',
   hubCaFingerprint: '',
   instanceId: 'home',

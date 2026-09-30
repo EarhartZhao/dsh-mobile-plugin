@@ -5,8 +5,8 @@
 >
 > 决策记录（2026-08-25）：不新建 NATS 服务器，复用已上线的 Hub（见
 > distributed-knowledge-architecture.md）。本文列出为接入 dsh-mobile 所需的**增量改动**。
-> 下文用 `<hub-host>` 指代 Hub 地址，照抄时替换成自己的值；本机部署实况是 Hub `115.159.57.137`
-> （腾讯云）、配置文件 `/etc/nats/hub.conf`、本机 Leaf `C:\nats\leaf.conf`。
+> 下文用 `<hub-host>` 指代 Hub 地址、`<account>` 指代 dsh 专用的 C 端受限账号，照抄时替换成自己的值；
+> 示例地址一律用 RFC 5737 文档地址段（`203.0.113.0/24`）。具体部署的地址与账号只留在部署机上，不进本仓库。
 >
 > Hub 实测（2026-08-25，从本机）：4222 / 7422 端口可达；`nats-hub` v2.14.4；
 > `auth_required: true`；`headers: true`（设备 token 走 NATS headers 的前提成立）；
@@ -64,7 +64,7 @@ websocket {
 
 ```hcl
 {
-  user: c-end-dsh, password: <32位随机>
+  user: <account>, password: <32位随机>
   permissions = {
     publish = ["svc.dsh.>", "_INBOX.>"]
     subscribe = ["evt.dsh.>", "_INBOX.>"]
@@ -85,7 +85,7 @@ ssh root@<hub-host> 'bash -s rotate' < ../dsh-mobile/scripts/hub-credential.sh  
 
 `rotate` 会先备份 `hub.conf`、只改那一个账号行、用 `nats-server -t` 校验，任何一步失败都原样回滚。轮换不打断已有配对：App 不内置该凭证（经二维码下发），Leaf 用的是独立账号（`leaf-a`），设备持有的是应用层 token。但要记得两件事：把新值填进插件设置卡，并让手机**重新扫一次码**——手机里的 NATS 凭证来自配对时的二维码，不会自动更新。
 
-> **单用户多终端**（2026-08-26 确认）：只有一个用户，所有终端共用 `c-end-dsh` 这一个账号，无需按机主/实例拆分账号。终端粒度的管理在应用层设备 token（见 01-auth-pairing.md）。账号不打进 App——经配对二维码传递。
+> **单用户多终端**（2026-08-26 确认）：只有一个用户，所有终端共用这一个 C 端账号，无需按机主/实例拆分账号。终端粒度的管理在应用层设备 token（见 01-auth-pairing.md）。账号不打进 App——经配对二维码传递。
 
 ### 4. 安全组
 
@@ -120,8 +120,8 @@ leafnodes {
 ## 三、验收清单
 
 - [ ] 服务器上 `openssl s_client -connect <hub-host>:8443 -CAfile ca.crt` 校验通过，且**不带** `-CAfile` 时校验失败（确认不是公共 CA 签的）。
-- [ ] 手机网络（关 WiFi 用蜂窝）下 App 内 `nats.ws` 连 `wss://<hub-host>:8443` 用 `c-end-dsh` 能连上。
-- [ ] `c-end-dsh` 账号 sub `svc.dsh.>` 被拒、pub `evt.dsh.>` 被拒（ACL 生效）。
+- [ ] 手机网络（关 WiFi 用蜂窝）下 App 内 `nats.ws` 连 `wss://<hub-host>:8443` 用该账号能连上。
+- [ ] 该账号 sub `svc.dsh.>` 被拒、pub `evt.dsh.>` 被拒（ACL 生效）。
 - [ ] dsh 电脑 Leaf 日志显示已连 Hub；服务器上 `curl http://127.0.0.1:8222/leafz` 能看到该 Leaf。
 - [ ] 拔掉 dsh 电脑外网 2 分钟再恢复，Leaf 自动重连，期间本机 `nats sub`/`pub` 不受影响。
 - [ ] Hub 重启后 Leaf 与手机均自动重连。
@@ -144,7 +144,7 @@ leafnodes {
 ```
 
 作用域只圈定这一个 Hub 地址：App 访问其他任何站点仍走系统公共 CA，我们的私有 CA 不会扩大系统攻击面。RN 的 WebSocket 走 OkHttp，遵守该配置。
-本仓库当前的 App 构建里，这个域写死为 `115.159.57.137`、CA 是 `res/raw/dsh_root_ca.crt`；换 Hub 必须同时改这两处并重新打包，
+本仓库当前的 App 构建里，这个域写死成打包时所用的那个 Hub 地址、CA 是 `res/raw/dsh_root_ca.crt`；换 Hub 必须同时改这两处并重新打包，
 详见 [03-nats-self-host.md](03-nats-self-host.md) 第 0 节。
 
 ### iOS
@@ -165,7 +165,7 @@ leafnodes {
 | 服务器私钥 `server.key` | 仅服务器 `/etc/nats/tls/`，0600 |
 | 根 CA 私钥 `ca.key` | **离线保管**，不在任何在线设备上 |
 | leaf 账号 | dsh 电脑 `leaf.conf`（本机文件，不进代码库） |
-| C 端账号（`c-end-dsh`，唯一） | 插件向导里配置；经配对二维码传给每个终端。**不**打进 App 构建 |
+| C 端账号（唯一） | 插件向导里配置；经配对二维码传给每个终端。**不**打进 App 构建 |
 | 设备 token | 配对流程签发，仅存手机安全存储 |
 
 补充说明：App 二进制里**不含任何凭证**（只有 CA 公钥），反编译拿不到可用机密。即使 Hub 账号泄露，攻击者也只拿到 `svc.dsh.>` 命名空间的"围墙钥匙"，没有设备 token 仍调不动 harness——双层凭证的设计目标就是这个。

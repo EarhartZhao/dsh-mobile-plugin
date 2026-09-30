@@ -35,7 +35,7 @@ dsh 机主                                手机
 ## 用户模型（已定：单用户多终端）
 
 - **只有一个用户**，但可能有多个终端（手机、平板等）。不做多租户/多机主隔离。
-- Hub 上**一个 C 端账号**（`c-end-dsh`）即可，所有终端共用；它经配对二维码传给每个终端，不打进 App 构建。
+- Hub 上**一个 C 端受限账号**即可，所有终端共用；它经配对二维码传给每个终端，不打进 App 构建。
 - 多终端的管理粒度在**设备 token**：每个终端扫码配对拿自己的 token，设备列表/吊销按终端操作（`maxDevices` 配置项即终端数上限）。
 - App 二进制里**不含任何账号凭证**：反编译只能拿到 CA 公钥和 UI。
 
@@ -61,7 +61,7 @@ phone (外网) ──wss:8443──► NATS Hub (<hub-host>, 既有)
 
 ## NATS 设施（已定：复用既有 Hub + 本机 Leaf）
 
-- **Hub**：已上线运行（本机部署实况：腾讯云 `115.159.57.137`，v2.14.4；实测 4222/7422 可达，支持 headers，max_payload 1 MiB）。与知识库等其他服务共用同一 Hub，以 subject 命名空间隔离。换 Hub 或自建见 [02](02-nats-server.md) 与 [03](03-nats-self-host.md)。
+- **Hub**：已上线运行（v2.14.4；实测 4222/7422 可达，支持 headers，max_payload 1 MiB）。与知识库等其他服务共用同一 Hub，以 subject 命名空间隔离。地址与账号只留在部署机上，仓库里一律用 `<hub-host>` / `<account>` 占位。换 Hub 或自建见 [02](02-nats-server.md) 与 [03](03-nats-self-host.md)。
 - **Hub 侧需追加**（仅此一项服务端改动）：私有 CA + `websocket` 监听 8443 原生 TLS（手机只走 wss://IP:8443，不用域名，不碰明文 4222）、dsh 专用 C 端账号。改动清单见 [02-nats-server.md](02-nats-server.md)。
 - **dsh 电脑**：部署本地 Leaf 节点（沿用既有 leaf-a~d 模式，见 Hub 文档第 4.5 节），插件连接 `localhost:4222`，无需账号（本机）。
 

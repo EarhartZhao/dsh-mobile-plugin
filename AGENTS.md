@@ -32,7 +32,7 @@ dsh-mobile-plugin 是 deepseek-harness（dsh）的 cordis 插件，提供 NATS o
 写文档时的约定：
 
 - `README.md` 顶部的文档索引与 `docs/` 保持一致，新增文档要一起加进去。
-- 面向部署者的命令与配置写通用形式：Hub 地址用 `<hub-host>` 占位，示例 IP 用 RFC 5737 文档地址（`203.0.113.0/24`）。本机实况（真实地址、真实路径）只在一处集中标注——目前是 02 的开头，不要散落进示例里。
+- 面向部署者的命令与配置写通用形式：Hub 地址用 `<hub-host>`、C 端账号用 `<account>` 占位，示例 IP 用 RFC 5737 文档地址（`203.0.113.0/24`）。**仓库里不放部署实况**——真实地址、账号名、机器名、本机路径都只留在部署机上（2026-09-30 起，原先允许「集中在 02 开头标注一处」的例外也取消了）；测试夹具用 `hub.test`、`c-end-test`、`home-test` 这类明显假值。
 - NATS 服务端脚本**不在本仓库**：`setup-hub.sh`、`hub-credential.sh`、`verify-hub-acl.mjs`、`local-hub-standin.conf` 都在 `../dsh-mobile/scripts/`。引用它们时写跨仓库路径，别写成 `scripts/...`（这处笔误已经修过一次）。
 - 改动了 NATS 相关行为——配置字段、`hub-check` 的结论或文案、控制台的提示、服务端脚本的用法——要同步更新 02/03 以及 `src/hub-check.ts`、`src/console.ts` 里的提示文案，别让文档和运行时说法不一致。
 

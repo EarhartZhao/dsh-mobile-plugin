@@ -8,7 +8,7 @@
 
 ## 0. 先读这一节：自建 Hub 能不能被现成的 App 用
 
-App 的 release 构建把私有 CA 打进 `res/raw/dsh_root_ca.crt`，并且只对 `115.159.57.137` 这一个地址信任它
+App 的 release 构建把私有 CA 打进 `res/raw/dsh_root_ca.crt`，并且只对打包时写死的那一个 Hub 地址信任它
 （`network_security_config.xml` 的 `domain-config`）。所以换 Hub 时，三种情况只有两种能用：
 
 | 你的 Hub | 现成 release App 能连吗 | 怎么做 |
@@ -153,7 +153,7 @@ ssh root@<hub-host> 'chown nats:nats /etc/nats/tls/* && chmod 600 /etc/nats/tls/
 ### 2.4 用脚本一把过（可选）
 
 `setup-hub.sh` 在 dsh-mobile 仓库（[../dsh-mobile/scripts/setup-hub.sh](../dsh-mobile/scripts/setup-hub.sh)），
-幂等：装证书 → 追加 websocket 段（已存在则跳过）→ 插入 `c-end-dsh` 账号 → `nats-server -t` 校验 → 重启 → 握手自检，
+幂等：装证书 → 追加 websocket 段（已存在则跳过）→ 插入 C 端受限账号 → `nats-server -t` 校验 → 重启 → 握手自检，
 最后只打印一次新账号密码。
 
 ```bash
@@ -251,8 +251,8 @@ Windows 的 `C:\nats-server\nats-server.exe`，最后是 `PATH` 上的 `nats-ser
    ```
 
    期望：`sub evt.dsh.>` 成功，`sub svc.dsh.>` 与 `pub evt.dsh.>` 各吃一个 Permissions Violation。
-   注意该脚本把 Hub 地址写死为 `115.159.57.137:4222`
-   （[../dsh-mobile/scripts/verify-hub-acl.mjs](../dsh-mobile/scripts/verify-hub-acl.mjs)），自建 Hub 要先改这一行。
+   注意该脚本把 Hub 地址写死（`servers:` 那一行，见
+   [../dsh-mobile/scripts/verify-hub-acl.mjs](../dsh-mobile/scripts/verify-hub-acl.mjs)），自建 Hub 要先改这一行。
 3. **整条链路**：控制台点「测试 Hub 账号」，逐段看结论：
 
    | 段 | 含义 | 失败表现 |

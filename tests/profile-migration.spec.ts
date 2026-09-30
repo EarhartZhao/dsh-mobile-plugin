@@ -24,9 +24,9 @@ const legacyPatch = `# Your patch layer for this dsh profile.
       name: 'dsh-mobile-plugin'
       config:
         natsUrl: 'nats://127.0.0.1:4222'
-        hubUser: 'c-end-dsh'
+        hubUser: 'c-end-test'
         hubPass: 'secret'
-        instanceId: 'home-mac'
+        instanceId: 'home-test'
 - id: ui-settings-general
   name: "@deepseek-ai/dsh-client-ui-settings-general"
   config:
@@ -148,7 +148,7 @@ describe('migrateProfile', () => {
     - id: mobile-bridge
       name: dsh-mobile-plugin
       config:
-        instanceId: 'home-mac'
+        instanceId: 'home-test'
 `
     const { location } = await fixture(patch, ['dsh-mobile-plugin'])
     await migrateProfile(location, ids, { removeInsert: true })
@@ -156,7 +156,7 @@ describe('migrateProfile', () => {
 
     expect(text).toContain('id: telemetry')
     expect(text).toContain('insert:')
-    expect(text).toContain('instanceId: home-mac')
+    expect(text).toContain('instanceId: home-test')
     const document = parseDocument(text)
     expect(isSeq(document.contents)).toBe(true)
   })
