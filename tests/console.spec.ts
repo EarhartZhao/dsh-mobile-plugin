@@ -72,6 +72,7 @@ function exchange(
   req: IncomingMessage
   res: ServerResponse
   json: () => Record<string, unknown>
+  body: () => string
   status: () => number
 } {
   let text = ''
@@ -98,7 +99,13 @@ function exchange(
     socket: { remoteAddress },
     [Symbol.asyncIterator]: async function* () { /* route bodies parse as empty */ },
   } as unknown as IncomingMessage
-  return { req, res, json: () => JSON.parse(text) as Record<string, unknown>, status: () => code }
+  return {
+    req,
+    res,
+    json: () => JSON.parse(text) as Record<string, unknown>,
+    body: () => text,
+    status: () => code,
+  }
 }
 
 describe('missingHubCredentials', () => {
@@ -201,6 +208,26 @@ describe('console pairing route', () => {
     await route(call.req, call.res)
     expect(call.status()).toBe(200)
     expect(String(call.json().hubWarning)).toContain('端口不通')
+  })
+})
+
+describe('console page', () => {
+  it('splits paired devices into two tabs inside a height-capped pane', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    // One list for live devices, one for revoked ones, with the count on each tab.
+    expect(html).toContain('id="tabActive"')
+    expect(html).toContain('id="tabRevoked"')
+    expect(html).toContain("showDevices('revoked')")
+    expect(html).toContain('id="countActive"')
+    expect(html).toContain('id="countRevoked"')
+    // The device list is the page's only unbounded section: it scrolls at 520px.
+    expect(html).toContain('.devicePane { max-height: 520px; overflow: auto;')
+    // A revoked row reports its state instead of offering the same action again.
+    expect(html).toContain('没有已吊销的设备')
   })
 })
 

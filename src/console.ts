@@ -333,6 +333,18 @@ const CONSOLE_HTML = `<!doctype html>
   #qrFull .fullActions { display: flex; gap: 10px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid #8882; }
+  .tabs { display: flex; gap: 6px; margin: 0 0 8px; }
+  .tab { padding: 4px 12px; border: 1px solid #8884; border-radius: 999px; background: transparent; color: inherit; font-size: 13px; cursor: pointer; }
+  .tab[aria-selected="true"] { border-color: #2563eb; color: #2563eb; background: #2563eb1a; }
+  .tab .count { opacity: .6; margin-left: 5px; font-variant-numeric: tabular-nums; }
+  /* The device list is the only unbounded section here: cap it and scroll,
+     with the header pinned so the columns stay labelled. */
+  .devicePane { max-height: 520px; overflow: auto; border: 1px solid #8883; border-radius: 8px; }
+  .devicePane table { border-collapse: separate; border-spacing: 0; }
+  .devicePane th { position: sticky; top: 0; background: Canvas; }
+  .devicePane td, .devicePane th { padding: 6px 10px; }
+  .devicePane td:last-child, .devicePane th:last-child { text-align: right; }
+  .deviceState { opacity: .6; }
   .error { color: #dc2626; font-size: 13px; } .ok { color: #16a34a; font-size: 13px; }
 </style>
 </head>
@@ -393,7 +405,13 @@ const CONSOLE_HTML = `<!doctype html>
 </div>
 
 <h2>已配对设备</h2>
-<table><thead><tr><th>设备</th><th>配对时间</th><th>到期</th><th></th></tr></thead><tbody id="devices"></tbody></table>
+<div class="tabs" role="tablist">
+  <button class="tab" id="tabActive" role="tab" aria-selected="true" onclick="showDevices('active')">正在使用<span class="count" id="countActive">0</span></button>
+  <button class="tab" id="tabRevoked" role="tab" aria-selected="false" onclick="showDevices('revoked')">已吊销<span class="count" id="countRevoked">0</span></button>
+</div>
+<div class="devicePane">
+  <table><thead><tr><th>设备</th><th>配对时间</th><th>到期</th><th></th></tr></thead><tbody id="devices"></tbody></table>
+</div>
 
 <script>
 const $ = id => document.getElementById(id)
@@ -473,12 +491,42 @@ function formatTime(value) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 }
 
+/** Device names come from the pairing client, so they are data, not markup. */
+function escapeText(value) {
+  return String(value).replace(/[&<>"']/g, ch => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ))
+}
+
+/** Which tab is showing; the full list stays in memory so counts are always both. */
+let deviceTab = 'active'
+let deviceList = []
+
+/** Re-render the pane for the current tab, with both counts in the tab labels. */
+function renderDevices() {
+  const inUse = deviceList.filter(d => !d.revoked)
+  const revoked = deviceList.filter(d => d.revoked)
+  $('countActive').textContent = String(inUse.length)
+  $('countRevoked').textContent = String(revoked.length)
+  $('tabActive').setAttribute('aria-selected', deviceTab === 'active' ? 'true' : 'false')
+  $('tabRevoked').setAttribute('aria-selected', deviceTab === 'revoked' ? 'true' : 'false')
+  const rows = deviceTab === 'active' ? inUse : revoked
+  $('devices').innerHTML = rows.map(d =>
+    '<tr><td>' + escapeText(d.name) + '</td>' + '<td>' + d.createdAt.slice(0, 10) + '</td>' +
+    '<td>' + d.expiresAt.slice(0, 10) + '</td><td>' +
+    (d.revoked
+      ? '<span class="deviceState">已吊销</span>'
+      : '<button class="secondary" onclick="revoke(\\'' + d.id + '\\')">吊销</button>') + '</td></tr>'
+  ).join('') || '<tr><td colspan="4" class="deviceState">' +
+    (deviceTab === 'active' ? '暂无设备' : '没有已吊销的设备') + '</td></tr>'
+}
+
+window.showDevices = (tab) => { deviceTab = tab; renderDevices() }
+
 async function refreshDevices() {
   const { devices } = await api('devices')
-  $('devices').innerHTML = devices.map(d =>
-    '<tr><td>' + d.name + '</td><td>' + d.createdAt.slice(0, 10) + '</td><td>' + d.expiresAt.slice(0, 10) + '</td><td>' +
-    (d.revoked ? '已吊销' : '<button class="secondary" onclick="revoke(\\'' + d.id + '\\')">吊销</button>') + '</td></tr>'
-  ).join('') || '<tr><td colspan="4" style="opacity:.6">暂无设备</td></tr>'
+  deviceList = Array.isArray(devices) ? devices : []
+  renderDevices()
 }
 
 window.revoke = async (id) => { await api('revoke', { deviceId: id }); refreshDevices() }
