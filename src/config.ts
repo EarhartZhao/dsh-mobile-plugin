@@ -10,7 +10,13 @@ export interface Config {
   /** Hub C-end account handed to phones via the pairing QR. */
   hubUser: string
   hubPass: string
-  /** Hub CA fingerprint (display/verification aid in the app). */
+  /**
+   * Hub CA certificate (PEM or base64 DER). Rides the pairing QR so phones
+   * install it as the trust anchor for {@link hubWssUrl}, which is what lets
+   * one App build talk to any self-hosted Hub. See src/hub-ca.ts.
+   */
+  hubCaCert: string
+  /** Hub CA fingerprint; when set it must match {@link hubCaCert}. */
   hubCaFingerprint: string
   /** Subject namespace: svc.dsh.{instanceId}.* / evt.dsh.{instanceId}.* */
   instanceId: string
@@ -52,6 +58,7 @@ export const Config: z<Config> = z.object({
   hubWssUrl: z.string().default(''),
   hubUser: z.string().default(''),
   hubPass: z.string().role('secret').default(''),
+  hubCaCert: z.string().default(''),
   hubCaFingerprint: z.string().default(''),
   instanceId: z.string().pattern(/^[a-z0-9-]+$/).default('home'),
   tokenTtlDays: z.natural().default(90),

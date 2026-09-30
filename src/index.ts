@@ -18,6 +18,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { Config } from './config.js'
+import { readHubCa, sameFingerprint } from './hub-ca.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
@@ -62,7 +63,41 @@ export interface PairingPayload {
   pass: string
   instance: string
   caFp: string
+  /**
+   * The Hub's CA certificate as base64 DER, when one is configured. The App
+   * installs it as the trust anchor for `hub` before dialling, which is what
+   * makes the QR — not the App build — the source of TLS trust.
+   */
+  ca?: string
   code: string
+}
+
+/**
+ * Assembles the QR payload, certificate included.
+ *
+ * The certificate is the phone's trust anchor and the fingerprint is what it
+ * shows the user, so a contradiction between the two has to stop here rather
+ * than become a scan that dies on the phone with nothing to read. Exported for
+ * the tests: minting a code needs a live token store, this does not.
+ */
+export function buildPairingPayload(config: Config, code: string): PairingPayload {
+  const ca = readHubCa(config.hubCaCert)
+  const configuredFingerprint = typeof config.hubCaFingerprint === 'string' ? config.hubCaFingerprint.trim() : ''
+  if (ca !== null && configuredFingerprint !== '' && !sameFingerprint(configuredFingerprint, ca.fingerprint)) {
+    throw new Error(
+      `CA 证书与配置的指纹不一致：证书指纹是 ${ca.fingerprint}，配置里写的是 ${configuredFingerprint}。`
+      + '两者必须一致，否则手机扫码时会拒绝这个 Hub。',
+    )
+  }
+  return {
+    hub: config.hubWssUrl,
+    user: config.hubUser,
+    pass: config.hubPass,
+    instance: config.instanceId,
+    caFp: ca === null ? config.hubCaFingerprint : ca.fingerprint,
+    ...(ca === null ? {} : { ca: ca.base64 }),
+    code,
+  }
 }
 
 /** Structural view of the host settings service (scope surface we consume). */
@@ -120,6 +155,7 @@ function sameConfig(left: Config, right: Config): boolean {
     && left.hubWssUrl === right.hubWssUrl
     && left.hubUser === right.hubUser
     && left.hubPass === right.hubPass
+    && left.hubCaCert === right.hubCaCert
     && left.hubCaFingerprint === right.hubCaFingerprint
     && left.instanceId === right.instanceId
     && left.tokenTtlDays === right.tokenTtlDays
@@ -519,14 +555,7 @@ export class MobileBridge extends Service {
     return {
       code,
       expiresAt,
-      payload: {
-        hub: this.current.hubWssUrl,
-        user: this.current.hubUser,
-        pass: this.current.hubPass,
-        instance: this.current.instanceId,
-        caFp: this.current.hubCaFingerprint,
-        code,
-      },
+      payload: buildPairingPayload(this.current, code),
     }
   }
 

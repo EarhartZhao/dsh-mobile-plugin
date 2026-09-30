@@ -8,16 +8,20 @@
 
 ## 0. 先读这一节：自建 Hub 能不能被现成的 App 用
 
-App 的 release 构建把私有 CA 打进 `res/raw/dsh_root_ca.crt`，并且只对打包时写死的那一个 Hub 地址信任它
-（`network_security_config.xml` 的 `domain-config`）。所以换 Hub 时，三种情况只有两种能用：
+**信任来自你扫的那个二维码。** 二维码里除了 Hub 地址与 C 端账号，还带一张 Hub 的 CA 证书；App 在配对时
+把它装成「这个地址的信任锚」，之后的握手只认这一张。所以同一个 App 包能连任意自建 Hub，换 Hub、换证书
+都不需要重新打包——重扫一次码就等于把信任切过去，这也是轮换时旧 CA 能被真正吊销的原因。
 
 | 你的 Hub | 现成 release App 能连吗 | 怎么做 |
 |---|---|---|
-| 同一个 Hub（作者的服务器） | 能 | 只要拿到 C 端账号密码即可，跳过本文，直接看第 3、4 节 |
-| 自建 Hub + 自签 CA | 不能 | 改 App 的 `network_security_config.xml` 域名与 `res/raw/dsh_root_ca.crt`，重新打包后再走本文 |
+| 自建 Hub + 自签 CA，二维码带 CA | 能 | 把 `ca.crt` 全文粘进插件设置卡的「CA 证书」，发码、扫码即可。不需要改 App、不需要重新打包 |
+| 自签 CA，但二维码不带 CA | 不能 | 二维码是唯一的信任来源，App 里没有备用 CA。把 `ca.crt` 粘进设置卡后重新发码 |
+| 用公共 CA（如 Let's Encrypt）签发证书的 Hub | 能 | CA 字段留空即可，系统信任库会校验 |
 | 局域网 stand-in（`ws://` 明文） | 只有 debug 构建能 | 见第 6 节；release 禁明文，这是刻意的安全基线 |
 
-也就是说：**自建 Hub 的完整路径包含一次 App 重新打包**。只想先跑通链路的话，用第 6 节的局域网 stand-in 最快。
+前提是 App 那一侧已经带上运行时锚的能力（原生模块 `DshHubTls`）；更早的 release 包只认内置 CA，
+这类设备要么升级 App，要么回到「重新打包」的老路。App **不在包里放任何 CA**：二维码带了证书就用它，
+没带（或那台 Hub 是公共 CA 签的）就交给系统信任库，没有第三条兜底路径。
 
 ## 1. 拓扑、端口与版本要求
 
@@ -148,7 +152,8 @@ scp server.crt server.key root@<hub-host>:/etc/nats/tls/
 ssh root@<hub-host> 'chown nats:nats /etc/nats/tls/* && chmod 600 /etc/nats/tls/* && systemctl restart nats'
 ```
 
-自签 CA 的取舍：零外部依赖、零续期任务；代价是**每个客户端都要显式信任它**——手机端就是第 0 节说的重新打包。
+自签 CA 的取舍：零外部依赖、零续期任务；代价是**每个客户端都要显式信任它**——手机端就是被二维码带过去的那张
+CA（第 0 节），扫码即完成，不必重新打包。
 
 ### 2.4 用脚本一把过（可选）
 

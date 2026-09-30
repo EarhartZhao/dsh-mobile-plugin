@@ -11,7 +11,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import type { MobileBridge } from './index.js'
 import type { Config } from './config.js'
-import { checkHubPath, type HubCheckResult } from './hub-check.js'
+import { checkHubCertificate, checkHubPath, type HubCheckResult } from './hub-check.js'
+import { readHubCa } from './hub-ca.js'
 import type { LocalNatsResolution } from './nats-launch.js'
 
 export interface WebRouter {
@@ -173,6 +174,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const bridge = backend.bridge()
         const config = backend.currentConfig()
+        const ca = readHubCa(config.hubCaCert)
         // The password is deliberately absent here: this response is polled
         // every few seconds, and a secret that rides a poll is available to any
         // local process at any moment. It comes from `/api/reveal` instead, only
@@ -184,6 +186,17 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
             hubWssUrl: config.hubWssUrl,
             hubUser: config.hubUser,
             hubPassConfigured: config.hubPass.length > 0,
+            // The certificate is public material, and the console has to show
+            // it to be able to edit it — but a poll every few seconds must not
+            // paste over an edit in progress, so the page only writes this
+            // field when it is untouched (see refreshStatus).
+            hubCaCert: config.hubCaCert,
+            hubCaFingerprint: config.hubCaFingerprint,
+            // Derived readout so the page can show what the QR will carry
+            // without shipping a SHA-256 implementation into the browser.
+            hubCaSummary: ca === null
+              ? null
+              : { fingerprint: ca.fingerprint, subject: ca.subject, validTo: ca.validTo, isCa: ca.isCa },
             instanceId: config.instanceId,
             natsConfigPath: config.natsConfigPath,
             natsServerPath: config.natsServerPath,
@@ -214,6 +227,10 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
           if (typeof body.hubWssUrl === 'string') patch.hubWssUrl = body.hubWssUrl.trim()
           if (typeof body.hubUser === 'string') patch.hubUser = body.hubUser.trim()
           if (typeof body.hubPass === 'string' && body.hubPass.length > 0) patch.hubPass = body.hubPass
+          // Unlike the password, clearing this one is meaningful: it is how an
+          // owner takes a certificate back out of the QR.
+          if (typeof body.hubCaCert === 'string') patch.hubCaCert = body.hubCaCert.trim()
+          if (typeof body.hubCaFingerprint === 'string') patch.hubCaFingerprint = body.hubCaFingerprint.trim()
           if (typeof body.instanceId === 'string') patch.instanceId = body.instanceId.trim()
           if (typeof body.natsConfigPath === 'string') patch.natsConfigPath = body.natsConfigPath.trim()
           if (typeof body.natsServerPath === 'string') patch.natsServerPath = body.natsServerPath.trim()
@@ -271,6 +288,14 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         // so it mints with a warning instead.
         const hub = await checkHub(backend.currentConfig())
         if (hub.reason === 'rejected') return json(res, 400, { error: hub.message })
+        // A certificate that is missing, unreadable or simply not the one the
+        // Hub signs with does not stop the QR from being minted — an App that
+        // already bundles this CA still connects — but the scan that will fail
+        // deserves a warning here rather than a handshake error on the phone.
+        const certificate = await checkHubCertificate(backend.currentConfig())
+        const hubWarning = [hub.ok ? null : hub.message, certificate.ok ? null : certificate.message]
+          .filter((line): line is string => line !== null)
+          .join('\n\n')
         // A Hub that cannot reach this instance means the phone will get a bare
         // no-responders 503. Unlike a credential typo this can heal on its own
         // (the Leaf reconnects), so warn instead of refusing to mint.
@@ -289,7 +314,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
             expiresAt: pairing.expiresAt,
             payload: pairing.payload,
             qrSvg,
-            hubWarning: hub.ok ? undefined : hub.message,
+            hubWarning: hubWarning === '' ? undefined : hubWarning,
           })
         } catch (error) {
           json(res, 400, { error: String(error) })
@@ -302,8 +327,17 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       handler: async (req, res) => {
         const rejected = consoleRequestRejection(req, { mutating: false })
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
-        const result = await checkHub(backend.currentConfig())
-        json(res, 200, result)
+        const config = backend.currentConfig()
+        const result = await checkHub(config)
+        // The certificate is the one link the phone cannot report on: a wrong
+        // one is an opaque handshake failure there, so it rides along here as
+        // a step the owner can read.
+        const certificate = await checkHubCertificate(config)
+        json(res, 200, {
+          ...result,
+          certificate,
+          steps: [...result.steps, { key: 'certificate', ok: certificate.ok, message: certificate.message }],
+        })
       },
     }),
     webServer.register({
@@ -356,6 +390,8 @@ const CONSOLE_HTML = `<!doctype html>
   h1 { font-size: 20px; } h2 { font-size: 15px; margin-top: 28px; }
   label { display: block; font-size: 13px; margin: 10px 0 4px; opacity: .8; }
   input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
+  textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }
   button { padding: 8px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
   button.secondary { background: #8884; color: inherit; }
   button:disabled { opacity: .5; cursor: default; }
@@ -434,6 +470,9 @@ const CONSOLE_HTML = `<!doctype html>
   <input id="hubPass" type="text" placeholder="未配置" autocomplete="off" spellcheck="false">
   <button id="hubPassToggle" class="secondary" type="button" style="white-space:nowrap">隐藏</button>
 </div>
+<label>Hub CA 证书（ca.crt 内容；二维码会把它带给手机当信任锚）</label>
+<textarea id="hubCaCert" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+<p id="hubCaHint" style="font-size:12px;margin:4px 0 0;opacity:.75"></p>
 <label>实例 ID（字母/数字/短横线）</label><input id="instanceId" placeholder="home">
 <div class="row">
   <button id="saveBtn">保存并连接</button>
@@ -475,6 +514,45 @@ const $ = id => document.getElementById(id)
 
 /** The code currently on screen, or null once it has expired. */
 let pairing = null
+
+/**
+ * Whether the CA field holds something the owner typed that has not been saved
+ * yet. The status poll runs every few seconds and must not paste over it.
+ */
+let caEdited = false
+
+/** Shows the configured certificate, or why there is nothing to show. */
+function renderHubCa(config) {
+  if (!caEdited && document.activeElement !== $('hubCaCert')) {
+    $('hubCaCert').value = config.hubCaCert || ''
+  }
+  const hint = $('hubCaHint')
+  hint.className = ''
+  if (!config.hubCaCert) {
+    hint.textContent = '未配置：二维码不带证书，App 里也没有内置任何 CA。'
+      + '只有由公共 CA 签发证书的 Hub 能连上；自签证书的 Hub 必须在这里填 ca.crt 全文。'
+    return
+  }
+  const summary = config.hubCaSummary
+  if (!summary) {
+    hint.className = 'error'
+    hint.textContent = '无法解析：请粘贴 ca.crt 的完整 PEM（含 BEGIN/END CERTIFICATE 行）或它的 base64 内容。'
+    return
+  }
+  hint.textContent = summary.subject + '｜有效期至 ' + summary.validTo + '｜SHA-256 ' + summary.fingerprint
+  const configured = (config.hubCaFingerprint || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase()
+  const actual = summary.fingerprint.replace(/[^0-9a-fA-F]/g, '').toUpperCase()
+  if (configured && configured !== actual) {
+    hint.className = 'error'
+    // Double-escaped: this code lives inside the page's own template literal.
+    hint.textContent += '\\n配置的指纹与证书不一致，手机扫码会拒绝这个 Hub。'
+  } else if (!summary.isCa) {
+    hint.className = 'error'
+    hint.textContent += '\\n这不是一张 CA 证书（basicConstraints 不是 CA:TRUE），请确认粘的确实是 ca.crt。'
+  }
+}
+
+$('hubCaCert').addEventListener('input', () => { caEdited = true })
 
 $('hubPassToggle').onclick = async () => {
   const field = $('hubPass')
@@ -521,6 +599,9 @@ async function refreshStatus() {
     renderLocalNats(s.localNats)
     $('hubWssUrl').value = s.config.hubWssUrl
     $('hubUser').value = s.config.hubUser
+    // Public material, but a poll every 5s still must not paste over an edit
+    // in progress, so it writes only while the field is untouched.
+    renderHubCa(s.config)
     $('instanceId').value = s.config.instanceId
     $('natsConfigPath').value = s.config.natsConfigPath || ''
     $('natsServerPath').value = s.config.natsServerPath || ''
@@ -658,10 +739,12 @@ $('saveBtn').onclick = async () => {
   $('saveMsg').className = ''; $('saveMsg').textContent = '保存中…'
   const r = await api('config', {
     hubWssUrl: $('hubWssUrl').value, hubUser: $('hubUser').value,
-    hubPass: $('hubPass').value, instanceId: $('instanceId').value,
+    hubPass: $('hubPass').value, hubCaCert: $('hubCaCert').value,
+    instanceId: $('instanceId').value,
     natsConfigPath: $('natsConfigPath').value, natsServerPath: $('natsServerPath').value,
   })
   if (r.ok) {
+    caEdited = false
     $('saveMsg').className = 'ok'; $('saveMsg').textContent = '已保存'
     refreshStatus()
     // Verify right after saving: a wrong password is invisible until the
@@ -677,7 +760,10 @@ async function checkHub() {
   const ok = r.reason === 'ok'
   const mark = (step) => (step.ok ? '✓ ' : '✗ ')
   const lines = (r.steps || []).map(step => mark(step) + step.message)
-  $('hubCheckMsg').className = ok ? 'ok' : (r.reason === 'unreachable' ? '' : 'error')
+  // A certificate problem leaves the NATS path green while the phone still
+  // cannot get in, so the colour follows the worst line rather than reason alone.
+  const allOk = ok && (!r.certificate || r.certificate.ok !== false)
+  $('hubCheckMsg').className = allOk ? 'ok' : (ok || r.reason === 'unreachable' ? '' : 'error')
   // Double-escaped on purpose: this code lives inside the page's own template
   // literal, where a single newline escape would become a real line break and
   // break the generated script.

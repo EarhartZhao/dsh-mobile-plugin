@@ -17,15 +17,23 @@
  * The credential lives on the same nats-server that terminates WSS, so the
  * plain client port answers the same verdict. That port is the only one the
  * plugin can reach without a WebSocket implementation in the host process.
+ *
+ * {@link checkHubCertificate} is the fourth link and the only one that is not
+ * about reachability: the phone's TLS trust for the Hub comes from the CA the
+ * QR carries, so a certificate that does not match what the Hub actually
+ * presents — or one the Hub is not signing with at all — makes every scan die
+ * at the handshake, where nothing on the phone can explain why.
  */
 import { connect } from 'nats'
+import { connect as tlsConnect } from 'node:tls'
+import { readHubCa, sameFingerprint } from './hub-ca.js'
 import type { Config } from './config.js'
 
 export type HubCheckReason = 'ok' | 'unconfigured' | 'rejected' | 'unreachable' | 'bridge-offline'
 
 /** One link in the chain, so a failure names the part to fix. */
 export interface HubCheckStep {
-  key: 'local' | 'credentials' | 'hub-path'
+  key: 'local' | 'credentials' | 'hub-path' | 'certificate'
   ok: boolean
   message: string
 }
@@ -46,6 +54,63 @@ export interface HubCheckOptions {
   /** Whether the bridge itself is connected to this machine's NATS. */
   localConnected?: boolean
 }
+
+export type HubCertificateReason =
+  | 'ok'
+  | 'unconfigured'
+  | 'malformed'
+  | 'fingerprint-mismatch'
+  | 'plaintext'
+  | 'host-mismatch'
+  | 'not-the-hub'
+  | 'unreachable'
+
+export interface HubCertificateResult {
+  /** True for `ok` and `plaintext`: both mean the QR is safe to hand out. */
+  ok: boolean
+  reason: HubCertificateReason
+  /** Fingerprint of the configured certificate, when it parsed. */
+  fingerprint: string | null
+  message: string
+}
+
+export interface HubCertificateOptions {
+  timeoutMs?: number
+  /** Injection point for tests; defaults to `node:tls`. */
+  tlsConnectImpl?: typeof tlsConnect
+}
+
+/** The WSS endpoint the phone will dial, or null when the URL is unusable. */
+function hubTlsEndpoint(hubWssUrl: string): { host: string, port: number, plaintext: boolean } | null {
+  try {
+    const url = new URL(hubWssUrl)
+    if (url.hostname === '') return null
+    const plaintext = url.protocol === 'ws:'
+    const port = url.port === '' ? (plaintext ? 80 : 443) : Number(url.port)
+    if (!Number.isInteger(port) || port <= 0) return null
+    return { host: url.hostname, port, plaintext }
+  } catch {
+    return null
+  }
+}
+
+/** Whether the host is a literal address, in which case SNI must stay unset. */
+function isIpLiteral(host: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')
+}
+
+/** TLS error codes that mean "handshake completed, the chain did not verify". */
+const CA_REJECTION_CODES = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'CERT_SIGNATURE_FAILURE',
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+])
 
 /** The Hub's plain client port, derived from the WSS URL the QR advertises. */
 export function hubProbeAddress(hubWssUrl: string): string | null {
@@ -168,5 +233,132 @@ export async function checkHubPath(
     reason: 'ok',
     message: `整条链路可用：Hub 账号有效，且 Hub 能联系到本机实例「${config.instanceId}」`,
     steps,
+  }
+}
+
+/**
+ * Whether the CA the QR will carry is the CA the Hub actually signs with.
+ *
+ * The phone trusts exactly what the QR hands it, so the two ways this goes
+ * wrong are both silent from the desktop and fatal on the phone: a certificate
+ * that is not the Hub's (hand-edited field, an old file after a rotation, the
+ * server certificate pasted instead of the CA) and a fingerprint that
+ * contradicts the certificate beside it. Checking costs one TLS handshake to
+ * the WSS port the phone will dial.
+ *
+ * An unset certificate is reported as `unconfigured` rather than a failure:
+ * the App carries no CA of its own, so leaving it empty is only viable for a
+ * Hub whose certificate a public CA signed — everything else pairs and then
+ * dies at the handshake.
+ */
+export async function checkHubCertificate(
+  config: Config,
+  options: HubCertificateOptions = {},
+): Promise<HubCertificateResult> {
+  const configured = typeof config.hubCaCert === 'string' ? config.hubCaCert.trim() : ''
+  if (configured === '') {
+    return {
+      ok: false,
+      reason: 'unconfigured',
+      fingerprint: null,
+      message: '没有配置 Hub 的 CA 证书：二维码不带证书，而 App 里没有内置任何 CA。'
+        + '只有用公共 CA 签发证书的 Hub 能连上；自签证书的 Hub 请把 ca.crt 粘进上面的字段并保存。',
+    }
+  }
+
+  const ca = readHubCa(configured)
+  if (ca === null) {
+    return {
+      ok: false,
+      reason: 'malformed',
+      fingerprint: null,
+      message: 'CA 证书无法解析：请粘贴 ca.crt 的完整 PEM（含 BEGIN/END CERTIFICATE 行），或它的 base64 内容。',
+    }
+  }
+
+  const expected = typeof config.hubCaFingerprint === 'string' ? config.hubCaFingerprint.trim() : ''
+  if (expected !== '' && !sameFingerprint(expected, ca.fingerprint)) {
+    return {
+      ok: false,
+      reason: 'fingerprint-mismatch',
+      fingerprint: ca.fingerprint,
+      message: `配置的 CA 指纹与 CA 证书不是同一张：配置里写的是 ${expected}，证书实际是 ${ca.fingerprint}。`
+        + '两者不一致时手机扫到的指纹对不上证书，会直接拒绝这个 Hub。',
+    }
+  }
+
+  const endpoint = hubTlsEndpoint(config.hubWssUrl)
+  if (endpoint === null) {
+    return {
+      ok: false,
+      reason: 'unreachable',
+      fingerprint: ca.fingerprint,
+      message: `无法从 Hub 地址解析出主机与端口：${config.hubWssUrl}`,
+    }
+  }
+  if (endpoint.plaintext) {
+    return {
+      ok: true,
+      reason: 'plaintext',
+      fingerprint: ca.fingerprint,
+      message: 'Hub 地址是 ws://（明文），这条链路不做 TLS，CA 证书不会用到；也只有 debug 构建能连这种 Hub。',
+    }
+  }
+
+  const connectImpl = options.tlsConnectImpl ?? tlsConnect
+  const timeout = options.timeoutMs ?? 5000
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const socket = connectImpl({
+        host: endpoint.host,
+        port: endpoint.port,
+        ca: ca.pem,
+        rejectUnauthorized: true,
+        // SNI carries a name, never an address; Node checks the certificate
+        // against the IP SAN when it is given one.
+        ...(isIpLiteral(endpoint.host) ? {} : { servername: endpoint.host }),
+      }, () => {
+        socket.destroy()
+        resolve()
+      })
+      socket.setTimeout(timeout, () => {
+        socket.destroy()
+        reject(Object.assign(new Error('TLS handshake timed out'), { code: 'ETIMEDOUT' }))
+      })
+      socket.once('error', (error) => {
+        socket.destroy()
+        reject(error)
+      })
+    })
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code
+    const codeText = typeof code === 'string' ? code : ''
+    if (CA_REJECTION_CODES.has(codeText)) {
+      const altName = codeText === 'ERR_TLS_CERT_ALTNAME_INVALID'
+      return {
+        ok: false,
+        reason: altName ? 'host-mismatch' : 'not-the-hub',
+        fingerprint: ca.fingerprint,
+        message: altName
+          ? `${endpoint.host}:${endpoint.port} 出示的证书不覆盖这个地址：换过地址（域名 ↔ IP）后要在 Hub 上用新 SAN 重签服务器证书。`
+          : `${endpoint.host}:${endpoint.port} 出示的证书不是这张 CA 签的（${codeText}）：`
+            + 'Hub 上装的可能还是旧证书，或者这个字段里粘的不是它当前用的 CA。',
+      }
+    }
+    return {
+      ok: false,
+      reason: 'unreachable',
+      fingerprint: ca.fingerprint,
+      message: `无法与 ${endpoint.host}:${endpoint.port} 完成 TLS 握手（${codeText === '' ? String(error) : codeText}）。`
+        + '这不代表证书有问题，也可能是端口不通；手机走同一条链路，可以先扫码试。',
+    }
+  }
+
+  return {
+    ok: true,
+    reason: 'ok',
+    fingerprint: ca.fingerprint,
+    message: `Hub 出示的证书由这张 CA 签发（${ca.subject}，有效期至 ${ca.validTo}）。`
+      + `指纹 ${ca.fingerprint}。`,
   }
 }
