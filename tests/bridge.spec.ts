@@ -692,7 +692,7 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.16',
+      pluginVersion: '0.2.17',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
