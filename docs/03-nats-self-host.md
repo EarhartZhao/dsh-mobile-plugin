@@ -192,7 +192,7 @@ ssh root@<hub-host> 'bash -s rotate' < ../dsh-mobile/scripts/hub-credential.sh  
 ## 3. Leaf：dsh 电脑上的本机节点
 
 ```hcl
-# Windows: C:\nats\leaf.conf     Linux: /etc/nats/leaf.conf
+# 放哪都行，插件按下面的顺序自己找（Windows: C:\nats\leaf.conf，Linux: /etc/nats/leaf.conf）
 host: 127.0.0.1        # 本机客户端口没有认证，只监听回环
 port: 4222
 server_name: "leaf-<instance>"
@@ -207,6 +207,7 @@ leafnodes {
 - 先在前台跑一次，日志里出现 `Leafnode connection created` 才算接入成功：
   `nats-server -c C:\nats\leaf.conf`（Linux 用 `nats-server -c /etc/nats/leaf.conf`）。
 - 常驻：Windows 用任务计划程序（开机启动 + 失败重启）或 NSSM 注册为服务；Linux 照 2.1 的写法再来一个 systemd 单元。
+- 放哪不强制：控制台「启动本地 NATS」在端口没人监听时，按 `NATS_CONFIG_PATH` →「本地 NATS 配置文件」字段 → 自动查找（`$DSH_HOME/mobile-bridge/leaf.conf`、`~/.nats-leaf/leaf.conf`、`~/.config/nats/leaf.conf`，再按平台取 Homebrew 前缀或 `/etc/nats`）定路径；端口已有监听就直接复用，状态行会显示最终选中哪条、是否存在。
 - Hub 不可达由 Leaf 负责重试，插件无感知；断外网时本机浏览器与其它本地服务照常工作。
 
 ## 4. 插件侧配置
@@ -221,6 +222,8 @@ leafnodes {
 | `hubCaFingerprint` | Hub CA 指纹，仅作展示与人工核对 | 空 |
 | `instanceId` | 本实例的命名空间；一个 Hub 上多台电脑必须各不相同 | `home` |
 | `tokenTtlDays` / `pairCodeTtlSec` / `maxDevices` / `chunkCoalesceMs` | 设备 token 有效期 / 配对码有效期 / 终端上限 / 弱网合帧 | 90 / 120 / 10 / 0 |
+| `natsConfigPath` | 「启动本地 NATS」要读的 Leaf 配置路径；留空则自动查找（`$DSH_HOME/mobile-bridge/leaf.conf` → `~/.nats-leaf/leaf.conf` → `~/.config/nats/leaf.conf` → 平台惯例），`NATS_CONFIG_PATH` 可覆盖 | 空 |
+| `natsServerPath` | 「启动本地 NATS」要跑的 `nats-server`；留空则自动查找（插件目录 → `~/.nats-leaf/nats-server` → `PATH`），`NATS_SERVER_PATH` 可覆盖 | 空 |
 | `autoMigrateProfile` | 安装形态自动修复：早期用 `insert:` 手工挂的 profile 会被改回组合包形态；设 `false` 则插件不碰 profile 文件 | `true` |
 
 配置分层：bundle 自带的 patch 只放非密默认值，控制台「保存」写的是用户层 `$DSH_HOME/settings.yaml`；
@@ -228,9 +231,14 @@ leafnodes {
 
 安装形态（行由组合包提供、profile patch 只留按 id 的覆盖）与旧 `insert:` 写法的自动迁移，见 [README](../README.md) 的「安装与接入」与 [00-plugin-plan](00-plugin-plan.md) 的「安装形态与自动迁移」。
 
-控制台的「启动本地 NATS」按钮按上面的 `natsUrl` 探测端口：已在监听就复用它，否则用
-`NATS_SERVER_PATH`（Windows 默认依次尝试 `C:\nats-server\nats-server.exe`、`nats-server.exe`；Linux 为 `nats-server`）
-加 `NATS_CONFIG_PATH`（默认 `C:\nats\leaf.conf`，Linux 为 `/etc/nats/leaf.conf`）启动 `nats-server -c <config>`。
+控制台的「启动本地 NATS」按钮先按上面的 `natsUrl` 探测端口：已在监听就直接复用它（手工起的 Leaf、服务管理器起的、上一次 dsh 起的都算，这种情况不需要配置文件），
+否则解析出可执行文件与 Leaf 配置再启动 `nats-server -c <config>`。两条路径的优先级都是
+`NATS_CONFIG_PATH`/`NATS_SERVER_PATH` 环境变量 → 控制台对应字段 → 自动查找：
+配置依次看 `$DSH_HOME/mobile-bridge/leaf.conf`、`~/.nats-leaf/leaf.conf`、`~/.config/nats/leaf.conf`、
+平台惯例（macOS 的 Homebrew 前缀、Linux 的 `/etc/nats/leaf.conf`、Windows 的 `C:\nats\leaf.conf`）；
+可执行文件依次看 `$DSH_HOME/mobile-bridge/nats-server`、`~/.nats-leaf/nats-server`、
+Windows 的 `C:\nats-server\nats-server.exe`，最后是 `PATH` 上的 `nats-server`。
+显式设置了就不回退，路径不存在时错误信息会列出查找过的全部候选，控制台状态行也一直显示当前选中的两条路径。
 
 ## 5. 验收：按顺序做，坏在哪段一目了然
 

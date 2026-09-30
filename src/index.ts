@@ -23,7 +23,7 @@ import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from '.
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
-import { natsEndpoint, probePort } from './nats-launch.js'
+import { natsEndpoint, probePort, resolveLeafConfig, resolveNatsServer, type LocalNatsResolution } from './nats-launch.js'
 import {
   migrateProfile,
   needsRepair,
@@ -126,6 +126,8 @@ function sameConfig(left: Config, right: Config): boolean {
     && left.pairCodeTtlSec === right.pairCodeTtlSec
     && left.maxDevices === right.maxDevices
     && left.chunkCoalesceMs === right.chunkCoalesceMs
+    && left.natsConfigPath === right.natsConfigPath
+    && left.natsServerPath === right.natsServerPath
     && left.autoMigrateProfile === right.autoMigrateProfile
 }
 
@@ -192,6 +194,7 @@ export class MobileBridge extends Service {
         currentConfig: () => this.current,
         updateConfig: patch => this.updateConfig(patch),
         startNats: () => this.startLocalNats(),
+        localNats: () => this.localNatsInfo(),
         repairProfile: () => this.repairProfileShape(true),
       })
     })
@@ -385,6 +388,28 @@ export class MobileBridge extends Service {
     return this.tokens.forget(deviceId)
   }
 
+  /**
+   * The config and executable this process would launch with, resolved the same
+   * way {@link startLocalNats} resolves them. The console shows both so a
+   * machine that keeps `leaf.conf` somewhere else can see the path it needs to
+   * set instead of guessing from a failure.
+   */
+  localNatsInfo(): { config: LocalNatsResolution, server: LocalNatsResolution } {
+    return {
+      config: resolveLeafConfig(this.localNatsInput('config')),
+      server: resolveNatsServer(this.localNatsInput('server')),
+    }
+  }
+
+  /** The saved field and environment variable behind one of the two paths. */
+  private localNatsInput(which: 'config' | 'server'): { configured: string, env: string | undefined, dshHome: string } {
+    return {
+      configured: which === 'config' ? this.current.natsConfigPath : this.current.natsServerPath,
+      env: which === 'config' ? process.env.NATS_CONFIG_PATH : process.env.NATS_SERVER_PATH,
+      dshHome: dshHome(),
+    }
+  }
+
   /** Start the machine-local NATS Leaf used by this bridge. */
   async startLocalNats(): Promise<{ ok: boolean, message: string }> {
     if (this.localNatsProcess !== null
@@ -393,22 +418,36 @@ export class MobileBridge extends Service {
       return { ok: true, message: '本地 NATS 已在运行（由插件启动）' }
     }
 
-    const command = process.env.NATS_SERVER_PATH
-      ?? (process.platform === 'win32'
-        ? (existsSync('C:\\nats-server\\nats-server.exe') ? 'C:\\nats-server\\nats-server.exe' : 'nats-server.exe')
-        : 'nats-server')
-    const configPath = process.env.NATS_CONFIG_PATH
-      ?? (process.platform === 'win32' ? 'C:\\nats\\leaf.conf' : '/etc/nats/leaf.conf')
-    if (!existsSync(configPath)) {
-      return { ok: false, message: `找不到 NATS 配置文件：${configPath}` }
-    }
-
     // A server already answering on the client port is the whole reason a fresh
-    // nats-server exits a moment later, so the port decides before spawning.
+    // nats-server exits a moment later, so the port decides before anything
+    // else: this machine's Leaf may have been started by hand, a service
+    // manager, or a previous dsh run, and none of those need our config file.
     const endpoint = natsEndpoint(this.current.natsUrl)
     if (await probePort(endpoint.host, endpoint.port)) {
       return { ok: true, message: `本地 NATS 已在 ${endpoint.host}:${endpoint.port} 监听（不是本插件启动的进程）` }
     }
+
+    const server = resolveNatsServer(this.localNatsInput('server'))
+    if (!server.exists) {
+      return {
+        ok: false,
+        message: '找不到 nats-server 可执行文件，已按顺序查找：\n'
+          + server.candidates.map(candidate => `  · ${candidate}`).join('\n')
+          + '\n装好它、或把路径写进下方「nats-server 路径」（也可以设 NATS_SERVER_PATH 环境变量）。',
+      }
+    }
+    const leaf = resolveLeafConfig(this.localNatsInput('config'))
+    if (!leaf.exists) {
+      return {
+        ok: false,
+        message: '找不到 NATS 配置文件，已按顺序查找：\n'
+          + leaf.candidates.map(candidate => `  · ${candidate}`).join('\n')
+          + '\n把 Leaf 配置放到其中之一，或把路径写进下方「本地 NATS 配置文件」'
+          + '（也可以设 NATS_CONFIG_PATH 环境变量）。',
+      }
+    }
+    const command = server.path
+    const configPath = leaf.path
 
     let child: ChildProcess
     try {

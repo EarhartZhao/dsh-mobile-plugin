@@ -15,6 +15,8 @@ const baseConfig: Config = {
   pairCodeTtlSec: 120,
   maxDevices: 10,
   chunkCoalesceMs: 0,
+  natsConfigPath: '',
+  autoMigrateProfile: true,
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>

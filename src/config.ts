@@ -23,6 +23,19 @@ export interface Config {
   /** >0 coalesces high-frequency frames (e.g. assistant/chunk) per window; 0 disables. */
   chunkCoalesceMs: number
   /**
+   * Leaf config the console's 「启动本地 NATS」 runs `nats-server -c <path>` with.
+   * Empty means discover it: `$DSH_HOME/mobile-bridge/leaf.conf`, then the
+   * conventions of this platform. `NATS_CONFIG_PATH` overrides both. See
+   * src/nats-launch.ts for the candidate order.
+   */
+  natsConfigPath: string
+  /**
+   * `nats-server` the console's 「启动本地 NATS」 runs. Empty means discover it:
+   * the plugin home, `~/.nats-leaf`, then `PATH`. `NATS_SERVER_PATH` overrides
+   * both. See src/nats-launch.ts for the candidate order.
+   */
+  natsServerPath: string
+  /**
    * Repair the profile's install shape when this profile mounts the row with a
    * bare `insert` instead of the bundle layer. The host cannot manage that
    * shape — its row toggle only renders while the bundle is enabled, and
@@ -45,5 +58,7 @@ export const Config: z<Config> = z.object({
   pairCodeTtlSec: z.natural().default(120),
   maxDevices: z.natural().default(10),
   chunkCoalesceMs: z.natural().default(0),
+  natsConfigPath: z.string().default(''),
+  natsServerPath: z.string().default(''),
   autoMigrateProfile: z.boolean().default(true),
 })

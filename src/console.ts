@@ -12,6 +12,7 @@ import QRCode from 'qrcode'
 import type { MobileBridge } from './index.js'
 import type { Config } from './config.js'
 import { checkHubPath, type HubCheckResult } from './hub-check.js'
+import type { LocalNatsResolution } from './nats-launch.js'
 
 export interface WebRouter {
   register(route: {
@@ -39,6 +40,8 @@ export interface ConsoleBackend {
   currentConfig: () => Config
   updateConfig: (patch: Partial<Config>) => Promise<void>
   startNats: () => Promise<{ ok: boolean, message: string }>
+  /** Leaf config and executable the launch button will use, for the status panel. */
+  localNats?: () => { config: LocalNatsResolution, server: LocalNatsResolution }
   /** Check (and repair) how the profile mounts this plugin's row. */
   repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
@@ -176,11 +179,14 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         // when the owner asks to see it.
         json(res, 200, {
           ...bridge.status(),
+          localNats: backend.localNats?.() ?? null,
           config: {
             hubWssUrl: config.hubWssUrl,
             hubUser: config.hubUser,
             hubPassConfigured: config.hubPass.length > 0,
             instanceId: config.instanceId,
+            natsConfigPath: config.natsConfigPath,
+            natsServerPath: config.natsServerPath,
           },
         })
       },
@@ -209,6 +215,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
           if (typeof body.hubUser === 'string') patch.hubUser = body.hubUser.trim()
           if (typeof body.hubPass === 'string' && body.hubPass.length > 0) patch.hubPass = body.hubPass
           if (typeof body.instanceId === 'string') patch.instanceId = body.instanceId.trim()
+          if (typeof body.natsConfigPath === 'string') patch.natsConfigPath = body.natsConfigPath.trim()
+          if (typeof body.natsServerPath === 'string') patch.natsServerPath = body.natsServerPath.trim()
           await backend.updateConfig(patch)
           json(res, 200, { ok: true })
         } catch (error) {
@@ -393,7 +401,16 @@ const CONSOLE_HTML = `<!doctype html>
 <p id="profileNotes" style="font-size:12px;opacity:.7;margin:2px 0 0;white-space:pre-line"></p>
 <div class="row">
   <button id="startNatsBtn" class="secondary">启动本地 NATS</button>
-  <span id="natsMsg"></span>
+  <span id="natsMsg" style="white-space:pre-line"></span>
+</div>
+<p id="natsPathLine" style="font-size:12px;opacity:.7;margin:2px 0 0;white-space:pre-line"></p>
+<div class="row">
+  <input id="natsConfigPath" placeholder="leaf.conf 路径（留空 = 自动查找）" style="flex:1" autocomplete="off" spellcheck="false">
+  <button id="saveNatsPathBtn" class="secondary" type="button" style="white-space:nowrap">保存路径</button>
+  <span id="natsPathMsg"></span>
+</div>
+<div class="row">
+  <input id="natsServerPath" placeholder="nats-server 路径（留空 = 自动查找，含 PATH）" style="flex:1" autocomplete="off" spellcheck="false">
 </div>
 <dl class="health">
   <dt>插件版本</dt><dd id="pluginVersion">—</dd>
@@ -501,9 +518,12 @@ async function refreshStatus() {
     $('features').textContent = Array.isArray(s.features) ? s.features.join(' · ') : '—'
     $('lastError').textContent = s.lastError || '无'
     renderProfile(s.profile)
+    renderLocalNats(s.localNats)
     $('hubWssUrl').value = s.config.hubWssUrl
     $('hubUser').value = s.config.hubUser
     $('instanceId').value = s.config.instanceId
+    $('natsConfigPath').value = s.config.natsConfigPath || ''
+    $('natsServerPath').value = s.config.natsServerPath || ''
     // Never prefill the password here — this response is polled every 5s and
     // 「显示」 is the one call that fetches the stored value.
     $('hubPass').placeholder = s.config.hubPassConfigured ? '已配置（留空保持不变）' : '未配置'
@@ -530,6 +550,36 @@ async function refreshStatus() {
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+}
+
+/**
+ * Show which leaf.conf the launch button will read. The path is discovered
+ * (plugin home, then platform conventions) unless the owner set one, so a
+ * machine that keeps the file elsewhere needs to see the path that was tried
+ * before it can fix it — the failure alone names only one of them.
+ */
+function renderLocalNats(localNats) {
+  const config = localNats && localNats.config
+  const server = localNats && localNats.server
+  if (!config || typeof config.path !== 'string') {
+    $('natsPathLine').textContent = ''
+    return
+  }
+  const line = (label, part) => {
+    if (!part || typeof part.path !== 'string') return ''
+    const source = { env: '来自环境变量', config: '来自本页填写', 'default': '自动查找' }[part.source] || part.source
+    return (part.exists ? '✓ ' : '✗ ') + label + '：' + part.path + '（' + source + '）'
+  }
+  const lines = [line('配置文件', config), line('nats-server', server)].filter(text => text !== '')
+  if (config.exists && server && server.exists) {
+    lines.push('启动命令：' + server.path + ' -c ' + config.path)
+  }
+  for (const part of [config, server]) {
+    if (part && !part.exists && Array.isArray(part.candidates)) {
+      lines.push('查找范围：\\n' + part.candidates.map(p => '  · ' + p).join('\\n'))
+    }
+  }
+  $('natsPathLine').textContent = lines.join('\\n')
 }
 
 /** Where the row comes from decides whether the Plugins page can manage it. */
@@ -609,6 +659,7 @@ $('saveBtn').onclick = async () => {
   const r = await api('config', {
     hubWssUrl: $('hubWssUrl').value, hubUser: $('hubUser').value,
     hubPass: $('hubPass').value, instanceId: $('instanceId').value,
+    natsConfigPath: $('natsConfigPath').value, natsServerPath: $('natsServerPath').value,
   })
   if (r.ok) {
     $('saveMsg').className = 'ok'; $('saveMsg').textContent = '已保存'
@@ -649,6 +700,20 @@ $('startNatsBtn').onclick = async () => {
     $('natsMsg').className = 'error'; $('natsMsg').textContent = String(error)
   } finally {
     $('startNatsBtn').disabled = false
+  }
+}
+
+$('saveNatsPathBtn').onclick = async () => {
+  $('natsPathMsg').className = ''; $('natsPathMsg').textContent = '保存中…'
+  const r = await api('config', {
+    natsConfigPath: $('natsConfigPath').value,
+    natsServerPath: $('natsServerPath').value,
+  })
+  if (r.ok) {
+    $('natsPathMsg').className = 'ok'; $('natsPathMsg').textContent = '已保存'
+    refreshStatus()
+  } else {
+    $('natsPathMsg').className = 'error'; $('natsPathMsg').textContent = r.error || '保存失败'
   }
 }
 

@@ -150,7 +150,7 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 
 生成二维码时会自动跑这套检查：凭证被拒直接拒绝发码；`hub-path` 不通只警告不拦截，因为 Leaf 可能自行重连，而配对码 120 秒内都还有救。
 
-配置页提供“启动本地 NATS”按钮：它会在本机启动 `nats-server -c C:\\nats\\leaf.conf`，随后插件自动连接 `natsUrl`。可用 `NATS_SERVER_PATH` 和 `NATS_CONFIG_PATH` 环境变量覆盖默认的可执行文件和配置路径；该操作仅允许回环请求。
+配置页提供“启动本地 NATS”按钮：先探测 `natsUrl` 的端口，已经在监听就直接复用（本机 Leaf 可能是手工、服务管理器或上一次 dsh 启动的，那种情况根本不需要配置文件）；否则在本机启动 `nats-server -c <配置文件>`，随后插件自动连接 `natsUrl`。**两条路径都不写死**，按 `NATS_CONFIG_PATH` / `NATS_SERVER_PATH` 环境变量 → 控制台「本地 NATS 配置文件」/「nats-server 路径」字段 → 自动查找的顺序定；自动查找依次看 `$DSH_HOME/mobile-bridge/`、本项目的 `~/.nats-leaf/`（配置与二进制同目录）、`~/.config/nats/`，再按平台补 macOS 的 Homebrew 前缀、Linux 的 `/etc/nats`、Windows 的 `C:\\nats`（可执行文件最后回落到 `PATH`）。控制台状态行显示最终选中的两条路径以及它们是否存在，找不到时报错会列出查找过的全部候选。该操作仅允许回环请求。
 
 plugin 0.2 起提供可选的 `mobile.inventory`（需要设备 token），桥接宿主 `pluginInventory.list()`；App 在 `features` 含 `plugin-inventory` 时会在设置页显示只读插件清单。宿主未挂载清单服务时，设置页显示“当前桥未提供插件清单”，不影响连接和其它功能。
 
