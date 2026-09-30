@@ -22,6 +22,16 @@ export interface Config {
   maxDevices: number
   /** >0 coalesces high-frequency frames (e.g. assistant/chunk) per window; 0 disables. */
   chunkCoalesceMs: number
+  /**
+   * Repair the profile's install shape when this profile mounts the row with a
+   * bare `insert` instead of the bundle layer. The host cannot manage that
+   * shape — its row toggle only renders while the bundle is enabled, and
+   * uninstall fails with `bundle-in-use` — so the plugin registers itself in
+   * `dsh.profile.bundles` and, once that bundle is live at a later start,
+   * turns the insert row into a plain id-targeted override. See
+   * src/profile-migration.ts. Turn off to keep the profile files untouched.
+   */
+  autoMigrateProfile: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -35,4 +45,5 @@ export const Config: z<Config> = z.object({
   pairCodeTtlSec: z.natural().default(120),
   maxDevices: z.natural().default(10),
   chunkCoalesceMs: z.natural().default(0),
+  autoMigrateProfile: z.boolean().default(true),
 })

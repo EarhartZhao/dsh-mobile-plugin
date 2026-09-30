@@ -221,9 +221,12 @@ leafnodes {
 | `hubCaFingerprint` | Hub CA 指纹，仅作展示与人工核对 | 空 |
 | `instanceId` | 本实例的命名空间；一个 Hub 上多台电脑必须各不相同 | `home` |
 | `tokenTtlDays` / `pairCodeTtlSec` / `maxDevices` / `chunkCoalesceMs` | 设备 token 有效期 / 配对码有效期 / 终端上限 / 弱网合帧 | 90 / 120 / 10 / 0 |
+| `autoMigrateProfile` | 安装形态自动修复：早期用 `insert:` 手工挂的 profile 会被改回组合包形态；设 `false` 则插件不碰 profile 文件 | `true` |
 
 配置分层：bundle 自带的 patch 只放非密默认值，控制台「保存」写的是用户层 `$DSH_HOME/settings.yaml`；
 真正的密文按官方建议走 credentials seam（现状与迁移方向见 [README](../README.md) 的「凭证放哪」一节）。
+
+安装形态（行由组合包提供、profile patch 只留按 id 的覆盖）与旧 `insert:` 写法的自动迁移，见 [README](../README.md) 的「安装与接入」与 [00-plugin-plan](00-plugin-plan.md) 的「安装形态与自动迁移」。
 
 控制台的「启动本地 NATS」按钮按上面的 `natsUrl` 探测端口：已在监听就复用它，否则用
 `NATS_SERVER_PATH`（Windows 默认依次尝试 `C:\nats-server\nats-server.exe`、`nats-server.exe`；Linux 为 `nats-server`）

@@ -24,6 +24,14 @@ import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
 import { natsEndpoint, probePort } from './nats-launch.js'
+import {
+  migrateProfile,
+  needsRepair,
+  readProfileShape,
+  type ProfileIdentifiers,
+  type ProfileLocation,
+  type ProfileShape,
+} from './profile-migration.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -37,6 +45,10 @@ export type { DeviceEntry } from './tokens.js'
 
 /** Settings namespace the card/console edit; declared once for both halves. */
 export const SETTINGS_NS = 'mobile-bridge'
+
+/** Profile package and composition entry this plugin installs itself as. */
+export const PLUGIN_PACKAGE_NAME = 'dsh-mobile-plugin'
+export const PLUGIN_ROW_ID = 'mobile-bridge'
 
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
 
@@ -62,6 +74,21 @@ interface SettingsScope {
 
 interface SettingsService {
   register(ns: string, schema: unknown, options: { base: Config }): SettingsScope
+}
+
+/** Structural view of the launcher-owned profile facts (`ctx.profileContext`). */
+interface ProfileContextLike {
+  dir: string
+  patchPath: string
+  /** Bundles this process was started with, before any persisted edits. */
+  startedBundles: readonly string[]
+}
+
+/** How the profile mounts this plugin's row, as the console reports it. */
+export interface ProfileMigrationStatus {
+  state: 'unknown' | 'ok' | 'migrated' | 'awaiting-restart' | 'disabled' | 'unavailable' | 'error'
+  shape: ProfileShape | null
+  notes: readonly string[]
 }
 
 function dshHome(): string {
@@ -99,6 +126,7 @@ function sameConfig(left: Config, right: Config): boolean {
     && left.pairCodeTtlSec === right.pairCodeTtlSec
     && left.maxDevices === right.maxDevices
     && left.chunkCoalesceMs === right.chunkCoalesceMs
+    && left.autoMigrateProfile === right.autoMigrateProfile
 }
 
 export class MobileBridge extends Service {
@@ -164,6 +192,7 @@ export class MobileBridge extends Service {
         currentConfig: () => this.current,
         updateConfig: patch => this.updateConfig(patch),
         startNats: () => this.startLocalNats(),
+        repairProfile: () => this.repairProfileShape(true),
       })
     })
 
@@ -181,6 +210,19 @@ export class MobileBridge extends Service {
       this.agentRegistry = sctx.get('agents') as unknown as { get: (id: string) => object | undefined }
     })
 
+    // Profile install shape. A profile that mounts this row with a bare
+    // `- insert:` cannot be managed from the Plugins page at all (see
+    // src/profile-migration.ts), so the plugin repairs it itself. The repair is
+    // deferred past this loader pass: rewriting the patch file from inside the
+    // pass that is creating this fiber would re-enter the include's update.
+    ctx.inject(['profileContext'], (sctx) => {
+      this.profile = sctx.get('profileContext') as unknown as ProfileContextLike
+      sctx.effect(() => {
+        const timer = setTimeout(() => { void this.repairProfileShape() }, 0)
+        return () => clearTimeout(timer)
+      })
+    })
+
     ctx.effect(() => {
       this.wantRunning = true
       void this.kick()
@@ -192,6 +234,8 @@ export class MobileBridge extends Service {
   }
 
   private settingsScope: SettingsScope | null = null
+  private profile: ProfileContextLike | null = null
+  private profileMigration: ProfileMigrationStatus = { state: 'unknown', shape: null, notes: [] }
 
   /** Effective config (settings user layer over the composition entry). */
   get activeConfig(): Config {
@@ -233,6 +277,7 @@ export class MobileBridge extends Service {
     lastConnectedAt: string | null
     lastReconnectAt: string | null
     lastError: string | null
+    profile: ProfileMigrationStatus
   } {
     return {
       connection: this.connectionStatus,
@@ -248,11 +293,87 @@ export class MobileBridge extends Service {
       lastConnectedAt: this.lastConnectedAt,
       lastReconnectAt: this.lastReconnectAt,
       lastError: this.lastError,
+      profile: this.profileMigration,
     }
   }
 
   listDevices(): Omit<DeviceEntry, 'tokenHash'>[] {
     return this.tokens.list()
+  }
+
+  /**
+   * How this profile mounts the plugin's row, and what the repair did about
+   * it. Reported through `/api/status` so the console page can show the shape
+   * the Plugins page is stuck on.
+   */
+  get profileInstall(): ProfileMigrationStatus {
+    return this.profileMigration
+  }
+
+  /**
+   * Check the profile's install shape and repair it when the host could not
+   * manage it. Idempotent; the console's「修复安装形态」calls it with
+   * `manual` set.
+   * @param manual - the owner asked for it, so `autoMigrateProfile` is bypassed.
+   * @returns the report now stored for `/api/status`.
+   */
+  async repairProfileShape(manual = false): Promise<ProfileMigrationStatus> {
+    const profile = this.profile
+    if (profile === null) {
+      return this.recordMigration({
+        state: 'unavailable',
+        shape: null,
+        notes: ['这个进程没有 profileContext（宿主不是由 dsh launcher 启动的 profile），安装形态无从检查。'],
+      })
+    }
+    const location: ProfileLocation = { dir: profile.dir, patchPath: profile.patchPath }
+    const ids: ProfileIdentifiers = {
+      packageName: PLUGIN_PACKAGE_NAME,
+      rowId: PLUGIN_ROW_ID,
+      rowName: PLUGIN_PACKAGE_NAME,
+    }
+    try {
+      const before = await readProfileShape(location, ids)
+      if (!manual && !this.current.autoMigrateProfile) {
+        return this.recordMigration({
+          state: 'disabled',
+          shape: before,
+          notes: ['自动迁移已关闭（autoMigrateProfile=false），profile 文件不会被改写；'
+            + '需要修复时点下面的「修复安装形态」。'],
+        })
+      }
+      if (!manual && !needsRepair(before)) {
+        return this.recordMigration({ state: 'ok', shape: before, notes: [] })
+      }
+      // The bundle layer is only composed at launch, so the insert row may be
+      // lifted out of the patch only when this process was started with that
+      // bundle. Otherwise the row would leave the running composition with the
+      // write, and the bridge would go dark until the next start.
+      const result = await migrateProfile(location, ids, {
+        removeInsert: profile.startedBundles.includes(PLUGIN_PACKAGE_NAME),
+      })
+      const lifted = result.changed.includes(profile.patchPath)
+      const state = lifted ? 'migrated' : result.changed.length > 0 ? 'awaiting-restart' : 'ok'
+      if (result.changed.length > 0) {
+        console.info('[mobile-bridge] profile install shape repaired', {
+          state, files: result.changed, notes: result.notes,
+        })
+      }
+      return this.recordMigration({ state, shape: result.shape, notes: result.notes })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn('[mobile-bridge] profile install shape check failed:', message)
+      return this.recordMigration({
+        state: 'error',
+        shape: null,
+        notes: [`安装形态检查失败：${message}`],
+      })
+    }
+  }
+
+  private recordMigration(status: ProfileMigrationStatus): ProfileMigrationStatus {
+    this.profileMigration = status
+    return status
   }
 
   async revokeDevice(deviceId: string): Promise<boolean> {

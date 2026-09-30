@@ -39,8 +39,17 @@ export interface ConsoleBackend {
   currentConfig: () => Config
   updateConfig: (patch: Partial<Config>) => Promise<void>
   startNats: () => Promise<{ ok: boolean, message: string }>
+  /** Check (and repair) how the profile mounts this plugin's row. */
+  repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
   checkHub?: (config: Config) => Promise<HubCheckResult>
+}
+
+/** Install-shape report produced by the plugin's own repair (`ProfileMigrationStatus`). */
+export interface ProfileRepairReport {
+  state: string
+  shape: { bundleListed: boolean, legacyInsert: boolean, overrideRow: boolean } | null
+  notes: readonly string[]
 }
 
 /**
@@ -224,6 +233,21 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
     }),
     webServer.register({
       kind: 'exact',
+      path: '/mobile-bridge/api/migrate',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
+        try {
+          const report = await backend.repairProfile()
+          json(res, report.state === 'error' ? 400 : 200, report)
+        } catch (error) {
+          json(res, 400, { state: 'error', shape: null, notes: [String(error)] })
+        }
+      },
+    }),
+    webServer.register({
+      kind: 'exact',
       path: '/mobile-bridge/api/pair',
       handler: async (req, res) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
@@ -363,6 +387,10 @@ const CONSOLE_HTML = `<!doctype html>
 <body>
 <h1>dsh-mobile 桥接配置</h1>
 <p id="statusLine">状态：<span id="status">加载中…</span></p>
+<p id="profileLine">安装形态：<span id="profileShape">检查中…</span>
+  <button id="repairBtn" class="secondary" type="button" style="margin-left:8px" hidden>修复安装形态</button>
+  <span id="repairMsg"></span></p>
+<p id="profileNotes" style="font-size:12px;opacity:.7;margin:2px 0 0;white-space:pre-line"></p>
 <div class="row">
   <button id="startNatsBtn" class="secondary">启动本地 NATS</button>
   <span id="natsMsg"></span>
@@ -472,6 +500,7 @@ async function refreshStatus() {
     $('lastReconnectAt').textContent = formatTime(s.lastReconnectAt)
     $('features').textContent = Array.isArray(s.features) ? s.features.join(' · ') : '—'
     $('lastError').textContent = s.lastError || '无'
+    renderProfile(s.profile)
     $('hubWssUrl').value = s.config.hubWssUrl
     $('hubUser').value = s.config.hubUser
     $('instanceId').value = s.config.instanceId
@@ -501,6 +530,34 @@ async function refreshStatus() {
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+}
+
+/** Where the row comes from decides whether the Plugins page can manage it. */
+const PROFILE_STATE_TEXT = {
+  ok: '组合包（正常）',
+  migrated: '已迁移为组合包',
+  'awaiting-restart': '已登记组合包，重启 dsh 后完成迁移',
+  disabled: '未自动迁移（autoMigrateProfile=false）',
+  unavailable: '无法检查（宿主没有 profileContext）',
+  error: '检查失败',
+}
+
+/**
+ * Show the install shape and offer the repair. Only the two shapes a profile
+ * patch can produce for this row are reachable here: the bundle's own row
+ * (manageable) and a bare "insert" (no row toggle while the bundle is off,
+ * and uninstall answers "bundle-in-use").
+ */
+function renderProfile(profile) {
+  const state = profile && profile.state ? profile.state : 'unknown'
+  const shape = profile ? profile.shape : null
+  $('profileShape').textContent = PROFILE_STATE_TEXT[state] || '检查中…'
+  // Clicking is only useful when something is still wrong and a write can fix
+  // it: a settled profile and a pending restart both have nothing left to do.
+  $('repairBtn').hidden = state === 'ok' || state === 'migrated' || state === 'awaiting-restart'
+    || shape === null
+  const notes = profile && Array.isArray(profile.notes) ? profile.notes : []
+  $('profileNotes').textContent = notes.join('\\n')
 }
 
 /** Device names come from the pairing client, so they are data, not markup. */
@@ -592,6 +649,21 @@ $('startNatsBtn').onclick = async () => {
     $('natsMsg').className = 'error'; $('natsMsg').textContent = String(error)
   } finally {
     $('startNatsBtn').disabled = false
+  }
+}
+
+$('repairBtn').onclick = async () => {
+  $('repairMsg').className = ''; $('repairMsg').textContent = '处理中…'
+  $('repairBtn').disabled = true
+  try {
+    const r = await api('migrate', {})
+    $('repairMsg').className = r.state === 'error' ? 'error' : 'ok'
+    $('repairMsg').textContent = r.state === 'error' ? '修复失败' : '已处理'
+    await refreshStatus()
+  } catch (error) {
+    $('repairMsg').className = 'error'; $('repairMsg').textContent = String(error)
+  } finally {
+    $('repairBtn').disabled = false
   }
 }
 

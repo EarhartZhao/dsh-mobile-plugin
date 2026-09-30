@@ -71,24 +71,49 @@ phone (外网) ──wss:8443──► NATS Hub (<hub-host>, 既有)
 
 ## 安装方式（树外插件）
 
-`web` profile 支持树外插件（profile 目录的 `package.json` 声明依赖 + `cordis.patch.yml` 加行）：
-
-```yaml
-# $DSH_HOME/profiles/web/cordis.patch.yml
-- insert:
-    - id: mobile-bridge
-      name: 'dsh-mobile-plugin'
-      config:
-        natsUrl: 'nats://127.0.0.1:4222'
-        instanceId: 'home-pc'
-```
+`web` profile 支持树外插件。本包声明了 `dsh.bundle`（随包发布的 `cordis.patch.yml` 提供 `mobile-bridge` 那一行），所以 profile 侧只做三件事：声明依赖、把包名加进 `dsh.profile.bundles`、在 profile 自己的 patch 里**按 id 覆盖**该行：
 
 ```json
 // $DSH_HOME/profiles/web/package.json
-{ "dependencies": { "dsh-mobile-plugin": "link:C:/code/deepseek/dsh-mobile-plugin" } }
+{ "dependencies": { "dsh-mobile-plugin": "link:C:/code/deepseek/dsh-mobile-plugin" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-mobile-plugin"] } } }
+```
+
+```yaml
+# $DSH_HOME/profiles/web/cordis.patch.yml
+- id: mobile-bridge
+  name: 'dsh-mobile-plugin'
+  config:
+    natsUrl: 'nats://127.0.0.1:4222'
+    instanceId: 'home-pc'
 ```
 
 **必须用 `link:` 而非 `file:`**（联调实测踩坑）：`file:` 是打包拷贝，源码改动后 pnpm 不重打包，旧副本静默残留；`link:` 是符号链接，指回仓库活目录，插件自身的 node_modules 随之生效（nats/qrcode 从仓库目录解析；`@deepseek-ai/cordis` 等 peer 靠 Symbol.for 全局符号与宿主互操作）。
+
+### 从 git 安装：`prepare` 补上缺失的构建（2026-09-30）
+
+`github:<owner>/<repo>` 拉的是源码 tarball（`https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>`），仓库 `.gitignore` 掉的 `lib/` 不在里面，装完 `main: lib/index.js` 找不到文件，宿主只报一句 `mobile-bridge (dsh-mobile-plugin): failed to import`。本包因此在 `package.json` 声明 `"prepare": "pnpm run build"`：pnpm 把 codeload 的 `.../tar.gz/<40 位 sha>` 认作 git 托管包，装好后会跑 `prepare` 当场编译出 `lib/`（这条也解释了为什么分支名/标签名的 tarball 地址不算——只有 SHA 形态命中）。
+
+代价是 pnpm ≥10 默认拦下依赖的构建脚本：首次 `add` 会以 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` 失败，并打印一条带 spec 与 commit 的精确键。把那条键抄进 profile 的 `pnpm-workspace.yaml` 后重跑一次即可（键随 commit 变化，不是包名）：
+
+```yaml
+# $DSH_HOME/profiles/<profile>/pnpm-workspace.yaml
+allowBuilds:
+  'dsh-mobile-plugin@https://codeload.github.com/<owner>/dsh-mobile-plugin/tar.gz/<sha>': true
+```
+
+不想让使用方加这条就换预构建产物：发到 npm，或用 `pnpm pack` 出 tarball 让使用方 `add ./dsh-mobile-plugin-<version>.tgz`。本地 `link:` 引用不跑 `prepare`，所以开发机上的插件构建仍由 `pnpm run build` 决定。
+
+### 安装形态与自动迁移（2026-09-30）
+
+行**必须由组合包提供**，profile patch 只留按 id 的覆盖。早期文档写的是 `- insert:` 直接在 profile patch 里挂行，那种形态宿主管不了：整包开关是关的（包名不在 `dsh.profile.bundles`），行开关只在整包启用时才渲染，点卸载则报 `bundle-in-use`——`PluginManager.removeBundle` 会先关掉组合包再检查「这一行是否还活着」，而 profile patch 的 insert 与组合包无关，关掉组合包它照样在，于是判定「其他配置仍在使用这个组件的行」。
+
+插件因此在加载时做一次幂等自迁移（`src/profile-migration.ts`），分两步走，因为组合包的 patch 层只在 dsh 启动时参与组合：
+
+1. 把包名补进 `dsh.profile.bundles`。这一条只在下一次启动生效，本次不动正在运行的行。
+2. 下一次启动时行已由组合包提供，再把 profile patch 里的 insert 行提成按 id 的覆盖行（配置原样保留，位置与块注释一起搬），并合并同 id 的重复覆盖行。
+
+第二步只在启动时 `startedBundles` 含本包时执行——否则提走 insert 会让正在运行的行离开组合，桥会一直下线到下次启动。开关是配置项 `autoMigrateProfile`（默认 `true`，设 `false` 则插件只报告不改文件，改由控制台「修复安装形态」按钮手动触发）。卸载后那条覆盖行会留在 profile patch 里（指向已删的行，宿主启动时给一句无害的 `patch: entry "mobile-bridge" not found` 警告）——好处是重装直接复用原配置。宿主侧行为，插件不处理。
 
 ## 联调验收记录（2026-08-26，真实 dsh web profile）
 

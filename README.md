@@ -15,23 +15,37 @@
 
 **一、插件页安装（推荐）。** 本包声明了 `dsh.bundle`（即随包发布的 `cordis.patch.yml`），插件页可以直接装：在「插件」页填包名、git 地址或绝对路径，宿主先 inspect spec，再交给 pnpm 安装，装好后提供「启用」。按包名安装需要先发到 npm（当前 `pnpm view dsh-mobile-plugin` 返回 404），没发布之前用 git 地址或本地路径即可。
 
+从 git 装要多一步：仓库里没有构建产物（`.gitignore` 忽略 `lib/`），本包用 `prepare` 脚本在安装时现场编译；pnpm ≥10 默认会拦下这个脚本，所以第一次装必然失败并打印一条 `allowBuilds` 键，把它抄进 profile 的 `pnpm-workspace.yaml` 再装一次。细节与替代方案（npm / `pnpm pack`）见 [00-plugin-plan.md](docs/00-plugin-plan.md#从-git-安装prepare-补上缺失的构建2026-09-30)。
+
 **装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
 
 装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是另一层（`$DSH_HOME/settings.yaml` 的 `mobile-bridge` 命名空间），优先级在组合层之上。
 
+**旧写法由插件自动修正。** 如果 profile 是用 `insert:` 手工挂的这一行（早期文档和从 `$DSH_HOME/settings.yaml.imported` 搬迁都这么写），宿主的整包与行开关都管不了它：包名不在 `dsh.profile.bundles` 里，所以整包开关是关的；行开关只在整包启用时才渲染，于是也看不到；点卸载则直接报 `bundle-in-use`，因为这一行不是组合包提供的，关掉组合包它仍然在。插件加载时会把这种形态改回组合包形态，分两步、只改 profile 的两个文件、配置值一个不丢：① 把包名补进 `dsh.profile.bundles`（这一条到下**一次启动**才生效，本次不动正在运行的行）；② 重启后行已由组合包提供，再把 profile patch 里的 `insert` 改成按 id 的覆盖行。关掉配置项 `autoMigrateProfile` 可以让插件完全不碰 profile 文件，改由控制台页上的「修复安装形态」按钮手动触发。
+
 开发机上用 `link:` 引用本仓库时还要留意：宿主启动会按 profile 依赖做一次同步安装，pnpm 可能把它物化成**副本**而不是 junction——副本会让后续源码改动不生效（我们踩到的那次副本还是残缺的，没有 `lib/`，manifest 停在旧版本）。症状是插件版本不跟随、或 `/mobile-bridge` 404；在 profile 目录里重跑一次 `pnpm install` 即可恢复成 junction。
 
-**二、手工装进 profile（当前实际使用的方式）。** 在 `$DSH_HOME/profiles/<profile>` 里把本包加成依赖，并在该 profile 自己的 `cordis.patch.yml` 写一行 insert：
+**二、手工装进 profile。** 在 `$DSH_HOME/profiles/<profile>` 里做三件事：把本包加成依赖、把包名加进 `dsh.profile.bundles`、在 profile 自己的 `cordis.patch.yml` 写一条**按 id 的覆盖**：
+
+```jsonc
+// package.json
+{
+  "dependencies": { "dsh-mobile-plugin": "link:<本仓库路径>" },
+  "dsh": { "profile": { "bundles": [
+    "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-mobile-plugin"
+  ] } }
+}
+```
 
 ```yaml
-- insert:
-    - id: mobile-bridge
-      name: dsh-mobile-plugin
-      config:
-        natsUrl: 'nats://127.0.0.1:4222'
-        hubWssUrl: 'wss://<hub-host>:8443'
-        hubUser: '<c-end 账号>'
-        instanceId: 'home'
+# cordis.patch.yml：这一行由组合包提供，这里只覆盖它的配置
+- id: mobile-bridge
+  name: dsh-mobile-plugin
+  config:
+    natsUrl: 'nats://127.0.0.1:4222'
+    hubWssUrl: 'wss://<hub-host>:8443'
+    hubUser: '<c-end 账号>'
+    instanceId: 'home'
 ```
 
 依赖用 `link:<本仓库路径>`（开发机）或 git/tarball spec（其它机器）。**Windows 上用 `link:` 时，本仓库的 `node_modules` 必须无符号链接**：profile 的 `nodeLinker` 是 `hoisted`，每次安装都会把整个仓库目录复制进 profile，复制里遇到符号链接就要重建，而非提权的 dsh 宿主没有建符号链接的权限，会以 `ERR_PNPM_EPERM` 失败（界面只显示「没有写入权限，无法安装」）。本仓库因此在 `pnpm-workspace.yaml` 固定 `nodeLinker: hoisted`，别把它删掉。

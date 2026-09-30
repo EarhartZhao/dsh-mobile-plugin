@@ -34,7 +34,17 @@ function captureRoutes(
   }
   const backend = {
     bridge: () => ({
-      status: () => ({ connection: 'connected', pluginVersion: '0.0.0-test', mobileApi: 2, features: [] }),
+      status: () => ({
+        connection: 'connected',
+        pluginVersion: '0.0.0-test',
+        mobileApi: 2,
+        features: [],
+        profile: {
+          state: 'ok',
+          shape: { bundleListed: true, legacyInsert: false, overrideRow: true },
+          notes: ['安装形态正常'],
+        },
+      }),
       listDevices: () => [],
       revokeDevice: () => Promise.resolve(true),
       forgetDevice: () => Promise.resolve(true),
@@ -54,6 +64,11 @@ function captureRoutes(
     currentConfig: () => config,
     updateConfig: () => Promise.resolve(),
     startNats: () => Promise.resolve({ ok: true, message: '' }),
+    repairProfile: () => Promise.resolve({
+      state: 'ok',
+      shape: { bundleListed: true, legacyInsert: false, overrideRow: true },
+      notes: ['安装形态正常'],
+    }),
     checkHub,
   } as unknown as ConsoleBackend
   registerConsoleRoutes(router, backend)
@@ -215,6 +230,47 @@ describe('console pairing route', () => {
 })
 
 describe('console page', () => {
+  it('shows the install shape and offers the repair beside the status line', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('id="profileShape"')
+    expect(html).toContain('id="repairBtn"')
+    // The button is hidden until a status poll says a write would help.
+    expect(html).toContain('id="repairBtn" class="secondary" type="button" style="margin-left:8px" hidden')
+    expect(html).toContain("api('migrate', {})")
+  })
+
+  it('reports the install shape through the status poll', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1')
+    await route(call.req, call.res)
+
+    expect(call.json().profile).toEqual({
+      state: 'ok',
+      shape: { bundleListed: true, legacyInsert: false, overrideRow: true },
+      notes: ['安装形态正常'],
+    })
+  })
+
+  it('repairs the install shape through its own route', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/migrate')!
+    const call = exchange('127.0.0.1', 'POST')
+    await route(call.req, call.res)
+
+    expect(call.status()).toBe(200)
+    expect(call.json().state).toBe('ok')
+  })
+
+  it('refuses the repair on anything but a POST', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/migrate')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    expect(call.status()).toBe(405)
+  })
+
   it('splits paired devices into two tabs inside a height-capped pane', async () => {
     const route = captureRoutes(baseConfig).get('/mobile-bridge')!
     const call = exchange('127.0.0.1', 'GET')
@@ -260,6 +316,7 @@ describe('console request gate', () => {
     '/mobile-bridge/api/revoke',
     '/mobile-bridge/api/forget',
     '/mobile-bridge/api/nats/start',
+    '/mobile-bridge/api/migrate',
   ]
 
   it('refuses every route for a peer that is not loopback', async () => {
