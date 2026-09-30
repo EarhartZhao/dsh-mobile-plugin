@@ -1,3 +1,7 @@
 node_modules/
 lib/
 *.tsbuildinfo
+
+# Ad-hoc probe scratch: `_tmp-*.mjs` plus their logs. The probes worth keeping
+# are tracked as scripts/*-probe.mjs.
+scripts/_tmp*
