@@ -198,6 +198,23 @@ export class TokenStore {
     return true
   }
 
+  /**
+   * Drop one revoked device's record for good, so the console's history stops
+   * carrying every pairing it ever saw. Only revoked devices are forgettable:
+   * deleting a live one would leave its token working with nothing on disk to
+   * attribute the request to — revoking first is the whole point of the step.
+   * @param deviceId - record to delete.
+   * @returns whether a revoked record was removed; false for live or unknown ids.
+   */
+  async forget(deviceId: string): Promise<boolean> {
+    const device = this.devices.get(deviceId)
+    if (device === undefined || !device.revoked) return false
+    this.devices.delete(deviceId)
+    this.tokenIndex.delete(device.tokenHash)
+    await this.save()
+    return true
+  }
+
   list(): Omit<DeviceEntry, 'tokenHash'>[] {
     return [...this.devices.values()].map(({ tokenHash: _, ...rest }) => rest)
   }

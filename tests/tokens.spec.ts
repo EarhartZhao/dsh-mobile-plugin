@@ -100,6 +100,30 @@ describe('TokenStore', () => {
     expect(reloaded.activeCount()).toBe(0)
   })
 
+  it('forgets only revoked records, and does so for good', async () => {
+    const { code } = store.createPairingCode(120)
+    const live = await store.redeemPairingCode(code, 'a', 90, 10)
+    const second = store.createPairingCode(120)
+    const dead = await store.redeemPairingCode(second.code, 'b', 90, 10)
+
+    // A live device is not forgettable: that would drop a working token's record.
+    expect(await store.forget(live!.deviceId)).toBe(false)
+    expect(store.list()).toHaveLength(2)
+
+    expect(await store.revoke(dead!.deviceId)).toBe(true)
+    expect(await store.forget(dead!.deviceId)).toBe(true)
+    // The record leaves the history entirely, unlike a revocation.
+    expect(store.list().map(device => device.id)).toEqual([live!.deviceId])
+    expect(await store.forget(dead!.deviceId)).toBe(false)
+    // The live device still authenticates; the deleted one never did.
+    expect(store.validate(live!.token)).not.toBeNull()
+    expect(store.validate(dead!.token)).toBeNull()
+
+    const reloaded = new TokenStore(join(dir, 'tokens.json'))
+    await reloaded.load()
+    expect(reloaded.list().map(device => device.id)).toEqual([live!.deviceId])
+  })
+
   it('persists tokens across reloads without storing plaintext', async () => {
     const { code } = store.createPairingCode(120)
     const result = await store.redeemPairingCode(code, 'a', 90, 10)

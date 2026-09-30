@@ -295,6 +295,18 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         json(res, ok ? 200 : 404, { ok })
       },
     }),
+    webServer.register({
+      kind: 'exact',
+      path: '/mobile-bridge/api/forget',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
+        const body = await readJson(req)
+        const ok = await backend.bridge().forgetDevice(String(body.deviceId ?? ''))
+        json(res, ok ? 200 : 404, { ok })
+      },
+    }),
   ]
   return () => { for (const dispose of disposers) dispose() }
 }
@@ -515,7 +527,9 @@ function renderDevices() {
     '<tr><td>' + escapeText(d.name) + '</td>' + '<td>' + d.createdAt.slice(0, 10) + '</td>' +
     '<td>' + d.expiresAt.slice(0, 10) + '</td><td>' +
     (d.revoked
-      ? '<span class="deviceState">已吊销</span>'
+      // The record itself is the only thing left to act on, and it is already
+      // dead: deleting it needs no confirmation dialog.
+      ? '<span class="deviceState">已吊销</span> <button class="secondary" onclick="forgetDevice(\\'' + d.id + '\\')">删除记录</button>'
       : '<button class="secondary" onclick="revoke(\\'' + d.id + '\\')">吊销</button>') + '</td></tr>'
   ).join('') || '<tr><td colspan="4" class="deviceState">' +
     (deviceTab === 'active' ? '暂无设备' : '没有已吊销的设备') + '</td></tr>'
@@ -530,6 +544,8 @@ async function refreshDevices() {
 }
 
 window.revoke = async (id) => { await api('revoke', { deviceId: id }); refreshDevices() }
+
+window.forgetDevice = async (id) => { await api('forget', { deviceId: id }); refreshDevices() }
 
 $('saveBtn').onclick = async () => {
   $('saveMsg').className = ''; $('saveMsg').textContent = '保存中…'

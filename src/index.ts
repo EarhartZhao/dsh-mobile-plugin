@@ -259,6 +259,11 @@ export class MobileBridge extends Service {
     return this.tokens.revoke(deviceId)
   }
 
+  /** Delete one revoked device's record; see {@link TokenStore.forget}. */
+  async forgetDevice(deviceId: string): Promise<boolean> {
+    return this.tokens.forget(deviceId)
+  }
+
   /** Start the machine-local NATS Leaf used by this bridge. */
   async startLocalNats(): Promise<{ ok: boolean, message: string }> {
     if (this.localNatsProcess !== null

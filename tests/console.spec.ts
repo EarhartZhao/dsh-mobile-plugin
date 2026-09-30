@@ -35,6 +35,9 @@ function captureRoutes(
   const backend = {
     bridge: () => ({
       status: () => ({ connection: 'connected', pluginVersion: '0.0.0-test', mobileApi: 2, features: [] }),
+      listDevices: () => [],
+      revokeDevice: () => Promise.resolve(true),
+      forgetDevice: () => Promise.resolve(true),
       createPairingQr: () => ({
         code: 'ABCDEFGH',
         expiresAt: Date.now() + 120_000,
@@ -228,6 +231,19 @@ describe('console page', () => {
     expect(html).toContain('.devicePane { max-height: 520px; overflow: auto;')
     // A revoked row reports its state instead of offering the same action again.
     expect(html).toContain('没有已吊销的设备')
+    // Deleting a revoked record is a one-click action: the row is already dead,
+    // so there is nothing a confirmation would protect.
+    expect(html).toContain('删除记录')
+    expect(html).toContain('window.forgetDevice = async')
+  })
+
+  it('deletes a revoked record through its own route', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/forget')!
+    const call = exchange('127.0.0.1', 'POST')
+    await route(call.req, call.res)
+
+    expect(call.status()).toBe(200)
+    expect(call.json()).toEqual({ ok: true })
   })
 })
 
@@ -242,6 +258,7 @@ describe('console request gate', () => {
     '/mobile-bridge/api/pair',
     '/mobile-bridge/api/reveal',
     '/mobile-bridge/api/revoke',
+    '/mobile-bridge/api/forget',
     '/mobile-bridge/api/nats/start',
   ]
 
