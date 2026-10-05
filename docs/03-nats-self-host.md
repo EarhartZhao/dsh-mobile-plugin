@@ -222,8 +222,9 @@ leafnodes {
 | 字段 | 填什么 | 默认 |
 |---|---|---|
 | `natsUrl` | 本机 Leaf 地址 | `nats://127.0.0.1:4222` |
-| `hubWssUrl` | 手机要连的 `wss://<hub-host>:8443`，经二维码下发给手机；只填主机或 IP 也行，缺端口按 8443 补 | 空 |
+| `hubWssUrl` | 手机要连的 `wss://<hub-host>:8443`，经二维码下发给手机；只填主机或 IP、或写 `wss://<hub-host>` 都行，缺端口一律按 8443 补 | 空 |
 | `hubUser` / `hubPass` | 上面的 C 端账号；任一为空时拒绝发码 | 空 |
+| `hubCaCert` | Hub 的 CA 证书（`ca.crt` 的 PEM 或 base64）；二维码带的就是它——App 不内置任何 CA，自签 Hub 留空必然连不上 | 空 |
 | `hubCaFingerprint` | Hub CA 指纹，仅作展示与人工核对 | 空 |
 | `instanceId` | 本实例的命名空间；一个 Hub 上多台电脑必须各不相同 | `home` |
 | `tokenTtlDays` / `pairCodeTtlSec` / `maxDevices` / `chunkCoalesceMs` | 设备 token 有效期 / 配对码有效期 / 终端上限 / 弱网合帧 | 90 / 120 / 10 / 0 |
@@ -265,8 +266,10 @@ Windows 的 `C:\nats-server\nats-server.exe`，最后是 `PATH` 上的 `nats-ser
    | `local` | 桥 → 本机 NATS | 手机扫码连不上宿主 |
    | `credentials` | 本机 → Hub（从 WSS 主机名的 4222 明文口校验） | 密码错：发码被直接拒绝；端口不通：只警告 |
    | `hub-path` | Hub → 本机实例（Leaf 是否桥到 Hub） | 手机扫码拿到 `503` |
+   | `certificate` | 二维码要带的 CA ↔ Hub 在 8443 上实际出示的证书 | 手机卡在 TLS 握手，报「无法连接公网 NATS」 |
 
    `rejected` 会拦住发码，`unreachable` 与 `bridge-offline` 只警告——Leaf 会自行重连，配对码 120 秒内都还有救。
+   `certificate` 段里只有 `unreachable`（8443 从本机连不上）算警告；其余都判失败，因为它们意味着手机一定连不上。
 4. **手机端**：扫码 → 进会话列表 → 发一条 prompt 拿到流式回复；再杀一次 Hub（或拔网线 30 秒）验证自动重连，
    期间本机浏览器不受影响。
 
@@ -288,7 +291,9 @@ nats-server -c scripts/local-hub-standin.conf
 | 手机报 `Authorization Violation` | C 端账号密码与 Hub 不一致 | `hub-credential.sh show` 读回真值，更新插件配置后重新发码（旧二维码里的密码不会自动更新） |
 | 手机报 `503` | Hub → 本机实例没有响应者 | Leaf 没桥到 Hub：看 Leaf 日志有没有 `Leafnode connection created`、`leaf.conf` 的 remotes、7422 是否放行、Leaf 账号是否在 Hub 上 |
 | 控制台「未连接」 | 桥 → 本机 NATS | 点「启动本地 NATS」，确认 `natsUrl` 与 `leaf.conf` 的 port 一致、`NATS_CONFIG_PATH` 指向的文件存在 |
-| 手机 `wss` 握手失败或证书错误 | TLS | SAN 与手机拨的地址不一致（IP 写成域名或反之）、App 未内置这张 CA、8443 未放行、证书过期 |
+| 手机 `wss` 握手失败或证书错误 | TLS | SAN 与手机拨的地址不一致（IP 写成域名或反之）、二维码没带这张 CA（把 Hub 的 `ca.crt` 粘进插件设置）、8443 未放行、证书过期 |
+| 手机报「无法连接公网 NATS」但账号密码都对 | Hub 地址写法 | 地址漏了端口：`wss://<hub-host>` 会被 URL 规范补成 443。插件 0.2.21 起自动补 8443，更早的版本要手写 `wss://<hub-host>:8443` |
+| 「测试 Hub 账号」的 `certificate` 段报证书不是公共 CA 签的 | 二维码不带 CA | 把 Hub 的 `ca.crt` 粘进插件设置里的 CA 字段并保存，再点「生成配对二维码」 |
 | 「测试 Hub 账号」报无法通过 `nats://<hub-host>:4222` | 4222 不通 | 放行该端口或忽略：手机走 8443，此检查失败不阻断发码 |
 | `nats-server -t` 通过但服务起不来 | 权限 | 跑 nats 的用户要能读 `/etc/nats/tls/*`（属主与权限按 2.1、2.3 设置） |
 | 换了 Hub 地址或账号 | 迁移 | 更新插件配置并重新发码；设备 token 是应用层的、本身不受影响，但手机必须重新扫码，因为 NATS 凭证来自二维码 |

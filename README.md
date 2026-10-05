@@ -130,7 +130,7 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 
 手机连 Hub 用的是**插件里配置的 Hub 账号凭证**——它随配对二维码下发，App 不内置任何账号。所以首次必须先配置、再发码：
 
-1. 打开**侧边栏 → 插件 → `dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码并保存。密码是 `role('secret')` 字段，落在 `$DSH_HOME/settings.yaml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"。
+1. 打开**侧边栏 → 插件 → `dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码，并把 Hub 的 `ca.crt` 粘进 CA 字段后保存。密码是 `role('secret')` 字段，落在 `$DSH_HOME/settings.yaml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
 2. 确认状态为「已连接」（本地 NATS 就绪）。
 3. 再点「生成配对二维码」。
 
@@ -145,8 +145,11 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 | `local` | 本机移动端桥 → 本机 NATS | 手机扫码连不上宿主 |
 | `credentials` | 本机 → Hub（二维码里那组账号） | 手机报 `Authorization Violation` |
 | `hub-path` | Hub → 本机实例（本机 Leaf 是否已桥接到 Hub） | 手机报 `503`（NATS 无人响应） |
+| `certificate` | 二维码要带的 CA ↔ Hub 实际出示的证书 | 手机卡在 TLS 握手，报「无法连接公网 NATS」 |
 
 第三段是**只有凭证检查看不见**的故障：账号密码都对、插件状态也显示「已连接」（那只说明它连上了本机 NATS），但本机 Leaf 没连上 Hub，于是 Hub 上 `svc.dsh.{instance}.pair` 没有订阅者。检查的做法是另开一条直连 Hub 的连接，请 Hub 去请求本机实例的配对主题——复刻手机扫码走的那条路：有应答就是通，`503` 就是 Leaf 那段断了。
+
+第四段是**只有手机能遇到、也只有手机看不见原因**的故障：App 不内置任何 CA，信任完全来自二维码里的 `ca` 字段，所以 Hub 用自签证书而字段是空的，每次扫码都会死在握手上，手机上只显示一句「无法连接公网 NATS」。因此 CA 字段为空时这个按钮不会直接放过：它会拿系统信任库向 Hub 的 WSS 端口做一次握手，公共 CA 签发的报 `public-ca`（二维码不带证书也能连），自签的报告「手机每次扫码都会卡在 TLS 握手上」并把这一行判为失败。
 
 生成二维码时会自动跑这套检查：凭证被拒直接拒绝发码；`hub-path` 不通只警告不拦截，因为 Leaf 可能自行重连，而配对码 120 秒内都还有救。
 

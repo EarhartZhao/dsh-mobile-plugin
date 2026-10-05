@@ -290,9 +290,10 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         const hub = await checkHub(backend.currentConfig())
         if (hub.reason === 'rejected') return json(res, 400, { error: hub.message })
         // A certificate that is missing, unreadable or simply not the one the
-        // Hub signs with does not stop the QR from being minted — an App that
-        // already bundles this CA still connects — but the scan that will fail
-        // deserves a warning here rather than a handshake error on the phone.
+        // Hub signs with does not stop the QR from being minted — the owner may
+        // be fixing the Hub side right now — but a scan that will fail at the
+        // handshake deserves a warning here instead of that same failure on the
+        // phone, where nothing can explain it.
         const certificate = await checkHubCertificate(backend.currentConfig())
         const hubWarning = [hub.ok ? null : hub.message, certificate.ok ? null : certificate.message]
           .filter((line): line is string => line !== null)
@@ -774,9 +775,13 @@ async function checkHub() {
   const mark = (step) => (step.ok ? '✓ ' : '✗ ')
   const lines = (r.steps || []).map(step => mark(step) + step.message)
   // A certificate problem leaves the NATS path green while the phone still
-  // cannot get in, so the colour follows the worst line rather than reason alone.
-  const allOk = ok && (!r.certificate || r.certificate.ok !== false)
-  $('hubCheckMsg').className = allOk ? 'ok' : (ok || r.reason === 'unreachable' ? '' : 'error')
+  // cannot get in, so the colour follows the worst line rather than reason
+  // alone. A port that will not answer is the one certificate verdict that
+  // stays a warning: that is a blocked port, not a wrong certificate.
+  const certBroken = !!r.certificate && r.certificate.ok === false && r.certificate.reason !== 'unreachable'
+  const allOk = ok && !certBroken
+  const blocked = certBroken || (!ok && r.reason !== 'unreachable')
+  $('hubCheckMsg').className = allOk ? 'ok' : (blocked ? 'error' : '')
   // Double-escaped on purpose: this code lives inside the page's own template
   // literal, where a single newline escape would become a real line break and
   // break the generated script.

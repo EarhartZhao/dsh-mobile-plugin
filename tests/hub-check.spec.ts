@@ -58,11 +58,26 @@ describe('normalizeHubWssUrl', () => {
     expect(normalizeHubWssUrl('hub.example/leaf')).toBe('wss://hub.example:8443/leaf')
   })
 
-  it('keeps an explicit port and leaves a scheme alone', () => {
+  it('keeps an explicit port', () => {
     expect(normalizeHubWssUrl('203.0.113.10:9443')).toBe('wss://203.0.113.10:9443')
     expect(normalizeHubWssUrl('wss://hub.test:8443')).toBe('wss://hub.test:8443')
     expect(normalizeHubWssUrl('ws://hub.test:8080')).toBe('ws://hub.test:8080')
-    expect(normalizeHubWssUrl('  wss://hub.test  ')).toBe('wss://hub.test')
+  })
+
+  it('fills in the Hub port on a wss:// URL that has none', () => {
+    // `new URL('wss://hub.test')` defaults to 443, so this spelling reaches the
+    // phone as a Hub that is not there. The bare-address shorthand always got
+    // 8443; typing the scheme must not be worse.
+    expect(normalizeHubWssUrl('  wss://hub.test  ')).toBe('wss://hub.test:8443')
+    expect(normalizeHubWssUrl('wss://hub.test/leaf')).toBe('wss://hub.test:8443/leaf')
+    expect(normalizeHubWssUrl('wss://203.0.113.10')).toBe('wss://203.0.113.10:8443')
+  })
+
+  it('leaves ws:// and other schemes as typed', () => {
+    // The plaintext stand-in is a local experiment: no default port is right,
+    // and the owner always names one.
+    expect(normalizeHubWssUrl('ws://hub.test')).toBe('ws://hub.test')
+    expect(normalizeHubWssUrl('ws://hub.test/leaf')).toBe('ws://hub.test/leaf')
   })
 
   it('keeps "not configured yet" empty', () => {
@@ -139,8 +154,12 @@ describe('checkHubPath', () => {
  * delivered as the socket's error event — the two shapes the real call
  * produces for every outcome this check distinguishes.
  */
-function tlsStub(outcome: 'completing' | Error): typeof import('node:tls').connect {
-  return ((_options: unknown, onSecure?: () => void) => {
+function tlsStub(
+  outcome: 'completing' | Error,
+  seen?: Record<string, unknown>[],
+): typeof import('node:tls').connect {
+  return ((options: Record<string, unknown>, onSecure?: () => void) => {
+    seen?.push(options)
     const socket = {
       destroy: () => undefined,
       setTimeout: () => socket,
@@ -178,14 +197,36 @@ describe('checkHubCertificate', () => {
     expect(result.fingerprint).toBe(ALPHA_CA_FINGERPRINT)
   })
 
-  it('warns, without failing, when no certificate is configured', async () => {
-    const result = await checkHubCertificate(config, { tlsConnectImpl: tlsStub('completing') })
+  it('passes an empty field only when the Hub uses a public CA', async () => {
+    // No `ca` in the probe: this asks the platform trust store, which is all
+    // the App will have when the QR carries no certificate.
+    const seen: Record<string, unknown>[] = []
+    const result = await checkHubCertificate(config, { tlsConnectImpl: tlsStub('completing', seen) })
+
+    expect(result.ok).toBe(true)
+    expect(result.reason).toBe('public-ca')
+    expect(result.message).toContain('公共 CA')
+    expect(seen.map(options => 'ca' in options)).toEqual([false])
+  })
+
+  it('fails an empty field on a self-signed Hub, which is where every scan dies', async () => {
+    const result = await checkHubCertificate(config, {
+      tlsConnectImpl: tlsStub(Object.assign(new Error('bad chain'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' })),
+    })
 
     expect(result.ok).toBe(false)
     expect(result.reason).toBe('unconfigured')
-    // The QR is still usable by an App that bundles this CA, so the message
-    // has to explain the consequence rather than call it broken.
-    expect(result.message).toContain('二维码不带证书')
+    expect(result.message).toContain('TLS 握手')
+    expect(result.message).toContain('ca.crt')
+  })
+
+  it('keeps a blocked port a warning when no certificate is configured', async () => {
+    const result = await checkHubCertificate(config, {
+      tlsConnectImpl: tlsStub(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })),
+    })
+
+    expect(result.reason).toBe('unreachable')
+    expect(result.message).toContain('不代表证书有问题')
   })
 
   it('rejects text that is not a certificate', async () => {

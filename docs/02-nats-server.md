@@ -38,7 +38,7 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 
 - `ca.key`：**离线保管**（密码管理器/加密盘），它是整个信任体系的根，绝不放服务器。
 - `server.crt` + `server.key`：放服务器 `/etc/nats/tls/`，权限 0600。
-- `ca.crt`：打进 App 构建（见第四节），也存一份备份。
+- `ca.crt`：粘进各主机的插件设置卡「CA 证书」字段（随二维码下发给手机），也存一份备份；App 侧不再打包任何 CA（见第四节）。
 
 ### 1.1 密钥泄露后的轮换与作废（2026-09-30）
 

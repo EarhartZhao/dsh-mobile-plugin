@@ -57,6 +57,7 @@ export interface HubCheckOptions {
 
 export type HubCertificateReason =
   | 'ok'
+  | 'public-ca'
   | 'unconfigured'
   | 'malformed'
   | 'fingerprint-mismatch'
@@ -112,6 +113,44 @@ const CA_REJECTION_CODES = new Set([
   'ERR_TLS_CERT_ALTNAME_INVALID',
 ])
 
+/**
+ * One TLS handshake against exactly what the phone will dial.
+ *
+ * `trustedCa` of `null` leaves `ca` unset, which is what makes Node fall back
+ * to the platform trust store — the same store the App has when the QR carries
+ * no certificate. Resolves on a completed handshake, rejects with the socket's
+ * own error otherwise.
+ */
+function tlsProbe(
+  endpoint: { host: string, port: number },
+  trustedCa: string | null,
+  timeout: number,
+  connectImpl: typeof tlsConnect,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const socket = connectImpl({
+      host: endpoint.host,
+      port: endpoint.port,
+      ...(trustedCa === null ? {} : { ca: trustedCa }),
+      rejectUnauthorized: true,
+      // SNI carries a name, never an address; Node checks the certificate
+      // against the IP SAN when it is given one.
+      ...(isIpLiteral(endpoint.host) ? {} : { servername: endpoint.host }),
+    }, () => {
+      socket.destroy()
+      resolve()
+    })
+    socket.setTimeout(timeout, () => {
+      socket.destroy()
+      reject(Object.assign(new Error('TLS handshake timed out'), { code: 'ETIMEDOUT' }))
+    })
+    socket.once('error', (error) => {
+      socket.destroy()
+      reject(error)
+    })
+  })
+}
+
 /** The Hub's plain client port, derived from the WSS URL the QR advertises. */
 export function hubProbeAddress(hubWssUrl: string): string | null {
   try {
@@ -129,18 +168,39 @@ export function hubProbeAddress(hubWssUrl: string): string | null {
  * as "无法从 Hub 地址解析出主机名". A bare `host[:port][/path]` becomes
  * `wss://host[:port][/path]`, and a bare address with no port gets 8443 rather
  * than letting the URL default to 443: this field is the Hub's WSS listener.
- * Anything already carrying a scheme is kept as typed, and an empty value stays
- * empty so "not configured yet" keeps working.
+ * A `wss://` URL with no port gets the same treatment — see {@link withHubPort}
+ * — and everything else carrying a scheme is kept as typed. An empty value
+ * stays empty so "not configured yet" keeps working.
  */
 export function normalizeHubWssUrl(value: string): string {
   const trimmed = value.trim()
   if (trimmed === '') return ''
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return withHubPort(trimmed)
   const bare = trimmed.replace(/^\/+/, '')
   const slash = bare.indexOf('/')
   const authority = slash === -1 ? bare : bare.slice(0, slash)
   const path = slash === -1 ? '' : bare.slice(slash)
   return `wss://${/:\d+$/.test(authority) ? authority : `${authority}:8443`}${path}`
+}
+
+/**
+ * `wss://` with no port is the spelling that silently points somewhere else:
+ * the URL spec fills in 443, so the QR sends the phone to a port the Hub does
+ * not listen on and the scan ends on the same "无法连接公网 NATS" screen a wrong
+ * password gives — with nothing on the desktop pointing at the address. The
+ * bare-address shorthand got this port filled in from the start; an address
+ * typed with the scheme did not, which is how `wss://<hub-host>` reached a Hub
+ * listening on 8443.
+ *
+ * Only `wss://` is touched. `ws://` without a port is the plaintext stand-in an
+ * owner runs locally, where 80 is no better a guess than any other.
+ */
+function withHubPort(url: string): string {
+  const match = /^(wss):\/\/([^/?#]*)(.*)$/i.exec(url)
+  if (match === null) return url
+  const authority = match[2]
+  if (authority === '' || /:\d+$/.test(authority)) return url
+  return `${match[1]}://${authority}:8443${match[3]}`
 }
 
 /**
@@ -278,23 +338,74 @@ export async function checkHubPath(
  * contradicts the certificate beside it. Checking costs one TLS handshake to
  * the WSS port the phone will dial.
  *
- * An unset certificate is reported as `unconfigured` rather than a failure:
- * the App carries no CA of its own, so leaving it empty is only viable for a
- * Hub whose certificate a public CA signed — everything else pairs and then
- * dies at the handshake.
+ * An unset certificate is not assumed to be fine and is not assumed to be
+ * broken: the App carries no CA of its own, so leaving the field empty is only
+ * viable for a Hub whose certificate a public CA signed, and the only way to
+ * tell the two apart is to handshake against the platform trust store. A
+ * self-signed Hub then reports `unconfigured` as a failure — "every scan will
+ * die at the handshake" — instead of the green verdict this check used to give
+ * it, and a public-CA Hub reports `public-ca`, which is a pass.
  */
 export async function checkHubCertificate(
   config: Config,
   options: HubCertificateOptions = {},
 ): Promise<HubCertificateResult> {
+  const timeout = options.timeoutMs ?? 5000
+  const connectImpl = options.tlsConnectImpl ?? tlsConnect
   const configured = typeof config.hubCaCert === 'string' ? config.hubCaCert.trim() : ''
   if (configured === '') {
+    // An empty field is only viable when a public CA signed the Hub, and that
+    // is checkable: ask the same trust store the phone ends up with. Skipping
+    // the probe made this report "整条链路可用" for a self-signed Hub whose every
+    // scan dies at the handshake — the one failure the owner cannot see from
+    // the desktop, and the reason "测试 Hub 账号" was asked to cover the whole
+    // path in the first place.
+    const endpoint = hubTlsEndpoint(config.hubWssUrl)
+    if (endpoint === null) {
+      return {
+        ok: false,
+        reason: 'unconfigured',
+        fingerprint: null,
+        message: unparseableHubAddress(config.hubWssUrl),
+      }
+    }
+    if (endpoint.plaintext) {
+      return {
+        ok: true,
+        reason: 'plaintext',
+        fingerprint: null,
+        message: 'Hub 地址是 ws://（明文），这条链路不做 TLS，CA 证书不会用到；也只有 debug 构建能连这种 Hub。',
+      }
+    }
+    try {
+      await tlsProbe(endpoint, null, timeout, connectImpl)
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code
+      const codeText = typeof code === 'string' ? code : ''
+      if (CA_REJECTION_CODES.has(codeText)) {
+        return {
+          ok: false,
+          reason: 'unconfigured',
+          fingerprint: null,
+          message: `没有配置 Hub 的 CA 证书，而 ${endpoint.host}:${endpoint.port} 的证书不是公共 CA 签的（${codeText}）：`
+            + '二维码不带证书，App 里也没有内置任何 CA，手机每次扫码都会卡在 TLS 握手上。'
+            + '把 Hub 的 ca.crt 粘进上面的字段并保存，再点这个按钮。',
+        }
+      }
+      return {
+        ok: false,
+        reason: 'unreachable',
+        fingerprint: null,
+        message: `无法与 ${endpoint.host}:${endpoint.port} 完成 TLS 握手（${codeText === '' ? String(error) : codeText}），也没有配置 CA 证书。`
+          + '这不代表证书有问题，也可能是端口不通；手机走同一条链路，可以先扫码试。',
+      }
+    }
     return {
-      ok: false,
-      reason: 'unconfigured',
+      ok: true,
+      reason: 'public-ca',
       fingerprint: null,
-      message: '没有配置 Hub 的 CA 证书：二维码不带证书，而 App 里没有内置任何 CA。'
-        + '只有用公共 CA 签发证书的 Hub 能连上；自签证书的 Hub 请把 ca.crt 粘进上面的字段并保存。',
+      message: `没有配置 CA 证书，但 ${endpoint.host}:${endpoint.port} 的证书能通过系统信任库校验（公共 CA 签发），`
+        + '二维码不带证书也能连。',
     }
   }
 
@@ -337,31 +448,8 @@ export async function checkHubCertificate(
     }
   }
 
-  const connectImpl = options.tlsConnectImpl ?? tlsConnect
-  const timeout = options.timeoutMs ?? 5000
   try {
-    await new Promise<void>((resolve, reject) => {
-      const socket = connectImpl({
-        host: endpoint.host,
-        port: endpoint.port,
-        ca: ca.pem,
-        rejectUnauthorized: true,
-        // SNI carries a name, never an address; Node checks the certificate
-        // against the IP SAN when it is given one.
-        ...(isIpLiteral(endpoint.host) ? {} : { servername: endpoint.host }),
-      }, () => {
-        socket.destroy()
-        resolve()
-      })
-      socket.setTimeout(timeout, () => {
-        socket.destroy()
-        reject(Object.assign(new Error('TLS handshake timed out'), { code: 'ETIMEDOUT' }))
-      })
-      socket.once('error', (error) => {
-        socket.destroy()
-        reject(error)
-      })
-    })
+    await tlsProbe(endpoint, ca.pem, timeout, connectImpl)
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code
     const codeText = typeof code === 'string' ? code : ''
