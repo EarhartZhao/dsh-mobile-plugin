@@ -236,7 +236,7 @@ leafnodes {
 配置分层：bundle 自带的 patch 只放非密默认值，控制台「保存」写进的是 profile 自己的 `cordis.patch.yml` 里那条按 id 的覆盖行（宿主 `configEditor` 落盘）；
 真正的密文按官方建议走 credentials seam（现状与迁移方向见 [README](../README.md) 的「凭证放哪」一节）。
 
-安装形态（行由组合包提供、profile patch 只留按 id 的覆盖）与旧 `insert:` 写法的自动迁移，见 [README](../README.md) 的「安装与接入」与 [00-plugin-plan](00-plugin-plan.md) 的「安装形态与自动迁移」。
+安装形态（行由组合包提供、profile patch 只留按 id 的覆盖）与旧 `insert:` 写法的自动迁移，见 [README](../README.md) 的「安装」与 [00-plugin-plan](00-plugin-plan.md) 的「安装形态与自动迁移」。
 
 控制台的「启动本地 NATS」按钮先按上面的 `natsUrl` 探测端口：已在监听就直接复用它（手工起的 Leaf、服务管理器起的、上一次 dsh 起的都算，这种情况不需要配置文件），
 否则解析出可执行文件与 Leaf 配置再启动 `nats-server -c <config>`。两条路径的优先级都是
