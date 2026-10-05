@@ -232,7 +232,7 @@ leafnodes {
 | `natsServerPath` | 「启动本地 NATS」要跑的 `nats-server`；留空则自动查找（插件目录 → `~/.nats-leaf/nats-server` → `PATH`），`NATS_SERVER_PATH` 可覆盖 | 空 |
 | `autoMigrateProfile` | 安装形态自动修复：早期用 `insert:` 手工挂的 profile 会被改回组合包形态；设 `false` 则插件不碰 profile 文件 | `true` |
 
-配置分层：bundle 自带的 patch 只放非密默认值，控制台「保存」写的是用户层 `$DSH_HOME/settings.yaml`；
+配置分层：bundle 自带的 patch 只放非密默认值，控制台「保存」写进的是 profile 自己的 `cordis.patch.yml` 里那条按 id 的覆盖行（宿主 `configEditor` 落盘）；
 真正的密文按官方建议走 credentials seam（现状与迁移方向见 [README](../README.md) 的「凭证放哪」一节）。
 
 安装形态（行由组合包提供、profile patch 只留按 id 的覆盖）与旧 `insert:` 写法的自动迁移，见 [README](../README.md) 的「安装与接入」与 [00-plugin-plan](00-plugin-plan.md) 的「安装形态与自动迁移」。

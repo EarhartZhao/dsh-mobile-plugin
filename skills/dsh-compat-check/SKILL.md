@@ -22,8 +22,11 @@ rg -n "ctx\.get\(|from '@deepseek-ai" src/index.ts src/events.ts src/bridge.ts
 |------|------|-------------|
 | `@deepseek-ai/dsh-client-connection` (`HostConnectionHandle`) | 创建 shared `/api` handler，提交 `$events/result` | 0.1.5-rc.1（0.1.3-alpha.1 起签名未变） |
 | `@deepseek-ai/dsh-api-gateway` (`TypertGateway`) | 调用 unary/stream Remote 与 `$events` | 0.1.5-rc.1（0.1.3-alpha.1 起签名未变） |
-| `@deepseek-ai/cordis` (`Context`, `Service`) | 插件生命周期 | ^4.0.1 |
-| `@deepseek-ai/schemastery` (`Config`) | 插件配置 schema | ^3.18.1 |
+| `@deepseek-ai/cordis` (`Context`, `Service`, `Volatile`) | 插件生命周期、`ctx.fiber`、volatile 配置引用类型 | ^4.0.4 |
+| `@deepseek-ai/cosmokit` (`isVolatile`) | 把 schema-volatile 字段的引用摊平成普通值 | ^1.8.5 |
+| `@deepseek-ai/schemastery` (`Config` + `.volatile()`) | 插件配置 schema；volatile 字段是设置页可写、保存不重挂的前提 | ^3.18.4 |
+
+注：`loader/volatile-update`（`@deepseek-ai/cordis-plugin-loader` 声明）是插件保存配置后重建桥的触发点，`src/loader-events.d.ts` 里镜像了它的签名。宿主把它改名或改签名时，插件会静默收不到通知——保存仍落盘，但要等重启才生效。
 
 ## 第二步：对比上游变化
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-plugin",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "description": "dsh-mobile bridge: NATS outbound bridge plugin for deepseek-harness (mobile client transport, pairing, device tokens)",
   "type": "module",
   "main": "lib/index.js",
@@ -46,12 +46,14 @@
     "yaml": "^2.9.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/cosmokit": "^1.8.5",
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/cosmokit": "^1.8.5",
+    "@deepseek-ai/schemastery": "^3.18.4",
     "@types/node": "^24.0.0",
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.1.0",

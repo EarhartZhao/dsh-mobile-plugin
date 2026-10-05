@@ -1,5 +1,7 @@
 /** Plugin configuration schema (schemastery), per docs/00-plugin-plan.md. */
 
+import type { Volatile } from '@deepseek-ai/cordis'
+import { isVolatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
 
 export interface Config {
@@ -53,19 +55,60 @@ export interface Config {
   autoMigrateProfile: boolean
 }
 
-export const Config: z<Config> = z.object({
-  natsUrl: z.string().default('nats://127.0.0.1:4222'),
-  hubWssUrl: z.string().default(''),
-  hubUser: z.string().default(''),
-  hubPass: z.string().role('secret').default(''),
-  hubCaCert: z.string().default(''),
-  hubCaFingerprint: z.string().default(''),
-  instanceId: z.string().pattern(/^[a-z0-9-]+$/).default('home'),
-  tokenTtlDays: z.natural().default(90),
-  pairCodeTtlSec: z.natural().default(120),
-  maxDevices: z.natural().default(10),
-  chunkCoalesceMs: z.natural().default(0),
-  natsConfigPath: z.string().default(''),
-  natsServerPath: z.string().default(''),
-  autoMigrateProfile: z.boolean().default(true),
+/**
+ * Loader-facing view of {@link Config}: every editable field is declared
+ * `.volatile()`, so the loader hands it over as a live reference it updates in
+ * place — the settings page saving the namespace commits into these references
+ * and emits `loader/volatile-update` instead of remounting the plugin.
+ * {@link configValues} flattens them back into the plain values the bridge
+ * reads, and src/index.ts re-reads them on that event.
+ */
+export type ConfigInput = { [K in keyof Config]: Volatile<Config[K]> }
+
+export const Config = z.object({
+  natsUrl: z.string().default('nats://127.0.0.1:4222').volatile(),
+  hubWssUrl: z.string().default('').volatile(),
+  hubUser: z.string().default('').volatile(),
+  hubPass: z.string().role('secret').default('').volatile(),
+  hubCaCert: z.string().default('').volatile(),
+  hubCaFingerprint: z.string().default('').volatile(),
+  instanceId: z.string().pattern(/^[a-z0-9-]+$/).default('home').volatile(),
+  tokenTtlDays: z.natural().default(90).volatile(),
+  pairCodeTtlSec: z.natural().default(120).volatile(),
+  maxDevices: z.natural().default(10).volatile(),
+  chunkCoalesceMs: z.natural().default(0).volatile(),
+  natsConfigPath: z.string().default('').volatile(),
+  natsServerPath: z.string().default('').volatile(),
+  autoMigrateProfile: z.boolean().default(true).volatile(),
 })
+
+/** Read one resolved field; a `.volatile()` field arrives as a reference. */
+function field<T>(value: Volatile<T> | T): T {
+  return isVolatile(value) ? value.get() as T : value as T
+}
+
+/**
+ * Flatten the loader's live references into the plain values the rest of the
+ * plugin reads. A plain object resolves to itself, so headless compositions and
+ * tests can hand over an already-resolved config.
+ * @param input Resolved loader config, or plain values.
+ * @returns Detached plain configuration.
+ */
+export function configValues(input: ConfigInput | Config): Config {
+  return {
+    natsUrl: field(input.natsUrl),
+    hubWssUrl: field(input.hubWssUrl),
+    hubUser: field(input.hubUser),
+    hubPass: field(input.hubPass),
+    hubCaCert: field(input.hubCaCert),
+    hubCaFingerprint: field(input.hubCaFingerprint),
+    instanceId: field(input.instanceId),
+    tokenTtlDays: field(input.tokenTtlDays),
+    pairCodeTtlSec: field(input.pairCodeTtlSec),
+    maxDevices: field(input.maxDevices),
+    chunkCoalesceMs: field(input.chunkCoalesceMs),
+    natsConfigPath: field(input.natsConfigPath),
+    natsServerPath: field(input.natsServerPath),
+    autoMigrateProfile: field(input.autoMigrateProfile),
+  }
+}

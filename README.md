@@ -19,7 +19,7 @@
 
 **装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
 
-装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是另一层（`$DSH_HOME/settings.yaml` 的 `mobile-bridge` 命名空间），优先级在组合层之上。
+装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是**同一个 profile patch** 里那条覆盖行的 `config:`（宿主 `configEditor` 落盘），优先于组合层；因为字段都声明为 schema-volatile，保存不会重启宿主，插件就地重建 NATS 桥。
 
 **旧写法由插件自动修正。** 如果 profile 是用 `insert:` 手工挂的这一行（早期文档和从 `$DSH_HOME/settings.yaml.imported` 搬迁都这么写），宿主的整包与行开关都管不了它：包名不在 `dsh.profile.bundles` 里，所以整包开关是关的；行开关只在整包启用时才渲染，于是也看不到；点卸载则直接报 `bundle-in-use`，因为这一行不是组合包提供的，关掉组合包它仍然在。插件加载时会把这种形态改回组合包形态，分两步、只改 profile 的两个文件、配置值一个不丢：① 把包名补进 `dsh.profile.bundles`（这一条到下**一次启动**才生效，本次不动正在运行的行）；② 重启后行已由组合包提供，再把 profile patch 里的 `insert` 改成按 id 的覆盖行。关掉配置项 `autoMigrateProfile` 可以让插件完全不碰 profile 文件，改由控制台页上的「修复安装形态」按钮手动触发。
 
@@ -57,10 +57,10 @@
 | 层 | 位置 | 该放什么 |
 |---|---|---|
 | 组合层 | bundle / profile 的 `cordis.patch.yml` | 结构与非密默认值：`natsUrl`、`hubWssUrl`、`instanceId`、TTL。**不放真实密码** |
-| 用户层 | `$DSH_HOME/settings.yaml` 的 `mobile-bridge` 命名空间 | 本机用户自己的值；控制台「保存」写的就是这一层 |
+| 用户层 | profile 自己的 `cordis.patch.yml` 里 `- id: mobile-bridge` 覆盖行的 `config:` | 本机用户自己的值；控制台「保存」写的就是这一层（宿主 `configEditor` 落盘） |
 | 引用层（官方推荐） | credentials seam：`dsh-credentials-local`（`.credentials.yaml`）、进程环境或 `.env` | 真正的密文；配置里只留引用名 |
 
-`hubPass` 现在是 `z.string().role('secret')`（见 `src/config.ts`）。`role('secret')` 只保证**不把默认值带进表单、不下发到 wire**——宿主 `redactSecrets` 会把值换成占位，所以非本机请求只拿得到「是否已配置」。值本身仍以明文写在 `$DSH_HOME/settings.yaml`。
+`hubPass` 是 `z.string().role('secret')`（见 `src/config.ts`）。`role('secret')` 只保证**不把默认值带进表单、不下发到 wire**——宿主 `redactSecrets` 会把值换成占位，所以非本机请求只拿得到「是否已配置」。值本身仍以明文写在 profile 的 `cordis.patch.yml`（就是上面那条覆盖行），跟着 profile 一起被备份/搬迁，别把这份文件提交到任何仓库。
 
 dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原则是「**secret 不进配置**」：settings 与 `cordis.yml` 只写引用名（环境变量名），值由 `@deepseek-ai/dsh-credentials-local` 这类 provider 持有，消费方按需 `ctx.credentials.resolve(ref)`，配置 UI 只用 `describe(ref)` 报「是否配置 / 来源 / 可写」，永不回显值。需要同步、共享或渲染配置 UI 的部署，官方推荐走这条。
 
@@ -97,6 +97,13 @@ dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原
 1. 工具注册表按 **Agent scope** 注册（内置 `read`/`pwsh` 等都在 scope 层），只查 `ctx.tools.get(name)` 会得到"未注册"；桥用 `ctx.agents.get(sessionId)` 取该会话的 Agent 作为 scope，全局层仅作兜底。
 2. 不猜：无注册表、未注册、无 presenter、参数不是 JSON、presenter 抛错，一律返回"无 view"，App 回退原文；每种原因在宿主日志里各打一行（首次出现才打），便于定位"某个工具为什么显示成原文"。
 
+0.2.22 修好「控制台保存后不落盘、重启就回到空配置」的真 bug，移动端 wire 不变：
+
+1. 写入路径原来是 `settings.register(ns, schema, { base })`。dsh 0.2.0-rc.2 的 `settings` 服务（`SettingsForms`）没有这个方法——它按 profile entry 的 Config schema 自动派生命名空间——所以那句在 `ctx.inject` 回调里抛错被吞掉，插件退回内存分支，保存只改内存。现在走宿主既有的面：schema 里每个字段声明 `.volatile()`，保存改成 `settings.update('mobile-bridge', patch)`，由宿主 `configEditor` 写进 profile 的 `cordis.patch.yml`（按 id 的覆盖行）。
+2. 保存不再重启宿主插件：字段是 schema-volatile，宿主把新值**就地**提交进运行实例的配置引用并发 `loader/volatile-update`，插件重读引用、只重建 NATS 桥。`configure({ auto: false })` 让这个实例不出现在自动生成的设置页上——回环控制台仍是唯一表单，避免两份配置界面。
+3. 配置落盘位置随之改变：不再写 `$DSH_HOME/settings.yaml`（那是宿主早期版本的行为），而是 profile 自己的 `cordis.patch.yml`。
+4. 依赖面抬到宿主真正实现这条路径的版本：`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`@deepseek-ai/cosmokit ^1.8.5`（`.volatile()` / `isVolatile`）。
+
 0.2.14 在 dsh **0.2.0-rc.2**（2026-09-30 核对）上复核通过，**零破坏**：冻结移动 wire（36 文件）与 51 个 Remote endpoint 全部命中，移动端相关包无删除/重命名，durable 事件词汇表（`known-event-types.ts`）、宿主可转发事件名单（`remote-events.ts`）、会话格式（仍是 v4）与 `agent-tool-presentation` 均未变；`api/gateway` 只新增 `hasLiveClient()`，移动侧不依赖。区间内唯一实质变化在宿主 interaction：新增 `questions` 会话投影与 `ask_user_question` 的 timed 模式（`mode: 'legacy' | 'timed'`，默认 legacy；请求多一个可选 `wait`；超时后工具返回 `{ pending: true, callId }`，答复改为进 inbox 的 `user-question-reply`），当前没有 bundle 打开它，故移动端行为不变——若要接投影或补手机端倒计时 UI，见 dsh-mobile 的 `docs/04-feature-gap.md`。
 
 plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
@@ -104,7 +111,7 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 0.2.14 让这个包成为可被插件页管理的组合包（bundle），移动端 wire 不变：
 
 1. 包内新增 `cordis.patch.yml`，声明 `mobile-bridge` 那一行（只带非密的 `natsUrl` 与 `instanceId`，凭证留空）；package.json 补 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`，并把该文件加进 `files`。此前宿主在插件页 inspect 时会以「这个包没有声明组合包，不能作为插件管理」拒掉。
-2. 每个部署的 Hub 凭证仍由部署方提供：profile patch 按 id 覆盖这一行（`- id: mobile-bridge` + `name` + `config:`，不要用 `insert:`），或者装好后在控制台里填（写进 settings 用户层）。
+2. 每个部署的 Hub 凭证仍由部署方提供：profile patch 按 id 覆盖这一行（`- id: mobile-bridge` + `name` + `config:`，不要用 `insert:`），或者装好后在控制台里填（同样写进 profile patch 的那条覆盖行）。
 
 0.2.13 三处收口，移动端 wire 不变：
 
@@ -130,7 +137,7 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 
 手机连 Hub 用的是**插件里配置的 Hub 账号凭证**——它随配对二维码下发，App 不内置任何账号。所以首次必须先配置、再发码：
 
-1. 打开**侧边栏 → 插件 → `dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码，并把 Hub 的 `ca.crt` 粘进 CA 字段后保存。密码是 `role('secret')` 字段，落在 `$DSH_HOME/settings.yaml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
+1. 打开**侧边栏 → 插件 → `dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码，并把 Hub 的 `ca.crt` 粘进 CA 字段后保存。密码是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"（点「显示」时才走一次 `/api/reveal`）。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
 2. 确认状态为「已连接」（本地 NATS 就绪）。
 3. 再点「生成配对二维码」。
 

@@ -49,9 +49,9 @@ PC（本机操作）                      手机（外网）
 ```
 
 - **领码必须本机操作**：配对码从 web UI 的设置卡或 `dsh` CLI 输出领取，两者都要求人在电脑前。配对码本身绝不经 NATS 外传——二维码是唯一出口。
-- **二维码携带 Hub 账号凭证**（v4 起）：发布版 App 不内置任何账号，机主向导里配置的服务器信息经二维码一次性传给手机。二维码只在机主本人屏幕出现，是认证的带外通道；`caFp` 是 Hub CA 的指纹，App 连接后展示/校验用（CA 本体打进 App 构建，见 02 文档）。
+- **二维码携带 Hub 账号凭证**（v4 起）：发布版 App 不内置任何账号，机主向导里配置的服务器信息经二维码一次性传给手机。二维码只在机主本人屏幕出现，是认证的带外通道；`caFp` 是 Hub CA 的指纹，`ca` 是 CA 本体（base64 DER），App 0.0.9 起由原生模块把它装成运行时信任锚，所以同一个 App 包能连任意自建 Hub——详见 README「测试 Hub 账号」与 [03](03-nats-self-host.md)。
 - **配对前必须先配好 Hub 账号密码**：二维码里的 `hub`/`user`/`pass` 是手机唯一的接入凭证，任一为空时插件拒绝发码（`/mobile-bridge/api/pair` 返回未配置字段清单，控制台同时禁用生成按钮），因为这样的码扫进 App 后只有两种表现——`二维码内容缺少字段：pass`（App 侧字段校验先拦下），或连 Hub 时被拒 `Authorization Violation`（密码填了但不是 Hub 上的那个）。
-- **密码的可见范围**：`hubPass` 是 `role('secret')` 字段，落在 `$DSH_HOME/settings.yaml`（0600），不进 `settings.describe(redactSecrets)` 这类 wire 响应。**唯一例外**是回环控制台：`/mobile-bridge/api/status` 对来自 127.0.0.1/::1 的请求额外返回 `hubPass` 原文，页面据此预填并默认明文显示（带「隐藏」切换），这样机主能一眼看出存的是不是 Hub 上那个密码。非回环请求只拿到 `hubPassConfigured` 布尔值。
+- **密码的可见范围**：`hubPass` 是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`（那条 `- id: mobile-bridge` 覆盖行，跟着 profile 一起备份/搬迁），不进 `settings.describe(redactSecrets)` 这类 wire 响应。**唯一例外**是回环控制台：`/mobile-bridge/api/status` 只回 `hubPassConfigured` 布尔值，点「显示」时走一次 `POST /mobile-bridge/api/reveal`（同样要求回环 + 同源 + 自定义头）取回原文，页面据此预填并默认明文显示（带「隐藏」切换），这样机主能一眼看出存的是不是 Hub 上那个密码。非回环请求两条路都拿不到值。
 - 配对码：8 位随机字符，120 秒有效，一次性；同一时间最多 3 个待核销；核销失败 5 次锁定该码。满 3 个时再领码不会报错，而是让最早的那个作废——重新生成正是机主在扫码不顺时的常规动作，同时有效的码数始终不超过 3，猜码窗口不变。
 - `svc.dsh.{instance}.pair` 是唯一**不需要 token** 的 RPC subject。无效或过期配对码返回 `mobile-pair-failed`；有效码因有效设备达到 `maxDevices` 被拒绝时返回 `mobile-device-limit`，App 会提示先在电脑端吊销旧设备。两类失败均不泄露宿主信息。
 - token：32 字节随机，base64url；RPC 请求放在信封外的传输头字段（NATS headers），不进业务载荷。

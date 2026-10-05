@@ -17,7 +17,7 @@ import { connect, type NatsConnection } from 'nats'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
-import { Config } from './config.js'
+import { Config, configValues, type ConfigInput } from './config.js'
 import { readHubCa, sameFingerprint } from './hub-ca.js'
 import { normalizeHubWssUrl } from './hub-check.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
@@ -103,15 +103,17 @@ export function buildPairingPayload(config: Config, code: string): PairingPayloa
   }
 }
 
-/** Structural view of the host settings service (scope surface we consume). */
-interface SettingsScope {
-  get(): Config
-  watch(listener: () => void): void
-  update(patch: object): Promise<void>
-}
-
+/**
+ * Structural view of the host settings service (the surface we consume).
+ *
+ * The service derives one namespace per profile entry from the entry's Config
+ * schema; a field is writable exactly when the schema declares it `.volatile()`
+ * (see src/config.ts). `configure({ auto: false })` keeps this instance off the
+ * generated page — the loopback console is the form.
+ */
 interface SettingsService {
-  register(ns: string, schema: unknown, options: { base: Config }): SettingsScope
+  configure(presentation: { auto?: boolean }, owner?: unknown): () => void
+  update(ns: string, patch: object, expectedRevision?: number): Promise<void>
 }
 
 /** Structural view of the launcher-owned profile facts (`ctx.profileContext`). */
@@ -200,6 +202,8 @@ export class MobileBridge extends Service {
   /** A process started from the local console. NATS is a host service, so it
    * intentionally survives bridge restarts and is never killed by stop(). */
   private localNatsProcess: ChildProcess | null = null
+  /** Config exactly as the loader resolved it: `.volatile()` fields are references. */
+  private readonly raw: ConfigInput
   private current: Config
   /** Serializes start/stop/restart: concurrent triggers (boot effect + settings
    *  watch) must never overlap, or a duplicate NATS connection + RPC
@@ -207,22 +211,28 @@ export class MobileBridge extends Service {
   private lifecycle: Promise<void> = Promise.resolve()
   private wantRunning = false
 
-  constructor(ctx: Context, entryConfig: Config) {
+  constructor(ctx: Context, entryConfig: ConfigInput) {
     super(ctx, 'mobileBridge')
-    this.current = entryConfig
+    this.raw = entryConfig
+    this.current = configValues(entryConfig)
     this.tokens = new TokenStore(join(dshHome(), 'mobile-bridge', 'tokens.json'))
 
-    // Settings layering: user document over the composition entry; changes
-    // rebuild the bridge stack. Works headless too (no settings provider =
-    // the entry config stays authoritative).
+    // Settings layering: the profile patch's user document over the composition
+    // entry. Every field is schema-volatile, so the settings page's write commits
+    // into the references above and the loader re-emits `loader/volatile-update`
+    // instead of remounting this plugin; the listener then rebuilds the bridge
+    // stack with the new values. Works headless too (no settings provider = the
+    // entry config stays authoritative and saves stay in memory).
     ctx.inject(['settings'], (sctx) => {
       const settings = sctx.get('settings') as unknown as SettingsService
-      const scope = settings.register(SETTINGS_NS, Config, { base: entryConfig })
-      this.settingsScope = scope
-      this.applyConfig(scope.get())
-      scope.watch(() => {
-        this.applyConfig(scope.get())
-      })
+      this.settings = settings
+      sctx.effect(() => settings.configure({ auto: false }, ctx.fiber))
+    })
+
+    // A volatile-only config write reached the running instance; re-read the
+    // references the loader just updated.
+    ctx.on('loader/volatile-update', () => {
+      this.applyConfig(configValues(this.raw))
     })
 
     // Loopback console routes when a webserver is in the composition (web profile).
@@ -275,7 +285,7 @@ export class MobileBridge extends Service {
     })
   }
 
-  private settingsScope: SettingsScope | null = null
+  private settings: SettingsService | null = null
   private profile: ProfileContextLike | null = null
   private profileMigration: ProfileMigrationStatus = { state: 'unknown', shape: null, notes: [] }
 
@@ -284,12 +294,16 @@ export class MobileBridge extends Service {
     return this.current
   }
 
-  /** Persist a config patch through the settings user layer; falls back to
-   * in-memory when no settings provider is mounted (headless dev). */
+  /**
+   * Persist a config patch through the settings user layer (the profile patch
+   * file); falls back to in-memory when no settings provider is mounted
+   * (headless dev). The write lands in the schema-volatile references, whose
+   * `loader/volatile-update` rebuilds the bridge — see the constructor.
+   */
   async updateConfig(patch: Partial<Config>): Promise<void> {
-    if (this.settingsScope !== null) {
-      await this.settingsScope.update(patch)
-      return // the scope watcher rebuilds
+    if (this.settings !== null) {
+      await this.settings.update(SETTINGS_NS, patch)
+      return // the volatile-update listener rebuilds
     }
     const next = { ...this.current, ...patch }
     if (sameConfig(this.current, next)) return
