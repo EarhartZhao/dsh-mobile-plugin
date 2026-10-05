@@ -35,7 +35,7 @@ import {
   type ProfileLocation,
   type ProfileShape,
 } from './profile-migration.js'
-import { fetchLatestTag, isNewerVersion, parseUpdateSource, releaseAssetSpec } from './update.js'
+import { fetchLatestRegistryVersion, fetchLatestTag, isNewerVersion, parseUpdateSource, updateSpec } from './update.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -599,11 +599,20 @@ export class MobileBridge extends Service {
       if (source.local) {
         throw new Error(`这个 profile 用本地路径安装（${source.spec}），请在源码目录 git pull 后重启 dsh。`)
       }
-      if (source.repo === null) {
-        throw new Error(`从 ${source.spec} 看不出 GitHub 仓库，无法查询最新版本。`)
+      // Two sources can name a newest version: a GitHub repository (tags) or
+      // the npm registry this profile installed from (dist-tags). Neither
+      // answer may be invented, so a source that names neither reports why.
+      if (source.repo === null && source.registry === null) {
+        throw new Error(`从 ${source.spec} 看不出 GitHub 仓库或 npm 包名，无法查询最新版本。`)
       }
-      const latest = await fetchLatestTag(source.repo)
-      if (latest === null) throw new Error(`${source.repo} 上没有版本 tag。`)
+      const latest = source.registry === null
+        ? await fetchLatestTag(source.repo!)
+        : await fetchLatestRegistryVersion(source.registry)
+      if (latest === null) {
+        throw new Error(source.registry === null
+          ? `${source.repo!} 上没有版本 tag。`
+          : `npm 上 ${source.registry} 没有可用的 dist-tags.latest。`)
+      }
       const newer = isNewerVersion(latest, PLUGIN_VERSION)
       const blocked = this.pluginManager === null
         ? '这个宿主没有插件管理器，请用 dsh 的插件页更新。'
@@ -642,10 +651,10 @@ export class MobileBridge extends Service {
    * The spec handed over is the profile's own dependency line, so pnpm does
    * exactly what an install does — resolve, fetch, build when the source needs
    * it — and the running process keeps the code it booted with until dsh
-   * restarts. A release-asset install instead gets that URL rewritten to the
-   * newest tag, because its path is what pins the version; see
-   * {@link releaseAssetSpec}. That restart is the answer the owner gets, not a
-   * hidden failure.
+   * restarts. Two install shapes need a different spec than the one they were
+   * read from: a release asset pins its version in the URL path, and a registry
+   * range names no exact version at all — {@link updateSpec} answers both. That
+   * restart is the answer the owner gets, not a hidden failure.
    * @returns The report now stored for `/api/status`.
    */
   async applyUpdate(): Promise<UpdateReport> {
@@ -662,7 +671,7 @@ export class MobileBridge extends Service {
     const source = parseUpdateSource(current.spec)
     const target = source === null || current.latest === null
       ? current.spec
-      : releaseAssetSpec(source, current.latest)
+      : updateSpec(source, current.latest)
     const requestId = `dsh-mobile-update-${Date.now()}`
     this.updateRequestId = requestId
     this.update = { ...current, phase: 'installing', message: `正在更新到 ${current.latest ?? '最新版本'}…` }

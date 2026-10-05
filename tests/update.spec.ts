@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   compareVersions,
+  fetchLatestRegistryVersion,
   fetchLatestTag,
   isNewerVersion,
   latestTag,
   parseUpdateSource,
   releaseAssetSpec,
+  registrySpec,
+  updateSpec,
   versionParts,
 } from '../src/update.js'
 
@@ -73,6 +76,71 @@ describe('prebuilt release assets', () => {
     const source = parseUpdateSource('https://github.com/owner/repo/releases/download/v0.2.24/dsh-mobile-plugin.tgz')!
     expect(releaseAssetSpec(source, 'v0.2.25'))
       .toBe('https://github.com/owner/repo/releases/download/v0.2.25/dsh-mobile-plugin.tgz')
+  })
+})
+
+describe('registry installs', () => {
+  it('reads a bare package name, with or without a version', () => {
+    for (const spec of ['dsh-mobile-plugin', 'dsh-mobile-plugin@0.2.26', 'dsh-mobile-plugin@^0.2.0']) {
+      expect([spec, parseUpdateSource(spec)?.registry]).toEqual([spec, 'dsh-mobile-plugin'])
+    }
+    expect(parseUpdateSource('@scope/plugin@1.0.0')?.registry).toBe('@scope/plugin')
+    // A registry install has no repository, and asking for a tag would fail.
+    expect(parseUpdateSource('dsh-mobile-plugin')?.repo).toBeNull()
+  })
+
+  it('still reads owner/repo as a repository, not as a package name', () => {
+    expect(parseUpdateSource('owner/repo')).toMatchObject({ repo: 'owner/repo', registry: null })
+  })
+
+  it('updates the same package name at the newest version', () => {
+    const source = parseUpdateSource('dsh-mobile-plugin@^0.2.0')!
+    expect(registrySpec(source, '0.2.26')).toBe('dsh-mobile-plugin@0.2.26')
+    expect(updateSpec(source, '0.2.26')).toBe('dsh-mobile-plugin@0.2.26')
+  })
+
+  it('dispatches by install shape, so no shape is forgotten by the update button', () => {
+    const git = parseUpdateSource('github:owner/repo')!
+    expect(updateSpec(git, 'v0.2.26')).toBe('github:owner/repo')
+    const asset = parseUpdateSource('https://github.com/owner/repo/releases/download/v0.2.25/dsh-mobile-plugin-0.2.25.tgz')!
+    expect(updateSpec(asset, 'v0.2.26'))
+      .toBe('https://github.com/owner/repo/releases/download/v0.2.26/dsh-mobile-plugin-0.2.26.tgz')
+  })
+})
+
+describe('fetchLatestRegistryVersion', () => {
+  const jsonResponse = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+
+  it('reads dist-tags.latest off the registry document', async () => {
+    const seen: string[] = []
+    const version = await fetchLatestRegistryVersion('dsh-mobile-plugin', {
+      fetch: (async (url: string | URL | Request) => {
+        seen.push(String(url))
+        return jsonResponse({ 'dist-tags': { latest: '0.2.26', next: '0.3.0-rc.1' } })
+      }) as typeof fetch,
+    })
+    expect(version).toBe('0.2.26')
+    expect(seen[0]).toBe('https://registry.npmjs.org/dsh-mobile-plugin')
+  })
+
+  it('refuses a latest tag that is not a version, instead of offering it', async () => {
+    const version = await fetchLatestRegistryVersion('dsh-mobile-plugin', {
+      fetch: (async () => jsonResponse({ 'dist-tags': { latest: 'nightly' } })) as typeof fetch,
+    })
+    expect(version).toBeNull()
+  })
+
+  it('names an unpublished package instead of reporting "up to date"', async () => {
+    await expect(fetchLatestRegistryVersion('nope', {
+      fetch: (async () => jsonResponse({ error: 'Not found' }, 404)) as typeof fetch,
+    })).rejects.toThrow('npm 上找不到 nope')
+  })
+
+  it('reports a registry error status rather than pretending there is no update', async () => {
+    await expect(fetchLatestRegistryVersion('dsh-mobile-plugin', {
+      fetch: (async () => jsonResponse({}, 503)) as typeof fetch,
+    })).rejects.toThrow('HTTP 503')
   })
 })
 

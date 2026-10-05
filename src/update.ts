@@ -11,6 +11,8 @@
  * fork (or a pinned tag) updates from its own source. Tags stay the version
  * source even when the install came from a prebuilt release asset: the asset
  * only decides *where bytes come from*, never which version is newest.
+ * A registry install (`dsh-mobile-plugin@0.2.26`) asks npm for the newest
+ * version instead, since a published tarball carries no repository identity.
  */
 
 /** Where this install came from, as the profile's manifest declares it. */
@@ -33,6 +35,14 @@ export interface UpdateSource {
    * `releases/latest` and so names no version of its own.
    */
   readonly tag: string | null
+  /**
+   * npm package name when the profile installs from the registry
+   * (`dsh-mobile-plugin`, `dsh-mobile-plugin@0.2.26`), else null. Installing
+   * this way runs no build script at all — the published tarball already
+   * carries `lib/` — so it needs no `allowBuilds` approval, and
+   * {@link fetchLatestRegistryVersion} is what answers "which version is newest".
+   */
+  readonly registry: string | null
 }
 
 const LOCAL_SPEC = /^(?:link:|file:|portal:|\.{1,2}\/|\/|[A-Za-z]:[\\/])/u
@@ -44,6 +54,12 @@ const BARE_REPO = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:#.*)?$/u
 const GITHUB_ASSET_TAG = /^(?:git\+)?https?:\/\/github\.com\/([^/\s#]+)\/([^/\s#]+?)\/releases\/download\/([^/\s#]+)\/([^/\s#]+)$/u
 /** `…/releases/latest/download/<asset>`: the same asset, always the newest release. */
 const GITHUB_ASSET_LATEST = /^(?:git\+)?https?:\/\/github\.com\/([^/\s#]+)\/([^/\s#]+?)\/releases\/latest\/download\/([^/\s#]+)$/u
+/**
+ * A registry spec: a bare package name with an optional `@version` / `@range`.
+ * Scoped names are allowed; a slash without a leading `@` is a GitHub
+ * `owner/repo` instead, which the patterns above already claim.
+ */
+const REGISTRY_SPEC = /^(@[\w.-]+\/)?([\w.-]+)(?:@(\S+))?$/u
 
 /** Narrows a spec to a repository; null when it names none this code can read. */
 function repoOf(spec: string): string | null {
@@ -63,9 +79,13 @@ function repoOf(spec: string): string | null {
  */
 function assetSource(spec: string): UpdateSource | null {
   const tagged = GITHUB_ASSET_TAG.exec(spec)
-  if (tagged !== null) return { spec, repo: `${tagged[1]}/${tagged[2]}`, local: false, asset: tagged[4], tag: tagged[3] }
+  if (tagged !== null) {
+    return { spec, repo: `${tagged[1]}/${tagged[2]}`, local: false, asset: tagged[4], tag: tagged[3], registry: null }
+  }
   const latest = GITHUB_ASSET_LATEST.exec(spec)
-  if (latest !== null) return { spec, repo: `${latest[1]}/${latest[2]}`, local: false, asset: latest[3], tag: null }
+  if (latest !== null) {
+    return { spec, repo: `${latest[1]}/${latest[2]}`, local: false, asset: latest[3], tag: null, registry: null }
+  }
   return null
 }
 
@@ -78,8 +98,20 @@ function assetSource(spec: string): UpdateSource | null {
 export function parseUpdateSource(spec: string | undefined | null): UpdateSource | null {
   const trimmed = typeof spec === 'string' ? spec.trim() : ''
   if (trimmed === '') return null
-  if (LOCAL_SPEC.test(trimmed)) return { spec: trimmed, repo: null, local: true, asset: null, tag: null }
-  return assetSource(trimmed) ?? { spec: trimmed, repo: repoOf(trimmed), local: false, asset: null, tag: null }
+  if (LOCAL_SPEC.test(trimmed)) return { spec: trimmed, repo: null, local: true, asset: null, tag: null, registry: null }
+  const asset = assetSource(trimmed)
+  if (asset !== null) return asset
+  const repo = repoOf(trimmed)
+  if (repo !== null) return { spec: trimmed, repo, local: false, asset: null, tag: null, registry: null }
+  const registry = REGISTRY_SPEC.exec(trimmed)
+  return {
+    spec: trimmed,
+    repo: null,
+    local: false,
+    asset: null,
+    tag: null,
+    registry: registry === null ? null : `${registry[1] ?? ''}${registry[2]}`,
+  }
 }
 
 /** The numbers a tag names, without the leading `v` (`v0.2.24` → `0.2.24`). */
@@ -110,6 +142,31 @@ export function releaseAssetSpec(source: UpdateSource, tag: string): string {
     ? source.asset
     : source.asset.split(was).join(now)
   return `https://github.com/${source.repo}/releases/download/${tag}/${asset}`
+}
+
+/**
+ * The spec an update should install for a registry install: the same package
+ * name at the newest published version.
+ * @param source Where this install came from.
+ * @param version Version to install, as npm names it (`0.2.26`).
+ * @returns The spec to hand to the host's plugin manager.
+ */
+export function registrySpec(source: UpdateSource, version: string): string {
+  return source.registry === null ? source.spec : `${source.registry}@${version}`
+}
+
+/**
+ * The spec an update should install for `latest`, whichever way this install
+ * was made. One place decides, so a new install shape cannot be added to
+ * {@link parseUpdateSource} and then forgotten by the update button.
+ * @param source Where this install came from.
+ * @param latest Newest version or tag that check found.
+ * @returns The spec to hand to the host's plugin manager.
+ */
+export function updateSpec(source: UpdateSource, latest: string): string {
+  if (source.registry !== null) return registrySpec(source, latest)
+  if (source.asset !== null) return releaseAssetSpec(source, latest)
+  return source.spec
 }
 
 /**
@@ -200,6 +257,45 @@ export async function fetchLatestTag(repo: string, options: LatestTagOptions = {
         : `GitHub 返回 HTTP ${response.status}，稍后再试。`)
     }
     return latestTag(await response.json() as readonly unknown[])
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+/**
+ * Version `dist-tags.latest` points at, or null when the document carries no
+ * usable one.
+ *
+ * The whole registry document is read rather than the smaller `dist-tags`
+ * endpoint, so a scoped name needs no URL escaping. Like {@link fetchLatestTag}
+ * this fails loudly: a rate limit or an unpublished package must not be
+ * reported as "已是最新版本".
+ * @param name Package name from the profile's spec.
+ * @param options Injected fetch and timeout, for tests and headless callers.
+ * @returns The newest published version, or null when none parsed.
+ */
+export async function fetchLatestRegistryVersion(name: string, options: LatestTagOptions = {}): Promise<string | null> {
+  const doFetch = options.fetch ?? fetch
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000)
+  const signal = options.signal === undefined
+    ? controller.signal
+    : AbortSignal.any([options.signal, controller.signal])
+  try {
+    const response = await doFetch(`https://registry.npmjs.org/${name}`, {
+      headers: { accept: 'application/vnd.npm.install-v1+json' },
+      signal,
+    })
+    if (!response.ok) {
+      throw new Error(response.status === 404
+        ? `npm 上找不到 ${name}（还没发布或名字不对）。`
+        : `npm registry 返回 HTTP ${response.status}，稍后再试。`)
+    }
+    const document = await response.json() as { 'dist-tags'?: unknown }
+    const tags = document['dist-tags']
+    if (tags === null || typeof tags !== 'object') return null
+    const latest = (tags as { latest?: unknown }).latest
+    return typeof latest === 'string' && versionParts(latest) !== null ? latest : null
   } finally {
     clearTimeout(timeout)
   }

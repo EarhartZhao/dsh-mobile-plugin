@@ -25,6 +25,14 @@ pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2
 
 每个 Release 同时挂一份版本无关的 `dsh-mobile-plugin.tgz`，所以 `…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 会标成 pre-release，不会顶掉它）。控制台的「检查更新」对这类装法照样有效：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并换掉（`src/update.ts` 的 `releaseAssetSpec`），否则重新装同一个 URL 只会拿回旧字节。
 
+**三、npm（发布过的版本，最省事）。** 打 tag 时同一个流水线也会 `npm publish`，装的就是发布产物：
+
+```bash
+pnpm add dsh-mobile-plugin          # 或 dsh-mobile-plugin@0.2.26
+```
+
+registry 装的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在发布那一刻跑，安装时不跑，所以同样不需要任何 `allowBuilds`，而且完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」也是这条路。控制台检查更新时对 registry spec 去问 `dist-tags.latest`，再按 `dsh-mobile-plugin@<最新版>` 更新（`registrySpec` / `updateSpec`）。
+
 **装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
 
 装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是**同一个 profile patch** 里那条覆盖行的 `config:`（宿主 `configEditor` 落盘），优先于组合层；因为字段都声明为 schema-volatile，保存不会重启宿主，插件就地重建 NATS 桥。

@@ -114,6 +114,10 @@ Release 资产是个普通远端 tarball，不经 git 托管路径，`prepare` �
 
 另外两条老路仍然可用：发到 npm，或 `pnpm pack` 出 tarball 让使用方 `add ./dsh-mobile-plugin-<version>.tgz`。本地 `link:` 引用不跑 `prepare`，所以开发机上的插件构建仍由 `pnpm run build` 决定。
 
+**发到 npm（2026-10-05 起）。** 同一个 release job 里还有一步 `npm publish`：仓库 secrets 配了 `NPM_TOKEN` 就发，没配就打印一行跳过（GitHub Release 资产照常出），npm 上已有同版本号也跳过——所以重跑发布、或者同一个 tag 先手工发过一次，都不会失败。registry 侧无需再操心 `prepare`：它在发布那一刻跑，装的人拿到的 tarball 里已经有 `lib/`。发版顺序不变：改三处版本号 → 提交 → 打 tag → 推 tag。
+
+凭据用 automation token（`NPM_TOKEN`）。想彻底不存 token，可以在 npmjs.com 该包的 Settings → Trusted Publisher 里登记本仓库与工作流名，再给 job 加 `id-token: write` 并去掉 token 那步——当前没走这条，因为首次发布时包还不存在。
+
 ### 安装形态与自动迁移（2026-09-30）
 
 行**必须由组合包提供**，profile patch 只留按 id 的覆盖。早期文档写的是 `- insert:` 直接在 profile patch 里挂行，那种形态宿主管不了：整包开关是关的（包名不在 `dsh.profile.bundles`），行开关只在整包启用时才渲染，点卸载则报 `bundle-in-use`——`PluginManager.removeBundle` 会先关掉组合包再检查「这一行是否还活着」，而 profile patch 的 insert 与组合包无关，关掉组合包它照样在，于是判定「其他配置仍在使用这个组件的行」。
