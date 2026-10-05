@@ -199,6 +199,26 @@ export class TokenStore {
   }
 
   /**
+   * Rename a live device. The phone owns its own name (its build, its system
+   * version, or whatever its owner typed), so it re-states it on every
+   * reconnect and the console stop showing a roster of identical `android`
+   * rows. Revoked or unknown devices keep the name they were paired with:
+   * history is a record, not a live label.
+   * @param deviceId - record to rename.
+   * @param name - new display name; trimmed and capped like pairing's.
+   * @returns whether a live device was renamed.
+   */
+  async rename(deviceId: string, name: string): Promise<boolean> {
+    const device = this.devices.get(deviceId)
+    if (device === undefined || device.revoked) return false
+    const trimmed = name.trim().slice(0, 64)
+    if (trimmed === '' || trimmed === device.name) return false
+    device.name = trimmed
+    await this.save()
+    return true
+  }
+
+  /**
    * Drop one revoked device's record for good, so the console's history stops
    * carrying every pairing it ever saw. Only revoked devices are forgettable:
    * deleting a live one would leave its token working with nothing on disk to

@@ -138,6 +138,7 @@ allowBuilds:
 config:
   natsUrl: 'nats://127.0.0.1:4222'  # 本机 Leaf；Leaf 挂了插件自动重连
   instanceId: 'home-pc'             # subject 命名空间 svc.dsh.{instance}.* / evt.dsh.{instance}.*
+  instanceName: '工作台 Mac'         # 手机连接列表里显示的名字；留空回退 instanceId
   tokenTtlDays: 90
   pairCodeTtlSec: 120
   maxDevices: 10
@@ -161,6 +162,8 @@ config:
 ### v2（可选）
 
 - 多 harness 实例（多个 `instanceId` 共存于同一 Hub，App 侧多主机切换）。
+  已落地（2026-10-05）：App 保存多份 profile 并随时切换，插件用 `instanceName` 告诉 App
+  "这台电脑叫什么"。设计见 [dsh-mobile/docs/07-multi-connection-plan.md](../../dsh-mobile/docs/07-multi-connection-plan.md)。
 - JetStream 仅用于"任务完成"类低频通知的离线补发（不做全量事件队列）。
 
 ## 明确不做

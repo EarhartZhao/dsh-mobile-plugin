@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.22'
+export const PLUGIN_VERSION = '0.2.23'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -128,14 +128,25 @@ export interface FetchCarrier {
 
 export interface BridgeOptions {
   instanceId: string
+  /**
+   * Human name for this machine, shown by the phone in its connection list.
+   * Callers resolve the empty config value to `instanceId` before it gets
+   * here, so the phone always has something to print.
+   */
+  instanceName: string
   /** Legacy carrier retained for old dsh builds; current dev uses gateway. */
   carrier?: FetchCarrier
   gateway?: GatewayCarrier
   tokens: TokenStore
   tokenTtlDays: number
   maxDevices: number
-  /** Re-publish pending answerable frames to a reconnecting app. */
-  onHello: () => void
+  /**
+   * Re-publish pending answerable frames to a reconnecting app. The device id
+   * is the caller that said hello, and the name is what it calls itself: a
+   * phone renames itself by stating a new one, without pairing again. Older
+   * apps send no name, and the stored one is left alone.
+   */
+  onHello: (deviceId: string, deviceName?: string) => void
   /** Optional read-only Loader snapshot; absent on hosts without the inventory plugin. */
   onInventory?: () => unknown | Promise<unknown>
   /** Authenticated operational snapshot for mobile connection diagnostics. */
@@ -735,7 +746,18 @@ export class RpcBridge {
     }
 
     if (method === HELLO_METHOD) {
-      this.options.onHello()
+      // The app re-states its own device name here, so renaming it on the
+      // phone lands in the console roster on the next connect instead of
+      // needing another pairing round. A malformed payload is not worth a
+      // failed reconnect: the replay below is the part that matters.
+      let deviceName: string | undefined
+      try {
+        const payload = (JSON.parse(new TextDecoder().decode(body)) as { payload?: { deviceName?: unknown } }).payload
+        if (typeof payload?.deviceName === 'string') deviceName = payload.deviceName
+      } catch {
+        deviceName = undefined
+      }
+      this.options.onHello(device.id, deviceName)
       msg.respond(new TextEncoder().encode(pairResult(rpcId, { ok: true })))
       return
     }
@@ -745,6 +767,7 @@ export class RpcBridge {
         pluginVersion: PLUGIN_VERSION,
         mobileApi: PLUGIN_MOBILE_API,
         features: PLUGIN_FEATURES,
+        instanceName: this.options.instanceName,
       })))
       return
     }

@@ -22,6 +22,12 @@ export interface Config {
   hubCaFingerprint: string
   /** Subject namespace: svc.dsh.{instanceId}.* / evt.dsh.{instanceId}.* */
   instanceId: string
+  /**
+   * What this machine calls itself on the phone. Empty falls back to
+   * {@link instanceId}, so an install that never sets it still shows something
+   * readable in the app's connection list.
+   */
+  instanceName: string
   /** Long-lived device token validity. */
   tokenTtlDays: number
   /** One-time pairing code validity. */
@@ -73,6 +79,12 @@ export const Config = z.object({
   hubCaCert: z.string().default('').volatile(),
   hubCaFingerprint: z.string().default('').volatile(),
   instanceId: z.string().pattern(/^[a-z0-9-]+$/).default('home').volatile(),
+  /**
+   * Display name for this machine, as the phone shows it in its connection
+   * list. Empty means "use instanceId": an existing install gets a readable
+   * name only when its owner types one, and the phone always has something.
+   */
+  instanceName: z.string().default('').volatile(),
   tokenTtlDays: z.natural().default(90).volatile(),
   pairCodeTtlSec: z.natural().default(120).volatile(),
   maxDevices: z.natural().default(10).volatile(),
@@ -103,6 +115,7 @@ export function configValues(input: ConfigInput | Config): Config {
     hubCaCert: field(input.hubCaCert),
     hubCaFingerprint: field(input.hubCaFingerprint),
     instanceId: field(input.instanceId),
+    instanceName: field(input.instanceName),
     tokenTtlDays: field(input.tokenTtlDays),
     pairCodeTtlSec: field(input.pairCodeTtlSec),
     maxDevices: field(input.maxDevices),

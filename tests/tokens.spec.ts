@@ -100,6 +100,30 @@ describe('TokenStore', () => {
     expect(reloaded.activeCount()).toBe(0)
   })
 
+  it('renames a live device and persists it, so the roster stops showing bare platform names', async () => {
+    const { code } = store.createPairingCode(120)
+    const device = await store.redeemPairingCode(code, 'android', 90, 10)
+    expect(await store.rename(device!.deviceId, '  Pixel 8 · Android 16  ')).toBe(true)
+    expect(store.list()[0].name).toBe('Pixel 8 · Android 16')
+
+    const reloaded = new TokenStore(join(dir, 'tokens.json'))
+    await reloaded.load()
+    expect(reloaded.list()[0].name).toBe('Pixel 8 · Android 16')
+  })
+
+  it('ignores renames that change nothing, and refuses revoked or unknown devices', async () => {
+    const { code } = store.createPairingCode(120)
+    const device = await store.redeemPairingCode(code, 'android', 90, 10)
+    // The app states its name on every reconnect; the common case is "no news".
+    expect(await store.rename(device!.deviceId, 'android')).toBe(false)
+    expect(await store.rename(device!.deviceId, '   ')).toBe(false)
+    expect(await store.rename('no-such-device', 'whatever')).toBe(false)
+
+    await store.revoke(device!.deviceId)
+    expect(await store.rename(device!.deviceId, 'after-revoke')).toBe(false)
+    expect(store.list()[0].name).toBe('android')
+  })
+
   it('forgets only revoked records, and does so for good', async () => {
     const { code } = store.createPairingCode(120)
     const live = await store.redeemPairingCode(code, 'a', 90, 10)

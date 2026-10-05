@@ -198,6 +198,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
               ? null
               : { fingerprint: ca.fingerprint, subject: ca.subject, validTo: ca.validTo, isCa: ca.isCa },
             instanceId: config.instanceId,
+            instanceName: config.instanceName,
             natsConfigPath: config.natsConfigPath,
             natsServerPath: config.natsServerPath,
           },
@@ -233,6 +234,9 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
           if (typeof body.hubCaCert === 'string') patch.hubCaCert = body.hubCaCert.trim()
           if (typeof body.hubCaFingerprint === 'string') patch.hubCaFingerprint = body.hubCaFingerprint.trim()
           if (typeof body.instanceId === 'string') patch.instanceId = body.instanceId.trim()
+          // Empty is meaningful here: it is how an owner goes back to showing
+          // the instance id on the phone.
+          if (typeof body.instanceName === 'string') patch.instanceName = body.instanceName.trim()
           if (typeof body.natsConfigPath === 'string') patch.natsConfigPath = body.natsConfigPath.trim()
           if (typeof body.natsServerPath === 'string') patch.natsServerPath = body.natsServerPath.trim()
           await backend.updateConfig(patch)
@@ -455,6 +459,7 @@ const CONSOLE_HTML = `<!doctype html>
   <dt>mobileApi</dt><dd id="mobileApi">—</dd>
   <dt>构建 ID</dt><dd id="buildId">—</dd>
   <dt>实例 ID</dt><dd id="activeInstance">—</dd>
+  <dt>本机名称</dt><dd id="activeInstanceName">—</dd>
   <dt>实际加载路径</dt><dd id="loadedFrom">—</dd>
   <dt>桥启动时间</dt><dd id="startedAt">—</dd>
   <dt>最近连接</dt><dd id="lastConnectedAt">—</dd>
@@ -476,6 +481,7 @@ const CONSOLE_HTML = `<!doctype html>
 <textarea id="hubCaCert" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
 <p id="hubCaHint" style="font-size:12px;margin:4px 0 0;opacity:.75"></p>
 <label>实例 ID（字母/数字/短横线）</label><input id="instanceId" placeholder="home">
+<label>本机名称（手机上显示的名字；留空则显示实例 ID）</label><input id="instanceName" placeholder="例如：家里的 Mac mini">
 <div class="row">
   <button id="saveBtn">保存并连接</button>
   <button id="hubCheckBtn" class="secondary">测试 Hub 账号</button>
@@ -534,7 +540,7 @@ function prefill(id, value) {
   field.value = value
 }
 
-for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
+for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'instanceName', 'natsConfigPath', 'natsServerPath']) {
   $(id).addEventListener('input', () => { editedFields.add(id) })
 }
 
@@ -602,6 +608,7 @@ async function refreshStatus() {
     $('mobileApi').textContent = String(s.mobileApi ?? '—')
     $('buildId').textContent = s.buildId || '—'
     $('activeInstance').textContent = s.instanceId || '—'
+    $('activeInstanceName').textContent = s.instanceName || s.instanceId || '—'
     $('loadedFrom').textContent = s.loadedFrom || '—'
     $('startedAt').textContent = formatTime(s.startedAt)
     $('lastConnectedAt').textContent = formatTime(s.lastConnectedAt)
@@ -616,6 +623,7 @@ async function refreshStatus() {
     prefill('hubUser', s.config.hubUser)
     renderHubCa(s.config)
     prefill('instanceId', s.config.instanceId)
+    prefill('instanceName', s.config.instanceName || '')
     prefill('natsConfigPath', s.config.natsConfigPath || '')
     prefill('natsServerPath', s.config.natsServerPath || '')
     // Never prefill the password here — this response is polled every 5s and
@@ -754,6 +762,7 @@ $('saveBtn').onclick = async () => {
     hubWssUrl: $('hubWssUrl').value, hubUser: $('hubUser').value,
     hubPass: $('hubPass').value, hubCaCert: $('hubCaCert').value,
     instanceId: $('instanceId').value,
+    instanceName: $('instanceName').value,
     natsConfigPath: $('natsConfigPath').value, natsServerPath: $('natsServerPath').value,
   })
   if (r.ok) {

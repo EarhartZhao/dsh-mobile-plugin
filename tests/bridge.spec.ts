@@ -52,6 +52,7 @@ describe('RpcBridge', () => {
   let carrierCalls: { url: string, body: string }[]
   let carrier: FetchCarrier
   let helloCount: number
+  let helloArgs: { deviceId: string, deviceName?: string } | null
   let inventoryValue: unknown
   let healthValue: unknown
   let bridge: RpcBridge
@@ -78,17 +79,19 @@ describe('RpcBridge', () => {
       }) as typeof fetch,
     }
     helloCount = 0
+    helloArgs = null
     inventoryValue = null
     healthValue = { status: 'ok', pluginVersion: '0.2.0', instanceId: 'test' }
 
     const nc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(nc, {
       instanceId: 'test',
+      instanceName: 'test-mac',
       carrier,
       tokens,
       tokenTtlDays: 90,
       maxDevices: 10,
-      onHello: () => { helloCount += 1 },
+      onHello: (deviceId, deviceName) => { helloCount += 1; helloArgs = { deviceId, deviceName } },
       onInventory: () => inventoryValue,
       onHealth: () => healthValue,
     })
@@ -137,7 +140,7 @@ describe('RpcBridge', () => {
     }
     const nc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(nc, {
-      instanceId: 'test', carrier, gateway, tokens,
+      instanceId: 'test', instanceName: 'test', carrier, gateway, tokens,
       tokenTtlDays: 90, maxDevices: 10,
       onHello: () => { helloCount += 1 },
       onHostDescribe: () => options.host,
@@ -175,7 +178,7 @@ describe('RpcBridge', () => {
     const { code } = tokens.createPairingCode(120)
     const limitedNc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(limitedNc, {
-      instanceId: 'test', carrier, tokens, tokenTtlDays: 90, maxDevices: 1,
+      instanceId: 'test', instanceName: 'test', carrier, tokens, tokenTtlDays: 90, maxDevices: 1,
       onHello: () => { helloCount += 1 },
     })
     const limited = makeMsg(`${PREFIX}pair`, {
@@ -687,12 +690,31 @@ describe('RpcBridge', () => {
     expect(carrierCalls).toHaveLength(0)
   })
 
+  it('hello carries the device name the app states, so a phone can rename itself', async () => {
+    const msg = makeMsg(`${PREFIX}hello`, {
+      type: 'client-request', rpcId: 'r7b', method: 'hello',
+      payload: { deviceName: 'Pixel 8 · Android 16' },
+    }, validToken)
+    await drive(msg)
+    expect(helloArgs?.deviceName).toBe('Pixel 8 · Android 16')
+    // The id has to be the caller, otherwise the rename would land on whatever
+    // device the bridge happened to see last.
+    expect(helloArgs?.deviceId).toBe(tokens.list().find(device => device.name === 'test-phone')?.id)
+  })
+
+  it('hello without a device name leaves the stored one alone', async () => {
+    const msg = makeMsg(`${PREFIX}hello`, { type: 'client-request', rpcId: 'r7c', method: 'hello', payload: {} }, validToken)
+    await drive(msg)
+    expect(helloCount).toBe(1)
+    expect(helloArgs?.deviceName).toBeUndefined()
+  })
+
   it('serves the plugin compatibility manifest after token auth', async () => {
     const msg = makeMsg(`${PREFIX}mobile.info`, { type: 'client-request', rpcId: 'r-info', method: 'mobile.info', payload: {} }, validToken)
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.22',
+      pluginVersion: '0.2.23',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
@@ -700,6 +722,7 @@ describe('RpcBridge', () => {
         'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
         'workspace-files', 'workspace-watch', 'workspace-stat', 'message-feedback', 'workspace-unarchive', 'goal-state', 'open-path',
       ],
+      instanceName: 'test-mac',
     })
     expect(carrierCalls).toHaveLength(0)
   })

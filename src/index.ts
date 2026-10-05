@@ -155,7 +155,13 @@ function hostVersion(): string {
   return hostVersionCache
 }
 
-function sameConfig(left: Config, right: Config): boolean {
+/**
+ * Whether two resolved configurations are the same everywhere the bridge
+ * reads. Exported for the drift guard in `tests/config.spec.ts`: a field that
+ * exists on {@link Config} but is missing here is a field whose saves silently
+ * never reach the running bridge.
+ */
+export function sameConfig(left: Config, right: Config): boolean {
   return left.natsUrl === right.natsUrl
     && left.hubWssUrl === right.hubWssUrl
     && left.hubUser === right.hubUser
@@ -163,6 +169,7 @@ function sameConfig(left: Config, right: Config): boolean {
     && left.hubCaCert === right.hubCaCert
     && left.hubCaFingerprint === right.hubCaFingerprint
     && left.instanceId === right.instanceId
+    && left.instanceName === right.instanceName
     && left.tokenTtlDays === right.tokenTtlDays
     && left.pairCodeTtlSec === right.pairCodeTtlSec
     && left.maxDevices === right.maxDevices
@@ -297,13 +304,22 @@ export class MobileBridge extends Service {
   /**
    * Persist a config patch through the settings user layer (the profile patch
    * file); falls back to in-memory when no settings provider is mounted
-   * (headless dev). The write lands in the schema-volatile references, whose
-   * `loader/volatile-update` rebuilds the bridge — see the constructor.
+   * (headless dev).
+   *
+   * The saved values are applied here rather than waiting for
+   * `loader/volatile-update`. Measured on dsh 0.1.7: a console save writes the
+   * profile patch (the file is correct) but the plugin's own references are not
+   * re-committed for that save, so nothing the owner edits — the machine name,
+   * the Hub address, the credentials — reaches the running bridge until the
+   * host restarts. Applying the patch we just persisted closes that gap, and
+   * the ordinary event, when it does arrive, only re-confirms the same values
+   * ({@link applyConfig} compares first).
    */
   async updateConfig(patch: Partial<Config>): Promise<void> {
     if (this.settings !== null) {
       await this.settings.update(SETTINGS_NS, patch)
-      return // the volatile-update listener rebuilds
+      this.applyConfig({ ...this.current, ...patch })
+      return
     }
     const next = { ...this.current, ...patch }
     if (sameConfig(this.current, next)) return
@@ -317,6 +333,16 @@ export class MobileBridge extends Service {
     if (this.wantRunning) void this.restart()
   }
 
+  /**
+   * What this machine calls itself on the phone. An unset name falls back to
+   * the instance id, which is the only identifier every existing install is
+   * guaranteed to have.
+   */
+  private instanceName(): string {
+    const configured = this.current.instanceName.trim()
+    return configured === '' ? this.current.instanceId : configured
+  }
+
   // ---- service surface for the settings card / CLI ----
 
   status(): {
@@ -328,6 +354,7 @@ export class MobileBridge extends Service {
     buildId: string
     loadedFrom: string
     instanceId: string
+    instanceName: string
     startedAt: string | null
     uptimeMs: number
     lastConnectedAt: string | null
@@ -344,6 +371,7 @@ export class MobileBridge extends Service {
       buildId: PLUGIN_BUILD_ID,
       loadedFrom: PLUGIN_LOADED_FROM,
       instanceId: this.current.instanceId,
+      instanceName: this.instanceName(),
       startedAt: this.bridgeStartedAt,
       uptimeMs: this.bridgeStartedAt === null ? 0 : Math.max(0, Date.now() - Date.parse(this.bridgeStartedAt)),
       lastConnectedAt: this.lastConnectedAt,
@@ -664,12 +692,16 @@ export class MobileBridge extends Service {
 
     this.rpcBridge = new RpcBridge(nc, {
       instanceId: this.current.instanceId,
+      instanceName: this.instanceName(),
       carrier,
       gateway,
       tokens: this.tokens,
       tokenTtlDays: this.current.tokenTtlDays,
       maxDevices: this.current.maxDevices,
-      onHello: () => {
+      onHello: (deviceId, deviceName) => {
+        if (deviceName !== undefined) {
+          void this.tokens.rename(deviceId, deviceName).catch(() => undefined)
+        }
         this.eventBridge?.replayPending()
         // The App's store starts empty after a reconnect: without the roster
         // replay its job strip would stay blank until some job changed.
