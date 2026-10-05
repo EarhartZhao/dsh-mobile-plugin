@@ -116,6 +116,8 @@ Release 资产是个普通远端 tarball，不经 git 托管路径，`prepare` �
 
 **发到 npm（2026-10-05 起）。** 包名 `@dsh-earhartzhao/dsh-mobile-plugin`——npm 组织只收 scoped 包，所以 0.2.27 顺势改了名（迁移见 README 与下一段）。同一个 release job 里还有一步 `npm publish`：仓库 secrets 配了 `NPM_TOKEN` 就发，没配就打印一行跳过（GitHub Release 资产照常出），npm 上已有同版本号也跳过——所以重跑发布、或者同一个 tag 先手工发过一次，都不会失败。这一步排在「Publish release assets」**之后**，因为 token 若被 2FA/权限挡下，不该连带丢掉 Release 资产。registry 侧无需再操心 `prepare`：它在发布那一刻跑，装的人拿到的 tarball 里已经有 `lib/`。发版顺序不变：改三处版本号 → 提交 → 打 tag → 推 tag。
 
+发布时踩到的两件事，记在这里免得下次当故障查：一是 granular token 必须勾 **Bypass 2FA**，否则 PUT 直接被 403 挡下（`Two-factor authentication or granular access token with bypass 2fa enabled is required`）；二是**新包的元数据文档（packument）会在 registry 缓存里 404 一阵子**——PUT 已经 200、`/-/package/<name>/dist-tags` 和 tarball 都能取到，只有 `registry.npmjs.org/<name>` 还是 `{"error":"Not found"}`，于是 `npm view` 和 `pnpm add` 都会报「不在 registry 上」。等缓存过期即可，不是发布失败；流水线因此把「cannot publish over the previously published versions」也当成跳过。
+
 改名的连带效应还有一处：`pnpm pack` 对 scoped 包产出 `dsh-earhartzhao-dsh-mobile-plugin-<version>.tgz`（npm 自己会去掉 scope，pnpm 不去），而 release 资产与 `releaseAssetSpec` 认的是从来不带 scope 的 `dsh-mobile-plugin-<version>.tgz` + `dsh-mobile-plugin.tgz`——老装法的更新 URL 里嵌着这个名字，改了就等于让它们更新不到。所以 `release.yml` 的 `pnpm pack` 之后会把文件名改回去再上传。
 
 凭据用 automation token（`NPM_TOKEN`）。想彻底不存 token，可以在 npmjs.com 该包的 Settings → Trusted Publisher 里登记本仓库与工作流名，再给 job 加 `id-token: write` 并去掉 token 那步——当前没走这条，因为首次发布时包还不存在。

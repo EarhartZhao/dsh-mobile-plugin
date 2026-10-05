@@ -126,4 +126,19 @@ jobs:
           # `prepare` runs here, at publish time, not at install time: the
           # published tarball ships `lib/`, which is why installing from the
           # registry needs no allowBuilds approval.
-          npm publish --access public --//registry.npmjs.org/:_authToken="${NPM_TOKEN}"
+          if out="$(npm publish --access public --//registry.npmjs.org/:_authToken="${NPM_TOKEN}" 2>&1)"; then
+            echo "${out}"
+            exit 0
+          fi
+          echo "${out}"
+          # A brand-new package's metadata document can answer 404 for a few
+          # minutes behind the registry cache even though the version is
+          # published (the tarball is already served), so "this version already
+          # exists" is a skip too, not a red run.
+          case "${out}" in
+            *"cannot publish over the previously published versions"*|*EPUBLISHCONFLICT*)
+              echo "npm 上已经有 ${version}（提交冲突），跳过。"
+              exit 0
+              ;;
+          esac
+          exit 1
