@@ -11,7 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import type { MobileBridge } from './index.js'
 import type { Config } from './config.js'
-import { checkHubCertificate, checkHubPath, type HubCheckResult } from './hub-check.js'
+import { checkHubCertificate, checkHubPath, normalizeHubWssUrl, type HubCheckResult } from './hub-check.js'
 import { readHubCa } from './hub-ca.js'
 import type { LocalNatsResolution } from './nats-launch.js'
 
@@ -224,7 +224,8 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         try {
           const body = await readJson(req)
           const patch: Partial<Config> = {}
-          if (typeof body.hubWssUrl === 'string') patch.hubWssUrl = body.hubWssUrl.trim()
+          // A bare host or IP is what people paste; store the WSS URL the QR needs.
+          if (typeof body.hubWssUrl === 'string') patch.hubWssUrl = normalizeHubWssUrl(body.hubWssUrl)
           if (typeof body.hubUser === 'string') patch.hubUser = body.hubUser.trim()
           if (typeof body.hubPass === 'string' && body.hubPass.length > 0) patch.hubPass = body.hubPass
           // Unlike the password, clearing this one is meaningful: it is how an
@@ -462,7 +463,7 @@ const CONSOLE_HTML = `<!doctype html>
 </dl>
 
 <h2>服务器信息（NATS Hub）</h2>
-<p style="font-size:12px;opacity:.7;margin:0 0 4px">配对二维码里带的就是这里的地址与账号凭证，手机靠它连 Hub，因此三项都必须先填写并保存，否则二维码扫了也连不上。</p>
+<p style="font-size:12px;opacity:.7;margin:0 0 4px">配对二维码里带的就是这里的地址与账号凭证，手机靠它连 Hub，因此三项都必须先填写并保存，否则二维码扫了也连不上。地址可以只填主机或 IP，缺端口按 8443 补。</p>
 <label>Hub 地址（wss://…:8443）</label><input id="hubWssUrl" placeholder="wss://203.0.113.10:8443">
 <label>账号（Hub 的 C 端受限账号）</label><input id="hubUser" placeholder="你的 Hub 账号">
 <label>密码（必填；留空表示不修改）</label>
@@ -516,16 +517,29 @@ const $ = id => document.getElementById(id)
 let pairing = null
 
 /**
- * Whether the CA field holds something the owner typed that has not been saved
- * yet. The status poll runs every few seconds and must not paste over it.
+ * Inputs the status poll owns, by id. The poll runs every 5 seconds, so a
+ * field is written only while the owner has not touched it: pasting the saved
+ * value over a half-typed Hub address looks exactly like the save failing, and
+ * on a profile with nothing saved yet it wipes the field outright. A save
+ * clears the flags for the fields it just wrote, so the stored values take
+ * over again.
  */
-let caEdited = false
+const editedFields = new Set()
+
+/** Prefill a status-backed input unless the owner typed in it or is in it. */
+function prefill(id, value) {
+  const field = $(id)
+  if (editedFields.has(id) || document.activeElement === field) return
+  field.value = value
+}
+
+for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
+  $(id).addEventListener('input', () => { editedFields.add(id) })
+}
 
 /** Shows the configured certificate, or why there is nothing to show. */
 function renderHubCa(config) {
-  if (!caEdited && document.activeElement !== $('hubCaCert')) {
-    $('hubCaCert').value = config.hubCaCert || ''
-  }
+  prefill('hubCaCert', config.hubCaCert || '')
   const hint = $('hubCaHint')
   hint.className = ''
   if (!config.hubCaCert) {
@@ -551,8 +565,6 @@ function renderHubCa(config) {
     hint.textContent += '\\n这不是一张 CA 证书（basicConstraints 不是 CA:TRUE），请确认粘的确实是 ca.crt。'
   }
 }
-
-$('hubCaCert').addEventListener('input', () => { caEdited = true })
 
 $('hubPassToggle').onclick = async () => {
   const field = $('hubPass')
@@ -597,14 +609,14 @@ async function refreshStatus() {
     $('lastError').textContent = s.lastError || '无'
     renderProfile(s.profile)
     renderLocalNats(s.localNats)
-    $('hubWssUrl').value = s.config.hubWssUrl
-    $('hubUser').value = s.config.hubUser
-    // Public material, but a poll every 5s still must not paste over an edit
-    // in progress, so it writes only while the field is untouched.
+    // Prefill only while the field is untouched; a poll every 5s must not
+    // paste over an edit in progress (see prefill).
+    prefill('hubWssUrl', s.config.hubWssUrl)
+    prefill('hubUser', s.config.hubUser)
     renderHubCa(s.config)
-    $('instanceId').value = s.config.instanceId
-    $('natsConfigPath').value = s.config.natsConfigPath || ''
-    $('natsServerPath').value = s.config.natsServerPath || ''
+    prefill('instanceId', s.config.instanceId)
+    prefill('natsConfigPath', s.config.natsConfigPath || '')
+    prefill('natsServerPath', s.config.natsServerPath || '')
     // Never prefill the password here — this response is polled every 5s and
     // 「显示」 is the one call that fetches the stored value.
     $('hubPass').placeholder = s.config.hubPassConfigured ? '已配置（留空保持不变）' : '未配置'
@@ -744,7 +756,8 @@ $('saveBtn').onclick = async () => {
     natsConfigPath: $('natsConfigPath').value, natsServerPath: $('natsServerPath').value,
   })
   if (r.ok) {
-    caEdited = false
+    // The stored values are what the fields should show again.
+    editedFields.clear()
     $('saveMsg').className = 'ok'; $('saveMsg').textContent = '已保存'
     refreshStatus()
     // Verify right after saving: a wrong password is invisible until the
@@ -796,6 +809,8 @@ $('saveNatsPathBtn').onclick = async () => {
     natsServerPath: $('natsServerPath').value,
   })
   if (r.ok) {
+    editedFields.delete('natsConfigPath')
+    editedFields.delete('natsServerPath')
     $('natsPathMsg').className = 'ok'; $('natsPathMsg').textContent = '已保存'
     refreshStatus()
   } else {

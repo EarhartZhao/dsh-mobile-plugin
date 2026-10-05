@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkHubCertificate, checkHubPath, hubProbeAddress } from '../src/hub-check.js'
+import { checkHubCertificate, checkHubPath, hubProbeAddress, normalizeHubWssUrl } from '../src/hub-check.js'
 import type { Config } from '../src/config.js'
 import { ALPHA_CA_BASE64, ALPHA_CA_FINGERPRINT, BETA_CA_FINGERPRINT, asPem } from './hub-ca-fixture.js'
 
@@ -38,9 +38,36 @@ describe('hubProbeAddress', () => {
     expect(hubProbeAddress('wss://hub.test:8443')).toBe('nats://hub.test:4222')
   })
 
+  it('accepts a bare host or IP, which is what the owner pastes', () => {
+    // The field is labelled `wss://…:8443`, but typing just the address is the
+    // obvious thing to do — it must not read as an unparseable Hub.
+    expect(hubProbeAddress('203.0.113.10')).toBe('nats://203.0.113.10:4222')
+    expect(hubProbeAddress('hub.test:9443')).toBe('nats://hub.test:4222')
+  })
+
   it('returns null for an address it cannot parse', () => {
     expect(hubProbeAddress('not a url')).toBeNull()
     expect(hubProbeAddress('')).toBeNull()
+  })
+})
+
+describe('normalizeHubWssUrl', () => {
+  it('fills in the scheme and the Hub port on a bare address', () => {
+    expect(normalizeHubWssUrl('203.0.113.10')).toBe('wss://203.0.113.10:8443')
+    expect(normalizeHubWssUrl('hub.example')).toBe('wss://hub.example:8443')
+    expect(normalizeHubWssUrl('hub.example/leaf')).toBe('wss://hub.example:8443/leaf')
+  })
+
+  it('keeps an explicit port and leaves a scheme alone', () => {
+    expect(normalizeHubWssUrl('203.0.113.10:9443')).toBe('wss://203.0.113.10:9443')
+    expect(normalizeHubWssUrl('wss://hub.test:8443')).toBe('wss://hub.test:8443')
+    expect(normalizeHubWssUrl('ws://hub.test:8080')).toBe('ws://hub.test:8080')
+    expect(normalizeHubWssUrl('  wss://hub.test  ')).toBe('wss://hub.test')
+  })
+
+  it('keeps "not configured yet" empty', () => {
+    expect(normalizeHubWssUrl('')).toBe('')
+    expect(normalizeHubWssUrl('   ')).toBe('')
   })
 })
 
@@ -52,6 +79,15 @@ describe('checkHubPath', () => {
     })
     expect(result.reason).toBe('unconfigured')
     expect(connectImpl).not.toHaveBeenCalled()
+  })
+
+  it('tells the owner how to write an address it cannot read', async () => {
+    // The old text only said the host name did not parse, which reads as a DNS
+    // problem — the fix is a missing `wss://`, so the message has to say so.
+    const result = await checkHubPath({ ...config, hubWssUrl: 'wss://' })
+    expect(result.reason).toBe('unreachable')
+    expect(result.message).toContain('wss://主机:8443')
+    expect(result.message).toContain('只填主机或 IP')
   })
 
   it('treats a Hub rejection as definitive', async () => {

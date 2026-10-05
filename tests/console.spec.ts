@@ -26,6 +26,7 @@ function captureRoutes(
   config: Config,
   checkHub: () => Promise<{ ok: boolean, reason: string, message: string }> = () =>
     Promise.resolve({ ok: true, reason: 'ok', message: 'stubbed' }),
+  overrides: Partial<ConsoleBackend> = {},
 ): Map<string, Handler> {
   const routes = new Map<string, Handler>()
   const router: WebRouter = {
@@ -72,6 +73,7 @@ function captureRoutes(
       notes: ['安装形态正常'],
     }),
     checkHub,
+    ...overrides,
   } as unknown as ConsoleBackend
   registerConsoleRoutes(router, backend)
   return routes
@@ -88,6 +90,7 @@ function exchange(
   remoteAddress: string,
   method = 'GET',
   headers: Record<string, string | undefined> = {},
+  body = '',
 ): {
   req: IncomingMessage
   res: ServerResponse
@@ -117,7 +120,9 @@ function exchange(
     method,
     headers: merged,
     socket: { remoteAddress },
-    [Symbol.asyncIterator]: async function* () { /* route bodies parse as empty */ },
+    [Symbol.asyncIterator]: async function* () {
+      if (body !== '') yield Buffer.from(body)
+    },
   } as unknown as IncomingMessage
   return {
     req,
@@ -138,6 +143,27 @@ describe('missingHubCredentials', () => {
     expect(missingHubCredentials({ ...baseConfig, hubUser: '  ' })).toContain('账号')
     expect(missingHubCredentials({ ...baseConfig, hubWssUrl: '', hubUser: '', hubPass: '' }))
       .toContain('Hub 地址、账号、密码')
+  })
+})
+
+describe('console config route', () => {
+  const save = async (body: Record<string, unknown>) => {
+    const writes: Array<Partial<Config>> = []
+    const route = captureRoutes(baseConfig, undefined, {
+      updateConfig: (patch) => { writes.push(patch); return Promise.resolve() },
+    }).get('/mobile-bridge/api/config')!
+    const call = exchange('127.0.0.1', 'POST', {}, JSON.stringify(body))
+    await route(call.req, call.res)
+    expect(call.status()).toBe(200)
+    return writes[0]
+  }
+
+  it('turns a bare Hub address into the wss URL the QR needs', async () => {
+    // What people paste is the address on its own; the phone dials what the QR
+    // carries, so the stored value has to be a real URL.
+    expect(await save({ hubWssUrl: '203.0.113.10' })).toMatchObject({ hubWssUrl: 'wss://203.0.113.10:8443' })
+    expect(await save({ hubWssUrl: ' 203.0.113.10:9443 ' })).toMatchObject({ hubWssUrl: 'wss://203.0.113.10:9443' })
+    expect(await save({ hubWssUrl: 'wss://hub.test:8443' })).toMatchObject({ hubWssUrl: 'wss://hub.test:8443' })
   })
 })
 
@@ -243,6 +269,21 @@ describe('console page', () => {
     // The button is hidden until a status poll says a write would help.
     expect(html).toContain('id="repairBtn" class="secondary" type="button" style="margin-left:8px" hidden')
     expect(html).toContain("api('migrate', {})")
+  })
+
+  it('never writes a prefilled field straight from the status poll', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    // The poll fires every 5s. Assigning into these inputs erased whatever was
+    // being typed — on a profile with nothing saved yet, the whole field.
+    expect(html).toContain('function prefill(id, value)')
+    for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
+      expect(html).toContain(`prefill('${id}'`)
+      expect(html).not.toContain(`$('${id}').value =`)
+    }
   })
 
   it('reports the install shape through the status poll', async () => {

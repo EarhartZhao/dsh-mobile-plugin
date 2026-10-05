@@ -19,6 +19,7 @@ import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { Config } from './config.js'
 import { readHubCa, sameFingerprint } from './hub-ca.js'
+import { normalizeHubWssUrl } from './hub-check.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
@@ -90,7 +91,9 @@ export function buildPairingPayload(config: Config, code: string): PairingPayloa
     )
   }
   return {
-    hub: config.hubWssUrl,
+    // Normalized here as well: a hand-edited profile patch may hold a bare host,
+    // and the phone dials exactly what the QR carries.
+    hub: normalizeHubWssUrl(config.hubWssUrl),
     user: config.hubUser,
     pass: config.hubPass,
     instance: config.instanceId,

@@ -222,7 +222,7 @@ leafnodes {
 | 字段 | 填什么 | 默认 |
 |---|---|---|
 | `natsUrl` | 本机 Leaf 地址 | `nats://127.0.0.1:4222` |
-| `hubWssUrl` | 手机要连的 `wss://<hub-host>:8443`，经二维码下发给手机 | 空 |
+| `hubWssUrl` | 手机要连的 `wss://<hub-host>:8443`，经二维码下发给手机；只填主机或 IP 也行，缺端口按 8443 补 | 空 |
 | `hubUser` / `hubPass` | 上面的 C 端账号；任一为空时拒绝发码 | 空 |
 | `hubCaFingerprint` | Hub CA 指纹，仅作展示与人工核对 | 空 |
 | `instanceId` | 本实例的命名空间；一个 Hub 上多台电脑必须各不相同 | `home` |

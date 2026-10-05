@@ -83,7 +83,7 @@ export interface HubCertificateOptions {
 /** The WSS endpoint the phone will dial, or null when the URL is unusable. */
 function hubTlsEndpoint(hubWssUrl: string): { host: string, port: number, plaintext: boolean } | null {
   try {
-    const url = new URL(hubWssUrl)
+    const url = new URL(normalizeHubWssUrl(hubWssUrl))
     if (url.hostname === '') return null
     const plaintext = url.protocol === 'ws:'
     const port = url.port === '' ? (plaintext ? 80 : 443) : Number(url.port)
@@ -115,11 +115,43 @@ const CA_REJECTION_CODES = new Set([
 /** The Hub's plain client port, derived from the WSS URL the QR advertises. */
 export function hubProbeAddress(hubWssUrl: string): string | null {
   try {
-    const url = new URL(hubWssUrl)
+    const url = new URL(normalizeHubWssUrl(hubWssUrl))
     return url.hostname === '' ? null : `nats://${url.hostname}:4222`
   } catch {
     return null
   }
+}
+
+/**
+ * Coerce what an owner typed into the WSS URL the QR advertises. The field is
+ * labelled `wss://…:8443` but what people paste is the address on its own, and
+ * `new URL('203.0.113.10')` throws — so a perfectly good Hub used to come back
+ * as "无法从 Hub 地址解析出主机名". A bare `host[:port][/path]` becomes
+ * `wss://host[:port][/path]`, and a bare address with no port gets 8443 rather
+ * than letting the URL default to 443: this field is the Hub's WSS listener.
+ * Anything already carrying a scheme is kept as typed, and an empty value stays
+ * empty so "not configured yet" keeps working.
+ */
+export function normalizeHubWssUrl(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed === '') return ''
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed
+  const bare = trimmed.replace(/^\/+/, '')
+  const slash = bare.indexOf('/')
+  const authority = slash === -1 ? bare : bare.slice(0, slash)
+  const path = slash === -1 ? '' : bare.slice(slash)
+  return `wss://${/:\d+$/.test(authority) ? authority : `${authority}:8443`}${path}`
+}
+
+/**
+ * One wording for every unparseable address. It names the value that failed,
+ * shows a form that works, and says the bare-address shorthand is allowed —
+ * the old text only said the host name could not be parsed, which sent an
+ * owner with a perfectly good Hub looking for a DNS problem that was not there.
+ */
+function unparseableHubAddress(hubWssUrl: string): string {
+  return `无法把「${hubWssUrl}」当作 Hub 地址：要写成 wss://主机:8443（例如 wss://203.0.113.10:8443），`
+    + '只填主机或 IP 也可以（缺端口按 8443 补）。'
 }
 
 export async function checkHubPath(
@@ -142,11 +174,11 @@ export async function checkHubPath(
   }
   const address = hubProbeAddress(config.hubWssUrl)
   if (address === null) {
-    steps.push({ key: 'credentials', ok: false, message: `无法从 Hub 地址解析出主机名：${config.hubWssUrl}` })
+    steps.push({ key: 'credentials', ok: false, message: unparseableHubAddress(config.hubWssUrl) })
     return {
       ok: false,
       reason: 'unreachable',
-      message: `无法从 Hub 地址解析出主机名：${config.hubWssUrl}`,
+      message: unparseableHubAddress(config.hubWssUrl),
       steps,
     }
   }
@@ -293,7 +325,7 @@ export async function checkHubCertificate(
       ok: false,
       reason: 'unreachable',
       fingerprint: ca.fingerprint,
-      message: `无法从 Hub 地址解析出主机与端口：${config.hubWssUrl}`,
+      message: unparseableHubAddress(config.hubWssUrl),
     }
   }
   if (endpoint.plaintext) {
