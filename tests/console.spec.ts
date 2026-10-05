@@ -341,8 +341,14 @@ describe('console page', () => {
     expect(html).toContain('function prefill(id, value)')
     for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
       expect(html).toContain(`prefill('${id}'`)
+    }
+    for (const id of ['hubWssUrl', 'hubUser', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
       expect(html).not.toContain(`$('${id}').value =`)
     }
+    // The CA field has exactly one deliberate writer — the fetch button — and
+    // it marks the field edited first, so the poll that follows leaves what the
+    // Hub handed over alone instead of pasting the stored (empty) value back.
+    expect(html).toContain("editedFields.add('hubCaCert')")
   })
 
   it('reports the install shape through the status poll', async () => {
@@ -403,6 +409,44 @@ describe('console page', () => {
     expect(call.status()).toBe(200)
     expect(call.json()).toEqual({ ok: true })
   })
+
+  it('offers the Hub CA fetch beside the certificate field', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('id="fetchCaBtn"')
+    expect(html).toContain("api('hub-ca/fetch', {})")
+    // Pasting ca.crt on every machine is the step this exists to remove, so
+    // the empty-field hint has to point at the button rather than only at the
+    // file an owner may not have on that machine.
+    expect(html).toContain('从 Hub 获取 CA')
+  })
+
+  it('hands the certificate it fetched to the page, unmodified', async () => {
+    const pem = '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n'
+    const route = captureRoutes(baseConfig, undefined, {
+      fetchHubCa: () => Promise.resolve({
+        ok: true,
+        reason: 'ok' as const,
+        ca: {
+          pem,
+          base64: 'AA==',
+          fingerprint: 'AB:CD',
+          subject: 'CN=hub.test',
+          validTo: '2036-09-27',
+          isCa: true,
+        },
+        message: '已从 hub.test:8443 取到 CA',
+      }),
+    }).get('/mobile-bridge/api/hub-ca/fetch')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+
+    expect(call.status()).toBe(200)
+    expect(call.json()).toMatchObject({ ok: true, ca: { pem, fingerprint: 'AB:CD' } })
+  })
 })
 
 describe('console request gate', () => {
@@ -410,6 +454,7 @@ describe('console request gate', () => {
     '/mobile-bridge/api/status',
     '/mobile-bridge/api/devices',
     '/mobile-bridge/api/hub-check',
+    '/mobile-bridge/api/hub-ca/fetch',
     '/mobile-bridge/api/update/check',
   ]
   const writePaths = [

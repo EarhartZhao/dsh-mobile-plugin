@@ -26,7 +26,7 @@
  */
 import { connect } from 'nats'
 import { connect as tlsConnect } from 'node:tls'
-import { readHubCa, sameFingerprint } from './hub-ca.js'
+import { hubCaFromDer, readHubCa, sameFingerprint, type HubCa } from './hub-ca.js'
 import type { Config } from './config.js'
 
 export type HubCheckReason = 'ok' | 'unconfigured' | 'rejected' | 'unreachable' | 'bridge-offline'
@@ -82,7 +82,7 @@ export interface HubCertificateOptions {
 }
 
 /** The WSS endpoint the phone will dial, or null when the URL is unusable. */
-function hubTlsEndpoint(hubWssUrl: string): { host: string, port: number, plaintext: boolean } | null {
+export function hubTlsEndpoint(hubWssUrl: string): { host: string, port: number, plaintext: boolean } | null {
   try {
     const url = new URL(normalizeHubWssUrl(hubWssUrl))
     if (url.hostname === '') return null
@@ -389,7 +389,8 @@ export async function checkHubCertificate(
           fingerprint: null,
           message: `没有配置 Hub 的 CA 证书，而 ${endpoint.host}:${endpoint.port} 的证书不是公共 CA 签的（${codeText}）：`
             + '二维码不带证书，App 里也没有内置任何 CA，手机每次扫码都会卡在 TLS 握手上。'
-            + '把 Hub 的 ca.crt 粘进上面的字段并保存，再点这个按钮。',
+            + '点上面的「从 Hub 获取 CA」可以自动取（前提是 Hub 的证书链里带着 CA），'
+            + '也可以把 Hub 的 ca.crt 粘进上面的字段，保存后再点这个按钮。',
         }
       }
       return {
@@ -480,5 +481,188 @@ export async function checkHubCertificate(
     fingerprint: ca.fingerprint,
     message: `Hub 出示的证书由这张 CA 签发（${ca.subject}，有效期至 ${ca.validTo}）。`
       + `指纹 ${ca.fingerprint}。`,
+  }
+}
+
+export type HubCaFetchReason =
+  | 'ok'
+  | 'plaintext'
+  | 'bad-address'
+  | 'unreachable'
+  | 'no-certificate'
+  | 'no-ca'
+  | 'mismatch'
+
+export interface HubCaFetchResult {
+  /** True only when {@link HubCaFetchResult.ca} is a certificate worth saving. */
+  ok: boolean
+  reason: HubCaFetchReason
+  /** The CA the Hub's chain carries, when it carries a usable one. */
+  ca: HubCa | null
+  message: string
+}
+
+export interface HubCaFetchOptions {
+  timeoutMs?: number
+  /** Injection point for tests; defaults to `node:tls`. */
+  tlsConnectImpl?: typeof tlsConnect
+}
+
+/** The certificate chain a peer sent, leaf first, without repeats. */
+interface PeerCertificate {
+  raw?: Buffer
+  subject?: { CN?: string }
+  issuerCertificate?: PeerCertificate
+}
+
+/**
+ * Every certificate the peer put on the wire, leaf first.
+ *
+ * `getPeerCertificate(true)` walks the chain Node managed to build, which for
+ * a server that sends only its leaf is that leaf and nothing else — the same
+ * list `openssl s_client -showcerts` prints. `issuerCertificate` cycles back to
+ * the certificate itself for a self-signed one, hence the seen-set.
+ */
+function peerChain(leaf: PeerCertificate | null | undefined): Buffer[] {
+  const chain: Buffer[] = []
+  const seen = new Set<string>()
+  let current: PeerCertificate | null | undefined = leaf
+  while (current != null && Buffer.isBuffer(current.raw)) {
+    const der = current.raw
+    const key = der.toString('base64')
+    if (seen.has(key)) break
+    seen.add(key)
+    chain.push(der)
+    current = current.issuerCertificate
+  }
+  return chain
+}
+
+/** The one wording for "the Hub sends its certificate, but not the CA". */
+function missingChainCa(leafSubject: string): string {
+  return `Hub 只发了服务器证书（${leafSubject}），证书链里没有签发它的 CA，客户端拿不到信任锚。`
+    + '在 Hub 上让 TLS 链带上 CA 就能自动取到（CA 是公开材料，私钥 ca.key 不需要上服务器）：\n'
+    + '  scp ca.crt root@<hub-host>:/etc/nats/tls/\n'
+    + '  cat /etc/nats/tls/server.crt /etc/nats/tls/ca.crt > /etc/nats/tls/fullchain.crt\n'
+    + '  把 nats.conf 里 websocket 的 cert_file 改成 /etc/nats/tls/fullchain.crt，再 systemctl restart nats\n'
+    + '然后回到这里再点一次「从 Hub 获取 CA」。docs/03 的「让新机器一键取到 CA」有完整步骤。'
+}
+
+/**
+ * Fetches the Hub's CA certificate out of the TLS handshake the phone will do.
+ *
+ * Pasting `ca.crt` on every machine is the part of onboarding that has nothing
+ * to do with understanding the setup, and it fails silently: a typo'd or stale
+ * certificate only shows up later, on the phone, as a handshake with no
+ * explanation. A server that sends its chain (the standard `fullchain.pem`
+ * arrangement) hands the CA over during the handshake the plugin already
+ * performs, so the console can fill the field in one click.
+ *
+ * The certificate is never taken on faith: whatever is fetched has to validate
+ * the Hub in a second handshake before it is offered, so a chain that names
+ * some other CA is reported rather than installed. A Hub that sends only its
+ * leaf is reported with the one command that fixes it — the certificate itself
+ * cannot be turned into its issuer.
+ * @param config Live plugin config; only `hubWssUrl` is read.
+ * @param options Timeout and the TLS implementation (tests inject a stub).
+ * @returns The certificate plus a message for the console, never a throw.
+ */
+export async function fetchHubCertificate(
+  config: Config,
+  options: HubCaFetchOptions = {},
+): Promise<HubCaFetchResult> {
+  const timeout = options.timeoutMs ?? 5000
+  const connectImpl = options.tlsConnectImpl ?? tlsConnect
+  const endpoint = hubTlsEndpoint(config.hubWssUrl)
+  if (endpoint === null) {
+    return { ok: false, reason: 'bad-address', ca: null, message: unparseableHubAddress(config.hubWssUrl) }
+  }
+  if (endpoint.plaintext) {
+    return {
+      ok: false,
+      reason: 'plaintext',
+      ca: null,
+      message: 'Hub 地址是 ws://（明文），这条链路不做 TLS，也就没有证书可取；也只有 debug 构建能连这种 Hub。',
+    }
+  }
+
+  let chain: Buffer[]
+  let leafSubject: string
+  try {
+    const { certificates, subject } = await new Promise<{ certificates: Buffer[], subject: string }>((resolve, reject) => {
+      const socket = connectImpl({
+        host: endpoint.host,
+        port: endpoint.port,
+        // The point is to see the certificate, not to have it accepted: a
+        // self-signed Hub is exactly the case this exists for.
+        rejectUnauthorized: false,
+        ...(isIpLiteral(endpoint.host) ? {} : { servername: endpoint.host }),
+      }, () => {
+        const peer = socket.getPeerCertificate(true) as PeerCertificate | null
+        socket.destroy()
+        resolve({
+          certificates: peerChain(peer),
+          subject: peer?.subject?.CN ?? '未知',
+        })
+      })
+      socket.setTimeout(timeout, () => {
+        socket.destroy()
+        reject(Object.assign(new Error('TLS handshake timed out'), { code: 'ETIMEDOUT' }))
+      })
+      socket.once('error', (error) => {
+        socket.destroy()
+        reject(error)
+      })
+    })
+    chain = certificates
+    leafSubject = subject
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code
+    const codeText = typeof code === 'string' ? code : String(error)
+    return {
+      ok: false,
+      reason: 'unreachable',
+      ca: null,
+      message: `无法与 ${endpoint.host}:${endpoint.port} 完成 TLS 握手（${codeText}），取不到证书。`
+        + '端口不通、防火墙挡下都会这样；也可以先手工粘贴 ca.crt。',
+    }
+  }
+
+  const top = chain[chain.length - 1]
+  if (top === undefined) {
+    return {
+      ok: false,
+      reason: 'no-certificate',
+      ca: null,
+      message: `${endpoint.host}:${endpoint.port} 的握手完成了，但没给出任何证书：它没有配置 TLS，或中间有人拦下了连接。`,
+    }
+  }
+
+  const ca = hubCaFromDer(top)
+  if (ca === null || !ca.isCa) {
+    return { ok: false, reason: 'no-ca', ca: null, message: missingChainCa(leafSubject) }
+  }
+
+  // The fetched certificate has to be the one that validates this Hub; a chain
+  // that hands over something else is a report, not an anchor.
+  try {
+    await tlsProbe(endpoint, ca.pem, timeout, connectImpl)
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code
+    const codeText = typeof code === 'string' ? code : String(error)
+    return {
+      ok: false,
+      reason: 'mismatch',
+      ca,
+      message: `从 ${endpoint.host}:${endpoint.port} 取到的证书（${ca.subject}）没能通过它自己的校验（${codeText}），`
+        + '不会自动填入。这通常说明链里带的是中间证书，或 Hub 的 cert_file 配错了。',
+    }
+  }
+
+  return {
+    ok: true,
+    reason: 'ok',
+    ca,
+    message: `已从 ${endpoint.host}:${endpoint.port} 取到 CA：${ca.subject}｜有效期至 ${ca.validTo}｜SHA-256 ${ca.fingerprint}`,
   }
 }

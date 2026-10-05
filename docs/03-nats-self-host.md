@@ -147,10 +147,20 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 ```
 
 ```bash
-# 上传（证书目录已按 2.1 建好，属主 nats）
-scp server.crt server.key root@<hub-host>:/etc/nats/tls/
-ssh root@<hub-host> 'chown nats:nats /etc/nats/tls/* && chmod 600 /etc/nats/tls/* && systemctl restart nats'
+# 上传（证书目录已按 2.1 建好，属主 nats）。ca.crt 是公开材料，只上传它的公开部分，
+# ca.key 永远留在管理机
+scp server.crt ca.crt server.key root@<hub-host>:/root/dsh-mobile-setup/
+ssh root@<hub-host> 'cd /root/dsh-mobile-setup \
+  && install -m 600 server.crt /etc/nats/tls/server.leaf.crt \
+  && cat server.crt ca.crt > /etc/nats/tls/server.crt \
+  && install -m 600 server.key /etc/nats/tls/server.key \
+  && chown -R nats:nats /etc/nats/tls && chmod 600 /etc/nats/tls/* \
+  && systemctl restart nats'
 ```
+
+`/etc/nats/tls/server.crt` 里是**叶子 + CA 两段**，不是单张叶子：Go（nats-server）把 `cert_file` 当 PEM 包读，
+第一张是身份、后面的都是它握手时发出去的链。让 CA 上榜是「新机器不用手粘 ca.crt」的前提——
+见 [2.6](#26-让新机器一键取到-ca)。叶子单独留一份 `server.leaf.crt`，重装/换证时用它重新拼，而不是往后追加。
 
 自签 CA 的取舍：零外部依赖、零续期任务；代价是**每个客户端都要显式信任它**——手机端就是被二维码带过去的那张
 CA（第 0 节），扫码即完成，不必重新打包。
@@ -162,12 +172,14 @@ CA（第 0 节），扫码即完成，不必重新打包。
 最后只打印一次新账号密码。
 
 ```bash
-scp server.crt server.key setup-hub.sh root@<hub-host>:/root/dsh-mobile-setup/
+scp server.crt ca.crt server.key setup-hub.sh root@<hub-host>:/root/dsh-mobile-setup/
 ssh root@<hub-host> 'bash /root/dsh-mobile-setup/setup-hub.sh'
 ```
 
 它假定：以 root 运行、配置文件固定 `/etc/nats/hub.conf`、systemd 单元名固定 `nats`、TLS 材料与脚本同目录。
-最后一步只做本机握手确认（不带 `-CAfile` 时自签链会报 18/19，属预期），完整链校验用 2.5 的命令。
+同目录有 `ca.crt` 时它会把 CA 拼进 `server.crt`（即 2.3 的两段式），没有就只装叶子并提示一句——
+差别就是别的机器能不能一键取到 CA。自检阶段除了握手，还会数一遍链里有几张证书（2 张才算带上 CA）。
+不带 `-CAfile` 时自签链会报 18/19，属预期，完整链校验用 2.5 的命令。
 
 一处交互要注意：脚本把证书目录设成 `root:root 700`。如果你按 2.1 让服务以 `nats` 用户运行，脚本跑完还要补一句，
 否则 `websocket` 监听读不到证书、`nats-server -t` 之外看不出问题：
@@ -193,6 +205,37 @@ ssh root@<hub-host> 'bash -s rotate' < ../dsh-mobile/scripts/hub-credential.sh  
 ```
 
 `rotate` 会先备份 `hub.conf`、只改那一行、`nats-server -t` 校验，任一步失败原样回滚。
+
+### 2.6 让新机器一键取到 CA
+
+每台电脑的插件里都要有这张 CA：二维码是手机唯一的信任来源，QR 里带的就是插件设置卡里那张证书。
+第一台机器上手工粘贴一次没问题，第二台、第三台就成了纯粹的搬运——所以插件提供「从 Hub 获取 CA」按钮：
+
+1. 它向 `<hub-host>:8443` 做一次 TLS 握手（不校验，先看到证书再说）；
+2. 取链里最上面那张证书，确认它 `CA:TRUE`；
+3. 再用这张证书**重做一次带校验的握手**，验不过就不填——宁可不填，也不把一张没用的证书塞进二维码；
+4. 通过后把 PEM 填进 CA 字段（指纹、主体、有效期一起显示），点「保存并连接」生效。
+
+前提只有一个：**Hub 的链里得有 CA**。链里只有叶子时，按钮会明确告诉你去 Hub 上跑哪条命令——
+单张服务器证书推不出它的签发者，这不是能靠算法补上的信息。检查 Hub 到底发了几张：
+
+```bash
+openssl s_client -connect <hub-host>:8443 -showcerts </dev/null 2>/dev/null | grep -c 's:/CN='
+# 2 = 链里带 CA，插件可以一键取；1 = 只有叶子，按 2.3 把 ca.crt 拼进 server.crt 再重启 nats
+```
+
+已经搭好的 Hub 补这一步也不用重签证书，把 CA 追加进正在服务的那份文件即可（幂等写法：叶子另存一份，每次重新拼）：
+
+```bash
+scp ca.crt root@<hub-host>:/root/dsh-mobile-setup/     # ca.crt 是公开材料
+ssh root@<hub-host> 'cd /root/dsh-mobile-setup \
+  && [ -f /etc/nats/tls/server.leaf.crt ] || cp /etc/nats/tls/server.crt /etc/nats/tls/server.leaf.crt \
+  && cat /etc/nats/tls/server.leaf.crt ca.crt > /etc/nats/tls/server.crt \
+  && chown nats:nats /etc/nats/tls/server.crt && chmod 600 /etc/nats/tls/server.crt \
+  && systemctl restart nats'
+```
+
+这件事只跟"别的机器怎么拿到 CA"有关：手机走的还是二维码里那张证书，链路和之前完全一样。
 
 ## 3. Leaf：dsh 电脑上的本机节点
 
@@ -224,7 +267,7 @@ leafnodes {
 | `natsUrl` | 本机 Leaf 地址 | `nats://127.0.0.1:4222` |
 | `hubWssUrl` | 手机要连的 `wss://<hub-host>:8443`，经二维码下发给手机；只填主机或 IP、或写 `wss://<hub-host>` 都行，缺端口一律按 8443 补 | 空 |
 | `hubUser` / `hubPass` | 上面的 C 端账号；任一为空时拒绝发码 | 空 |
-| `hubCaCert` | Hub 的 CA 证书（`ca.crt` 的 PEM 或 base64）；二维码带的就是它——App 不内置任何 CA，自签 Hub 留空必然连不上 | 空 |
+| `hubCaCert` | Hub 的 CA 证书（`ca.crt` 的 PEM 或 base64）；二维码带的就是它——App 不内置任何 CA，自签 Hub 留空必然连不上。手边没有 ca.crt 就点「从 Hub 获取 CA」（需 Hub 的链里带 CA，见 2.6） | 空 |
 | `hubCaFingerprint` | Hub CA 指纹，仅作展示与人工核对 | 空 |
 | `instanceId` | 本实例的命名空间；一个 Hub 上多台电脑必须各不相同 | `home` |
 | `instanceName` | 这台电脑在手机「连接」列表里显示的名字（`mobile.info` 上报）；留空则回退 `instanceId` | 空 |
@@ -305,9 +348,9 @@ nats-server -c scripts/local-hub-standin.conf
 | 手机报 `Authorization Violation` | C 端账号密码与 Hub 不一致 | `hub-credential.sh show` 读回真值，更新插件配置后重新发码（旧二维码里的密码不会自动更新） |
 | 手机报 `503` | Hub → 本机实例没有响应者 | Leaf 没桥到 Hub：看 Leaf 日志有没有 `Leafnode connection created`、`leaf.conf` 的 remotes、7422 是否放行、Leaf 账号是否在 Hub 上 |
 | 控制台「未连接」 | 桥 → 本机 NATS | 点「启动本地 NATS」，确认 `natsUrl` 与 `leaf.conf` 的 port 一致、`NATS_CONFIG_PATH` 指向的文件存在 |
-| 手机 `wss` 握手失败或证书错误 | TLS | SAN 与手机拨的地址不一致（IP 写成域名或反之）、二维码没带这张 CA（把 Hub 的 `ca.crt` 粘进插件设置）、8443 未放行、证书过期 |
+| 手机 `wss` 握手失败或证书错误 | TLS | SAN 与手机拨的地址不一致（IP 写成域名或反之）、二维码没带这张 CA（点「从 Hub 获取 CA」，或把 `ca.crt` 粘进插件设置）、8443 未放行、证书过期 |
 | 手机报「无法连接公网 NATS」但账号密码都对 | Hub 地址写法 | 地址漏了端口：`wss://<hub-host>` 会被 URL 规范补成 443。插件 0.2.21 起自动补 8443，更早的版本要手写 `wss://<hub-host>:8443` |
-| 「测试 Hub 账号」的 `certificate` 段报证书不是公共 CA 签的 | 二维码不带 CA | 把 Hub 的 `ca.crt` 粘进插件设置里的 CA 字段并保存，再点「生成配对二维码」 |
+| 「测试 Hub 账号」的 `certificate` 段报证书不是公共 CA 签的 | 二维码不带 CA | 点「从 Hub 获取 CA」自动取（Hub 链里没带 CA 时它会给出 Hub 上的命令，见 2.6），或把 `ca.crt` 粘进 CA 字段；保存后再点「生成配对二维码」 |
 | 「测试 Hub 账号」报无法通过 `nats://<hub-host>:4222` | 4222 不通 | 放行该端口或忽略：手机走 8443，此检查失败不阻断发码 |
 | `nats-server -t` 通过但服务起不来 | 权限 | 跑 nats 的用户要能读 `/etc/nats/tls/*`（属主与权限按 2.1、2.3 设置） |
 | 换了 Hub 地址或账号 | 迁移 | 更新插件配置并重新发码；设备 token 是应用层的、本身不受影响，但手机必须重新扫码，因为 NATS 凭证来自二维码 |

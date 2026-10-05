@@ -121,9 +121,10 @@ node scripts/migrate-to-scoped.mjs ~/.dsh/profiles/web
 
 手机连 Hub 用的是**插件里配置的 Hub 账号凭证**——它随配对二维码下发，App 不内置任何账号。所以首次必须先配置、再发码：
 
-1. 打开**侧边栏 → 插件 → `@dsh-earhartzhao/dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码，并把 Hub 的 `ca.crt` 粘进 CA 字段后保存。密码是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"（点「显示」时才走一次 `/api/reveal`）。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
-2. 确认状态为「已连接」（本地 NATS 就绪）。
-3. 再点「生成配对二维码」。
+1. 打开**侧边栏 → 插件 → `@dsh-earhartzhao/dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码后保存。密码是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"（点「显示」时才走一次 `/api/reveal`）。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
+2. **CA 字段**（二维码要带给手机的信任锚）：手边有 `ca.crt` 就粘进去；没有就点**「从 Hub 获取 CA」**——它从 Hub 的 TLS 链里读出 CA、再用它做一次带校验的握手，验过才填进字段（前提是 Hub 的 `cert_file` 里带着 CA，见 [docs/03 §2.6](docs/03-nats-self-host.md)；只有叶子时按钮会给出 Hub 上的那条命令）。填好保存。
+3. 确认状态为「已连接」（本地 NATS 就绪）。
+4. 再点「生成配对二维码」。
 
 任一凭证没配时，「生成配对二维码」按钮会被禁用，`/mobile-bridge/api/pair` 也会直接返回未配置的字段清单。这是刻意的：否则二维码虽然扫得进 App，手机连 Hub 只会拿到 `Authorization Violation`，还白白占掉一个待核销配对码。
 
@@ -141,6 +142,8 @@ node scripts/migrate-to-scoped.mjs ~/.dsh/profiles/web
 第三段是**只有凭证检查看不见**的故障：账号密码都对、插件状态也显示「已连接」（那只说明它连上了本机 NATS），但本机 Leaf 没连上 Hub，于是 Hub 上 `svc.dsh.{instance}.pair` 没有订阅者。检查的做法是另开一条直连 Hub 的连接，请 Hub 去请求本机实例的配对主题——复刻手机扫码走的那条路：有应答就是通，`503` 就是 Leaf 那段断了。
 
 第四段是**只有手机能遇到、也只有手机看不见原因**的故障：App 不内置任何 CA，信任完全来自二维码里的 `ca` 字段，所以 Hub 用自签证书而字段是空的，每次扫码都会死在握手上，手机上只显示一句「无法连接公网 NATS」。因此 CA 字段为空时这个按钮不会直接放过：它会拿系统信任库向 Hub 的 WSS 端口做一次握手，公共 CA 签发的报 `public-ca`（二维码不带证书也能连），自签的报告「手机每次扫码都会卡在 TLS 握手上」并把这一行判为失败。
+
+那种情况下的正路是旁边的**「从 Hub 获取 CA」**：一次握手取回链里的 CA，一次校验证明它确实是这个 Hub 用的，然后填进字段——第二台机器不必再手工搬 `ca.crt`。Hub 只发叶子证书时它取不到，这时它会给出 Hub 上要跑的那条命令（把 `ca.crt` 拼进 `cert_file`），而不是让你去猜。
 
 生成二维码时会自动跑这套检查：凭证被拒直接拒绝发码；`hub-path` 不通只警告不拦截，因为 Leaf 可能自行重连，而配对码 120 秒内都还有救。
 
@@ -257,3 +260,9 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 0.2.27 把这个包发到 npm（组织 `dsh-earhartzhao`），包名随之从 `dsh-mobile-plugin` 改成 `@dsh-earhartzhao/dsh-mobile-plugin`，移动端 wire 不变：npm 组织只收 scoped 包，而「装 npm 包」是别的机器最省事的一条路——git 源要 `allowBuilds`，Release 资产要那台机器够得着 GitHub，registry 两者都不用。改名对已装的 profile 不是无痛的：那条覆盖行按「id + 包名断言」匹配，裸名的 `name:` 行换了包就不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 会**静默失效**，而插件在失配的那一轮里根本没被加载、无从自愈——所以换法是迁移 profile（`scripts/migrate-to-scoped.mjs`），见上文「从裸包名迁移」。
 
 0.2.28 修好 npm 装法下控制台「刷新」报「从 `^0.2.27` 看不出 GitHub 仓库或 npm 包名，无法查询最新版本」，移动端 wire 不变：pnpm 装 registry 依赖时清单里只记版本范围（`"@dsh-earhartzhao/dsh-mobile-plugin": "^0.2.27"`），而读依赖时只把**值**当 spec 交给 `parseUpdateSource`，丢掉了清单的 key（也就是包名）——于是一次普普通通的 npm 安装被当成「没说要装什么」，检查更新只能拒绝。现在读依赖时用 `dependencySpec(name, declared)` 把 key 和值拼回完整 spec（`@scope/name@^0.2.27`），值里自带来源的（`github:`、`link:`、URL、路径）原样透传；顺带放宽 registry spec，允许 range 带空格（`>=0.2.0 <0.3.0`）。旧版本只是查不了更新，装法和运行时都没问题。
+
+0.2.29 让第二台及以后的电脑不必再手工搬 `ca.crt`：控制台 CA 字段旁新增**「从 Hub 获取 CA」**，一次 TLS 握手取回 Hub 链里的 CA，再用这张证书做一次**带校验**的握手证明确实是它在签这个 Hub，验过才填进字段（指纹、主体、有效期一起显示），保存即生效。移动端 wire 不变。
+
+- Hub 侧要配合一件事：nats-server 的 `cert_file` 里除了叶子还要带上 CA（`cat server.crt ca.crt > …`，即标准的 fullchain；Go 只把第一张当身份，其余原样发给客户端）。`cert_file` 只放叶子时，客户端从握手里拿不到任何签发者信息——这不是算法能补的，所以按钮会直接给出 Hub 上要跑的命令，而不是含糊地失败。dsh-mobile 的 `scripts/setup-hub.sh` 现在同目录有 `ca.crt` 就自动拼链（并数一遍链里有几张证书），`rotate-hub-tls.sh` 的 runbook 同步改了。
+- 取回的证书不会直接信：`fetchHubCertificate` 会把它当 `ca` 再握一次手，验不过就报 `mismatch` 且不填。链里带的是中间证书、`cert_file` 配错、地址被劫持，都会挡在这一步。
+- 顺带修掉 `rotate-hub-tls.sh --apply` 里的两条死拷贝：它还在往 `apps/mobile/.../dsh_root_ca.crt` 写 CA，而 App 早已不打包任何 CA（信任只来自二维码），那两个路径都不存在，`set -e` 下会直接把轮换脚本打断。

@@ -84,7 +84,19 @@ function decodeToDer(input: unknown): Buffer | null {
  */
 export function readHubCa(input: unknown): HubCa | null {
   const der = decodeToDer(input)
-  if (der === null) return null
+  return der === null ? null : hubCaFromDer(der)
+}
+
+/**
+ * The same readout, for a certificate that arrived as DER rather than as text.
+ *
+ * {@link readHubCa} starts from what the owner pasted; this starts from what a
+ * peer sent — the TLS chain a Hub hands over (see `fetchHubCertificate`).
+ * @param der Raw certificate bytes.
+ * @returns The certificate in every shape the plugin needs, or null when the
+ * bytes are not a parseable X.509 certificate.
+ */
+export function hubCaFromDer(der: Buffer): HubCa | null {
   let certificate: X509Certificate
   try {
     certificate = new X509Certificate(der)

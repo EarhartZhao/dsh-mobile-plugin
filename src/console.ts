@@ -11,7 +11,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import type { MobileBridge, UpdateReport } from './index.js'
 import type { Config } from './config.js'
-import { checkHubCertificate, checkHubPath, normalizeHubWssUrl, type HubCheckResult } from './hub-check.js'
+import {
+  checkHubCertificate,
+  checkHubPath,
+  fetchHubCertificate,
+  normalizeHubWssUrl,
+  type HubCaFetchResult,
+  type HubCheckResult,
+} from './hub-check.js'
 import { readHubCa } from './hub-ca.js'
 import type { LocalNatsResolution } from './nats-launch.js'
 
@@ -47,6 +54,8 @@ export interface ConsoleBackend {
   repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
   checkHub?: (config: Config) => Promise<HubCheckResult>
+  /** Fetch the Hub's CA certificate from its TLS chain; overridable for tests. */
+  fetchHubCa?: (config: Config) => Promise<HubCaFetchResult>
   /** Ask GitHub for the newest version tag and compare it with the running one. */
   checkUpdate?: () => Promise<UpdateReport>
   /** Install the newest version through the host's plugin manager. */
@@ -161,6 +170,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
   const checkHub = backend.checkHub ?? ((config: Config) => checkHubPath(config, {
     localConnected: backend.bridge().status().connection === 'connected',
   }))
+  const fetchHubCa = backend.fetchHubCa ?? ((config: Config) => fetchHubCertificate(config))
   const disposers = [
     webServer.register({
       kind: 'exact',
@@ -388,6 +398,22 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         })
       },
     }),
+    // Fetches the Hub's CA out of the handshake the phone will do, so a second
+    // machine does not have to be handed ca.crt. A read: it neither writes the
+    // profile nor installs anything — the page fills the field, the owner saves.
+    webServer.register({
+      kind: 'exact',
+      path: '/mobile-bridge/api/hub-ca/fetch',
+      handler: async (req, res) => {
+        const rejected = consoleRequestRejection(req, { mutating: false })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
+        try {
+          json(res, 200, await fetchHubCa(backend.currentConfig()))
+        } catch (error) {
+          json(res, 400, { error: String(error) })
+        }
+      },
+    }),
     webServer.register({
       kind: 'exact',
       path: '/mobile-bridge/api/devices',
@@ -527,8 +553,12 @@ const CONSOLE_HTML = `<!doctype html>
   <input id="hubPass" type="text" placeholder="未配置" autocomplete="off" spellcheck="false">
   <button id="hubPassToggle" class="secondary" type="button" style="white-space:nowrap">隐藏</button>
 </div>
-<label>Hub CA 证书（ca.crt 内容；二维码会把它带给手机当信任锚）</label>
+<label>Hub CA 证书（ca.crt 内容；二维码会把它带给手机当信任锚。手边没有 ca.crt 就点下面的按钮自动取）</label>
 <textarea id="hubCaCert" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+<div class="row">
+  <button id="fetchCaBtn" class="secondary" type="button">从 Hub 获取 CA</button>
+  <span id="fetchCaMsg" style="font-size:12px;white-space:pre-line"></span>
+</div>
 <p id="hubCaHint" style="font-size:12px;margin:4px 0 0;opacity:.75"></p>
 <label>实例 ID（字母/数字/短横线）</label><input id="instanceId" placeholder="home">
 <label>本机名称（手机上显示的名字；留空则显示实例 ID）</label><input id="instanceName" placeholder="例如：家里的 Mac mini">
@@ -601,7 +631,8 @@ function renderHubCa(config) {
   hint.className = ''
   if (!config.hubCaCert) {
     hint.textContent = '未配置：二维码不带证书，App 里也没有内置任何 CA。'
-      + '只有由公共 CA 签发证书的 Hub 能连上；自签证书的 Hub 必须在这里填 ca.crt 全文。'
+      + '只有由公共 CA 签发证书的 Hub 能连上。自签证书的 Hub 请点上面的「从 Hub 获取 CA」自动取，'
+      + '或手工粘贴 ca.crt 全文。'
     return
   }
   const summary = config.hubCaSummary
@@ -912,6 +943,34 @@ async function checkHub() {
 }
 
 $('hubCheckBtn').onclick = () => { void checkHub() }
+
+/**
+ * Fills the CA field from the Hub's own TLS chain.
+ *
+ * The field is marked as edited so the status poll cannot paste the stored
+ * (empty) value back over what was just fetched; saving clears that flag.
+ */
+$('fetchCaBtn').onclick = async () => {
+  $('fetchCaMsg').className = ''; $('fetchCaMsg').textContent = '正在从 Hub 取证书…'
+  $('fetchCaBtn').disabled = true
+  try {
+    const r = await api('hub-ca/fetch', {})
+    if (r.ok && r.ca) {
+      $('hubCaCert').value = r.ca.pem
+      editedFields.add('hubCaCert')
+      $('fetchCaMsg').className = 'ok'
+      $('fetchCaMsg').textContent = r.message + '\\n已填入上面的字段，点「保存并连接」生效。'
+      renderHubCa({ hubCaCert: r.ca.pem, hubCaSummary: r.ca, hubCaFingerprint: '' })
+    } else {
+      $('fetchCaMsg').className = 'error'
+      $('fetchCaMsg').textContent = r.message || r.error || '获取失败'
+    }
+  } catch (error) {
+    $('fetchCaMsg').className = 'error'; $('fetchCaMsg').textContent = String(error)
+  } finally {
+    $('fetchCaBtn').disabled = false
+  }
+}
 
 $('startNatsBtn').onclick = async () => {
   $('natsMsg').className = ''; $('natsMsg').textContent = '启动中…'

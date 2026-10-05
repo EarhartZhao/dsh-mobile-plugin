@@ -37,8 +37,25 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 ```
 
 - `ca.key`：**离线保管**（密码管理器/加密盘），它是整个信任体系的根，绝不放服务器。
-- `server.crt` + `server.key`：放服务器 `/etc/nats/tls/`，权限 0600。
+- `server.crt` + `server.key`：放服务器 `/etc/nats/tls/`，权限 0600。服务器上那份 `server.crt` 是**叶子 + CA 两段**（`cat server.crt ca.crt >` 的目标文件），不是单张叶子——见下一节。
 - `ca.crt`：粘进各主机的插件设置卡「CA 证书」字段（随二维码下发给手机），也存一份备份；App 侧不再打包任何 CA（见第四节）。
+
+2026-10-05 补：`cert_file` 指向的文件里带上 CA，是为了让**别的电脑不用手粘 ca.crt**。
+插件控制台有「从 Hub 获取 CA」按钮，它从 `wss://<hub-host>:8443` 的 TLS 链里读出 CA、再用它做一次带校验的握手，
+验过才填进字段。链里只有叶子时（本清单早期版本的装法）按钮会明确提示，而不是默默失败。已经跑起来的 Hub 补这一步不用重签证书：
+
+```bash
+scp ca.crt root@<hub-host>:/root/dsh-mobile-setup/
+ssh root@<hub-host> 'cd /root/dsh-mobile-setup \
+  && [ -f /etc/nats/tls/server.leaf.crt ] || cp /etc/nats/tls/server.crt /etc/nats/tls/server.leaf.crt \
+  && cat /etc/nats/tls/server.leaf.crt ca.crt > /etc/nats/tls/server.crt \
+  && chown nats:nats /etc/nats/tls/server.crt && chmod 600 /etc/nats/tls/server.crt \
+  && systemctl restart nats'
+# 自检：2 表示链里带了 CA
+openssl s_client -connect <hub-host>:8443 -showcerts </dev/null 2>/dev/null | grep -c 's:/CN='
+```
+
+完整说明与取舍见 `docs/03` 第 2.6 节。
 
 ### 1.1 密钥泄露后的轮换与作废（2026-09-30）
 
@@ -65,7 +82,8 @@ dsh-mobile/scripts/rotate-hub-tls.sh
 # 4. Hub 已经在用新证书之后，再更新仓库里被 pin 的公开 CA：
 dsh-mobile/scripts/rotate-hub-tls.sh --apply
 
-# 5. 把新的 ca.crt 粘进插件设置卡，手机重扫二维码（见下）
+# 5. 各主机的插件点「从 Hub 获取 CA」重新取一次（Hub 的链里带 CA 才可用；
+#    取不到就照旧把新的 ca.crt 粘进设置卡），手机重扫二维码（见下）
 ```
 
 顺带修好了老证书缺 `extendedKeyUsage=serverAuth` 的问题：补上之后 Apple 的
