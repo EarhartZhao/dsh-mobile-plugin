@@ -266,3 +266,5 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 - Hub 侧要配合一件事：nats-server 的 `cert_file` 里除了叶子还要带上 CA（`cat server.crt ca.crt > …`，即标准的 fullchain；Go 只把第一张当身份，其余原样发给客户端）。`cert_file` 只放叶子时，客户端从握手里拿不到任何签发者信息——这不是算法能补的，所以按钮会直接给出 Hub 上要跑的命令，而不是含糊地失败。dsh-mobile 的 `scripts/setup-hub.sh` 现在同目录有 `ca.crt` 就自动拼链（并数一遍链里有几张证书），`rotate-hub-tls.sh` 的 runbook 同步改了。
 - 取回的证书不会直接信：`fetchHubCertificate` 会把它当 `ca` 再握一次手，验不过就报 `mismatch` 且不填。链里带的是中间证书、`cert_file` 配错、地址被劫持，都会挡在这一步。
 - 顺带修掉 `rotate-hub-tls.sh --apply` 里的两条死拷贝：它还在往 `apps/mobile/.../dsh_root_ca.crt` 写 CA，而 App 早已不打包任何 CA（信任只来自二维码），那两个路径都不存在，`set -e` 下会直接把轮换脚本打断。
+
+0.2.30 改正 0.2.29 那句补链命令的方向，移动端 wire 不变：0.2.29 让「从 Hub 获取 CA」在 Hub 只发叶子时给出 Hub 上要跑的命令，但那条命令是**新建 `fullchain.crt` 再改 `nats.conf` 的 `cert_file`**——新文件是 root 属主，而 nats-server 常以 `nats` 用户运行，证书读不到、websocket 监听会直接起不来（服务启动成功、只有那一段端口不通，报错也不指向权限）。现在改成 `cd /etc/nats/tls` 之后**就地重写 `server.crt`**（先 `cp -p` 存一份叶子）：属主、权限、SELinux 上下文都保持原样，`cert_file` 一直指着这个文件名，配置文件一个字都不用动。按钮文案与 [docs/03 §2.6](docs/03-nats-self-host.md) 给了同一套幂等命令；dsh-mobile 的 `scripts/setup-hub.sh` 本来就是就地拼、`rotate-hub-tls.sh` 的 runbook 同步改成这条。

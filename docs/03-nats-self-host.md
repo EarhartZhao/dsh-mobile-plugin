@@ -228,12 +228,15 @@ openssl s_client -connect <hub-host>:8443 -showcerts </dev/null 2>/dev/null | gr
 
 ```bash
 scp ca.crt root@<hub-host>:/root/dsh-mobile-setup/     # ca.crt 是公开材料
-ssh root@<hub-host> 'cd /root/dsh-mobile-setup \
-  && [ -f /etc/nats/tls/server.leaf.crt ] || cp /etc/nats/tls/server.crt /etc/nats/tls/server.leaf.crt \
-  && cat /etc/nats/tls/server.leaf.crt ca.crt > /etc/nats/tls/server.crt \
-  && chown nats:nats /etc/nats/tls/server.crt && chmod 600 /etc/nats/tls/server.crt \
-  && systemctl restart nats'
+ssh root@<hub-host> 'set -e; cd /etc/nats/tls \
+  && [ -f server.leaf.crt ] || cp -p server.crt server.leaf.crt \
+  && cat server.leaf.crt /root/dsh-mobile-setup/ca.crt > server.crt \
+  && systemctl restart nats && systemctl is-active nats'
 ```
+
+两个细节都不是可有可无的：`cd` 之后**就地重写** `server.crt`，属主、权限、SELinux 上下文都保持原样；
+换成"新建 `fullchain.crt` 再改 `cert_file`"的话，新文件是 root 属主，而服务多半以 `nats` 用户运行——
+证书读不到，websocket 监听会直接起不来。`cert_file` 也依旧指着 `server.crt`，配置文件不用动。
 
 这件事只跟"别的机器怎么拿到 CA"有关：手机走的还是二维码里那张证书，链路和之前完全一样。
 

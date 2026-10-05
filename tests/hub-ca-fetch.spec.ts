@@ -101,8 +101,11 @@ describe('fetchHubCertificate', () => {
     expect(result.reason).toBe('no-ca')
     expect(result.ca).toBeNull()
     // The message has to be runnable on the Hub, not a diagnosis.
-    expect(result.message).toContain('fullchain.crt')
-    expect(result.message).toContain('/etc/nats/tls/ca.crt')
+    expect(result.message).toContain('/etc/nats/tls')
+    expect(result.message).toContain('systemctl restart nats')
+    // Writing in place is the part that keeps a nats-owned certificate
+    // readable: a freshly created file would be root-owned.
+    expect(result.message).toContain('属主与权限不变')
   })
 
   it('withholds a certificate that fails its own verification', async () => {

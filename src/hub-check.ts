@@ -541,11 +541,12 @@ function peerChain(leaf: PeerCertificate | null | undefined): Buffer[] {
 /** The one wording for "the Hub sends its certificate, but not the CA". */
 function missingChainCa(leafSubject: string): string {
   return `Hub 只发了服务器证书（${leafSubject}），证书链里没有签发它的 CA，客户端拿不到信任锚。`
-    + '在 Hub 上让 TLS 链带上 CA 就能自动取到（CA 是公开材料，私钥 ca.key 不需要上服务器）：\n'
-    + '  scp ca.crt root@<hub-host>:/etc/nats/tls/\n'
-    + '  cat /etc/nats/tls/server.crt /etc/nats/tls/ca.crt > /etc/nats/tls/fullchain.crt\n'
-    + '  把 nats.conf 里 websocket 的 cert_file 改成 /etc/nats/tls/fullchain.crt，再 systemctl restart nats\n'
-    + '然后回到这里再点一次「从 Hub 获取 CA」。docs/03 的「让新机器一键取到 CA」有完整步骤。'
+    + '在 Hub 上把 CA 拼进正在服务的那份证书就能自动取到（CA 是公开材料，私钥 ca.key 不需要上服务器）：\n'
+    + '  scp ca.crt root@<hub-host>:/root/dsh-mobile-setup/\n'
+    + "  ssh root@<hub-host> 'cd /etc/nats/tls && cat server.crt /root/dsh-mobile-setup/ca.crt > server.crt && systemctl restart nats'\n"
+    + '  就地重写 server.crt，属主与权限不变（新建文件会让以 nats 用户运行的服务读不到证书）\n'
+    + 'nats.conf 不用改：cert_file 一直指着这个文件名。然后回到这里再点一次「从 Hub 获取 CA」。'
+    + 'docs/03 的「让新机器一键取到 CA」有幂等版本（叶子另存一份再拼），重装证书时用它。'
 }
 
 /**
