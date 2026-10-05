@@ -30,6 +30,7 @@
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isMap, isSeq, parseDocument, type Document, type YAMLMap, type YAMLSeq } from 'yaml'
+import { dependencySpec } from './update.js'
 
 /** Profile files the repair reads and rewrites (the host's `profileContext`). */
 export interface ProfileLocation {
@@ -249,14 +250,17 @@ async function readManifest(dir: string): Promise<ProfileManifest> {
 
 /**
  * The spec the profile installs this plugin with (`github:owner/repo`,
- * `link:../dsh-mobile-plugin`, …). This is what the console's update button
- * hands back to the host's plugin manager, so updating never has to guess a
- * source: it re-installs exactly what the profile already asks for.
+ * `@scope/name@^0.2.27`, `link:../dsh-mobile-plugin`, …). A registry dependency
+ * keeps only its range in the manifest, so the name comes from the manifest key
+ * (`dependencySpec`) — without that, a perfectly ordinary npm install reads as
+ * "from which source?" and the update check can only refuse. This is what the
+ * console's update button hands back to the host's plugin manager, so updating
+ * never has to guess a source: it re-installs what the profile already asks for.
  * @returns The declared spec, or null when the manifest names none.
  */
 export async function readProfileDependency(dir: string, name: string): Promise<string | null> {
   const declared = (await readManifest(dir)).dependencies?.[name]
-  return typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : null
+  return typeof declared === 'string' && declared.trim() !== '' ? dependencySpec(name, declared) : null
 }
 
 /** Replace a file in one step: a reader either sees the old or the new bytes. */

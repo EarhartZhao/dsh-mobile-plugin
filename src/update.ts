@@ -58,9 +58,18 @@ const GITHUB_ASSET_LATEST = /^(?:git\+)?https?:\/\/github\.com\/([^/\s#]+)\/([^/
 /**
  * A registry spec: a bare package name with an optional `@version` / `@range`.
  * Scoped names are allowed; a slash without a leading `@` is a GitHub
- * `owner/repo` instead, which the patterns above already claim.
+ * `owner/repo` instead, which the patterns above already claim. The range after
+ * the last `@` may carry spaces (`>=0.2.0 <0.3.0`), as npm ranges do.
  */
-const REGISTRY_SPEC = /^(@[\w.-]+\/)?([\w.-]+)(?:@(\S+))?$/u
+const REGISTRY_SPEC = /^(@[\w.-]+\/)?([\w.-]+)(?:@(.+))?$/u
+
+/**
+ * A dependency value that names its own source rather than a version range: a
+ * protocol (`github:`, `link:`, `file:`, `npm:`, `workspace:`), a URL, a path
+ * (absolute, relative, or a Windows drive), or an SSH shorthand
+ * (`git@github.com:owner/repo.git`).
+ */
+const SPEC_WITH_SOURCE = /^(?:[A-Za-z][A-Za-z0-9+.-]*:|[A-Za-z]:[\\/]|[\\/]|\.{1,2}[\\/])|^[^\s/@]+@[^\s/]+:/u
 
 /** Narrows a spec to a repository; null when it names none this code can read. */
 function repoOf(spec: string): string | null {
@@ -88,6 +97,26 @@ function assetSource(spec: string): UpdateSource | null {
     return { spec, repo: `${latest[1]}/${latest[2]}`, local: false, asset: latest[3], tag: null, registry: null }
   }
   return null
+}
+
+/**
+ * The whole spec a profile dependency denotes.
+ *
+ * `pnpm add @scope/name` records just the range it resolved to
+ * (`"@scope/name": "^0.2.27"`), so the value read out of the manifest is a
+ * fragment: handing that to {@link parseUpdateSource} on its own answers
+ * "看不出 npm 包名" for a perfectly ordinary registry install. The key holds
+ * the name, so the two halves are joined here.
+ * @param name Dependency key: the package name as the profile spells it.
+ * @param declared Dependency value, exactly as the manifest holds it.
+ * @returns A spec {@link parseUpdateSource} can read.
+ */
+export function dependencySpec(name: string, declared: string): string {
+  const value = declared.trim()
+  // A slash means the value already carries its own source (`owner/repo`, a
+  // URL, a path); a range never contains one.
+  if (value === '' || value.includes('/')) return value
+  return SPEC_WITH_SOURCE.test(value) ? value : `${name}@${value}`
 }
 
 /**

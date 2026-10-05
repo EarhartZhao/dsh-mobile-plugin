@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   compareVersions,
+  dependencySpec,
   fetchLatestRegistryVersion,
   fetchLatestTag,
   isNewerVersion,
@@ -43,6 +44,42 @@ describe('parseUpdateSource', () => {
     expect(parseUpdateSource(undefined)).toBeNull()
     expect(parseUpdateSource(null)).toBeNull()
     expect(parseUpdateSource('   ')).toBeNull()
+  })
+})
+
+describe('dependency specs read out of a profile manifest', () => {
+  it('gives a registry range the name it was declared under', () => {
+    // `pnpm add @scope/name` writes only the resolved range; the manifest key
+    // is the name. Reading the value alone used to answer "看不出 npm 包名".
+    expect(dependencySpec('@dsh-earhartzhao/dsh-mobile-plugin', '^0.2.27'))
+      .toBe('@dsh-earhartzhao/dsh-mobile-plugin@^0.2.27')
+    for (const range of ['0.2.27', '^0.2.27', '~0.2.27', '^0.2', 'latest', '*', '>=0.2.0 <0.3.0']) {
+      const spec = dependencySpec('@scope/plugin', range)
+      expect([range, parseUpdateSource(spec)?.registry]).toEqual([range, '@scope/plugin'])
+    }
+    // Which is what the update button then installs: same name, newest version.
+    const source = parseUpdateSource(dependencySpec('@scope/plugin', '^0.2.27'))!
+    expect(registrySpec(source, '0.2.28')).toBe('@scope/plugin@0.2.28')
+  })
+
+  it('leaves a value that already names its own source alone', () => {
+    for (const spec of [
+      'github:EarhartZhao/dsh-mobile-plugin',
+      'git+https://github.com/owner/repo.git',
+      'git@github.com:owner/repo.git',
+      'link:../dsh-mobile-plugin',
+      'file:./plugin.tgz',
+      'workspace:^',
+      'npm:other@1.2.3',
+      'https://github.com/owner/repo/releases/download/v0.2.25/dsh-mobile-plugin-0.2.25.tgz',
+      './plugin',
+      '/srv/plugin',
+      'C:\\plugin',
+      'owner/repo',
+      '../../../tmp/plugin',
+    ]) {
+      expect([spec, dependencySpec('@scope/plugin', spec)]).toEqual([spec, spec])
+    }
   })
 })
 

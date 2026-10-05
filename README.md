@@ -31,7 +31,7 @@
 ```bash
 pnpm add @dsh-earhartzhao/dsh-mobile-plugin
 # 或钉住某个版本：
-pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.27
+pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.28
 ```
 
 registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 重装（`registrySpec` / `updateSpec`）。
@@ -255,3 +255,5 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 2. profile 用 `nodeLinker: hoisted` 加 `link:` 引用本仓库时，pnpm 会把整个目录复制进 profile，本仓库 `node_modules` 里的符号链接在非提权的 dsh 宿主上无法重建，安装会以 `ERR_PNPM_EPERM` 失败。本仓库因此改用 `nodeLinker: hoisted`，保持目录无符号链接。
 
 0.2.27 把这个包发到 npm（组织 `dsh-earhartzhao`），包名随之从 `dsh-mobile-plugin` 改成 `@dsh-earhartzhao/dsh-mobile-plugin`，移动端 wire 不变：npm 组织只收 scoped 包，而「装 npm 包」是别的机器最省事的一条路——git 源要 `allowBuilds`，Release 资产要那台机器够得着 GitHub，registry 两者都不用。改名对已装的 profile 不是无痛的：那条覆盖行按「id + 包名断言」匹配，裸名的 `name:` 行换了包就不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 会**静默失效**，而插件在失配的那一轮里根本没被加载、无从自愈——所以换法是迁移 profile（`scripts/migrate-to-scoped.mjs`），见上文「从裸包名迁移」。
+
+0.2.28 修好 npm 装法下控制台「刷新」报「从 `^0.2.27` 看不出 GitHub 仓库或 npm 包名，无法查询最新版本」，移动端 wire 不变：pnpm 装 registry 依赖时清单里只记版本范围（`"@dsh-earhartzhao/dsh-mobile-plugin": "^0.2.27"`），而读依赖时只把**值**当 spec 交给 `parseUpdateSource`，丢掉了清单的 key（也就是包名）——于是一次普普通通的 npm 安装被当成「没说要装什么」，检查更新只能拒绝。现在读依赖时用 `dependencySpec(name, declared)` 把 key 和值拼回完整 spec（`@scope/name@^0.2.27`），值里自带来源的（`github:`、`link:`、URL、路径）原样透传；顺带放宽 registry spec，允许 range 带空格（`>=0.2.0 <0.3.0`）。旧版本只是查不了更新，装法和运行时都没问题。

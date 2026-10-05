@@ -6,6 +6,7 @@ import { isMap, isSeq, parseDocument } from 'yaml'
 import {
   migrateProfile,
   needsRepair,
+  readProfileDependency,
   readProfileShape,
   type ProfileIdentifiers,
   type ProfileLocation,
@@ -173,5 +174,34 @@ describe('migrateProfile', () => {
     expect(await readFile(location.patchPath, 'utf8')).toBe(patch)
     expect(result.shape.legacyInsert).toBe(true)
     expect(result.notes.join('\n')).toContain('分组')
+  })
+})
+
+describe('readProfileDependency', () => {
+  /** A profile manifest holding one registry dependency, as pnpm writes it. */
+  async function manifestWith(dependencies: Record<string, string>): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mobile-dep-'))
+    await writeFile(join(dir, 'package.json'), `${JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies,
+    }, undefined, 2)}\n`)
+    return dir
+  }
+
+  it('joins the manifest key to the range pnpm recorded', async () => {
+    const dir = await manifestWith({ '@dsh-earhartzhao/dsh-mobile-plugin': '^0.2.27' })
+    expect(await readProfileDependency(dir, '@dsh-earhartzhao/dsh-mobile-plugin'))
+      .toBe('@dsh-earhartzhao/dsh-mobile-plugin@^0.2.27')
+  })
+
+  it('passes a spec that names its own source through untouched', async () => {
+    const dir = await manifestWith({ 'dsh-mobile-plugin': 'github:EarhartZhao/dsh-mobile-plugin' })
+    expect(await readProfileDependency(dir, 'dsh-mobile-plugin')).toBe('github:EarhartZhao/dsh-mobile-plugin')
+  })
+
+  it('answers null when the profile does not name the package', async () => {
+    const dir = await manifestWith({})
+    expect(await readProfileDependency(dir, '@dsh-earhartzhao/dsh-mobile-plugin')).toBeNull()
   })
 })
