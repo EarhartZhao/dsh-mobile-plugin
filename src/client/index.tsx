@@ -10,12 +10,13 @@
  * `/mobile-bridge` page share one backend.
  *
  * Bundle format: lazy-CJS factory (see scripts/build-client.mjs) served by
- * the dsh client module system at /plugins/dsh-mobile-plugin/client.js.
+ * the dsh client module system at /plugins/<package name>/client.js, scoped
+ * name and all (@dsh-earhartzhao/dsh-mobile-plugin/client.js).
  */
 import { createElement } from 'react'
 
 /** The package name the Plugins page keys this bundle's configuration by. */
-const BUNDLE_NAME = 'dsh-mobile-plugin'
+const BUNDLE_NAME = '@dsh-earhartzhao/dsh-mobile-plugin'
 
 /** Props the Plugins page binds for one bundle configuration entry. */
 interface ConfigViewProps {

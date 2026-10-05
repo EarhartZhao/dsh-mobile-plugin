@@ -35,7 +35,7 @@ await build({
     'import.meta.env': JSON.stringify({ MODE: 'production' }),
   },
   banner: {
-    js: 'window.__ModuleLoader__.load({ id: "dsh-mobile-plugin", factory: (require) => { var module = { exports: {} }; var exports = module.exports;',
+    js: 'window.__ModuleLoader__.load({ id: "@dsh-earhartzhao/dsh-mobile-plugin", factory: (require) => { var module = { exports: {} }; var exports = module.exports;',
   },
   footer: {
     js: 'return module.exports; } });',

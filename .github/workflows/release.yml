@@ -79,30 +79,16 @@ jobs:
           set -euo pipefail
           pnpm run build
           pnpm pack
-          # The version-free alias is what a "always newest" URL points at.
-          cp "./dsh-mobile-plugin-$(node -p 'require("./package.json").version').tgz" dsh-mobile-plugin.tgz
-      # Optional on purpose: without the token this step says so and the run
-      # still publishes the tarball assets. A version already on the registry is
-      # left alone, so a re-run — or a release published by hand from the same
-      # tag — does not fail here.
-      - name: Publish to npm
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
           version="$(node -p 'require("./package.json").version')"
-          if [ -z "${NPM_TOKEN}" ]; then
-            echo "没有配置 NPM_TOKEN，跳过 npm 发布（GitHub Release 资产照常发布）。"
-            exit 0
-          fi
-          if npm view "dsh-mobile-plugin@${version}" version >/dev/null 2>&1; then
-            echo "npm 上已经有 ${version}，跳过。"
-            exit 0
-          fi
-          # `prepare` runs here, at publish time, not at install time: the
-          # published tarball ships `lib/`, which is why installing from the
-          # registry needs no allowBuilds approval.
-          npm publish --access public --//registry.npmjs.org/:_authToken="${NPM_TOKEN}"
+          # npm would strip the scope from a tarball name, pnpm keeps it
+          # (`@scope/name` → `scope-name-<version>.tgz`). The assets keep the
+          # historical scope-free name on purpose: installed profiles pin that
+          # name inside their update URL (`releaseAssetSpec` in src/update.ts
+          # rewrites the version in it, not the shape of it).
+          scoped="$(node -p 'const n = require("./package.json").name; n[0] === "@" ? n.slice(1).replace("/", "-") : n')"
+          mv "${scoped}-${version}.tgz" "dsh-mobile-plugin-${version}.tgz"
+          # The version-free alias is what a "always newest" URL points at.
+          cp "dsh-mobile-plugin-${version}.tgz" dsh-mobile-plugin.tgz
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,3 +103,27 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" \
             --generate-notes ${prerelease} "${assets[@]}" \
             || gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+      # Optional on purpose: without the token this step says so and the run
+      # still publishes the tarball assets. A version already on the registry is
+      # left alone, so a re-run — or a release published by hand from the same
+      # tag — does not fail here. It runs last so a rejection (a token that
+      # still wants 2FA, a scope it may not write) cannot cost the release its
+      # assets; the failure then shows up as a red step with the output above.
+      - name: Publish to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "没有配置 NPM_TOKEN，跳过 npm 发布（GitHub Release 资产照常发布）。"
+            exit 0
+          fi
+          if npm view "@dsh-earhartzhao/dsh-mobile-plugin@${version}" version >/dev/null 2>&1; then
+            echo "npm 上已经有 ${version}，跳过。"
+            exit 0
+          fi
+          # `prepare` runs here, at publish time, not at install time: the
+          # published tarball ships `lib/`, which is why installing from the
+          # registry needs no allowBuilds approval.
+          npm publish --access public --//registry.npmjs.org/:_authToken="${NPM_TOKEN}"

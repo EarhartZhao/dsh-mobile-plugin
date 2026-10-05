@@ -51,7 +51,7 @@ export type { DeviceEntry } from './tokens.js'
 export const SETTINGS_NS = 'mobile-bridge'
 
 /** Profile package and composition entry this plugin installs itself as. */
-export const PLUGIN_PACKAGE_NAME = 'dsh-mobile-plugin'
+export const PLUGIN_PACKAGE_NAME = '@dsh-earhartzhao/dsh-mobile-plugin'
 export const PLUGIN_ROW_ID = 'mobile-bridge'
 
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'

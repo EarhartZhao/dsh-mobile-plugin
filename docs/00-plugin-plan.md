@@ -73,18 +73,18 @@ phone (外网) ──wss:8443──► NATS Hub (<hub-host>, 既有)
 
 ## 安装方式（树外插件）
 
-`web` profile 支持树外插件。本包声明了 `dsh.bundle`（随包发布的 `cordis.patch.yml` 提供 `mobile-bridge` 那一行），所以 profile 侧只做三件事：声明依赖、把包名加进 `dsh.profile.bundles`、在 profile 自己的 patch 里**按 id 覆盖**该行：
+`web` profile 支持树外插件。本包声明了 `dsh.bundle`（随包发布的 `cordis.patch.yml` 提供 `mobile-bridge` 那一行），所以 profile 侧只做三件事：声明依赖、把包名加进 `dsh.profile.bundles`、在 profile 自己的 patch 里**按 id 覆盖**该行。包名 0.2.27 起是 `@dsh-earhartzhao/dsh-mobile-plugin`（发到 npm 组织就得带 scope），0.2.26 及更早是裸名 `dsh-mobile-plugin`——旧的装法照 README 的 `scripts/migrate-to-scoped.mjs` 迁移，别只重装：profile 那条覆盖行按「id + 包名断言」匹配，包名换了它就不再匹配任何条目，配置会静默失效。
 
 ```json
 // $DSH_HOME/profiles/web/package.json
-{ "dependencies": { "dsh-mobile-plugin": "link:C:/code/deepseek/dsh-mobile-plugin" },
-  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-mobile-plugin"] } } }
+{ "dependencies": { "@dsh-earhartzhao/dsh-mobile-plugin": "link:C:/code/deepseek/dsh-mobile-plugin" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@dsh-earhartzhao/dsh-mobile-plugin"] } } }
 ```
 
 ```yaml
 # $DSH_HOME/profiles/web/cordis.patch.yml
 - id: mobile-bridge
-  name: 'dsh-mobile-plugin'
+  name: '@dsh-earhartzhao/dsh-mobile-plugin'
   config:
     natsUrl: 'nats://127.0.0.1:4222'
     instanceId: 'home-pc'
@@ -112,9 +112,11 @@ pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.25/dsh-mobile-
 
 Release 资产是个普通远端 tarball，不经 git 托管路径，`prepare` 不会被调用，`allowBuilds` 也不再需要——代价是安装源从源码树变成资产，且这台机器要能访问 GitHub Release（源码 tarball 走的是 codeload，两者域名不同）。控制台的更新按钮认这种 spec：`releaseAssetSpec` 把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`dsh-mobile-plugin-0.2.24.tgz` → `dsh-mobile-plugin-0.2.25.tgz`），换 URL 也就换掉了 pnpm 的 integrity，不会拿回旧字节。带 `-rc` 的 tag 发布时标成 pre-release，`releases/latest` 因此不会指向预发布版。
 
-另外两条老路仍然可用：发到 npm，或 `pnpm pack` 出 tarball 让使用方 `add ./dsh-mobile-plugin-<version>.tgz`。本地 `link:` 引用不跑 `prepare`，所以开发机上的插件构建仍由 `pnpm run build` 决定。
+另外两条老路仍然可用：`pnpm pack` 出 tarball 让使用方 `add ./dsh-mobile-plugin-<version>.tgz`，或直接从 npm 装（见下）。本地 `link:` 引用不跑 `prepare`，所以开发机上的插件构建仍由 `pnpm run build` 决定。
 
-**发到 npm（2026-10-05 起）。** 同一个 release job 里还有一步 `npm publish`：仓库 secrets 配了 `NPM_TOKEN` 就发，没配就打印一行跳过（GitHub Release 资产照常出），npm 上已有同版本号也跳过——所以重跑发布、或者同一个 tag 先手工发过一次，都不会失败。registry 侧无需再操心 `prepare`：它在发布那一刻跑，装的人拿到的 tarball 里已经有 `lib/`。发版顺序不变：改三处版本号 → 提交 → 打 tag → 推 tag。
+**发到 npm（2026-10-05 起）。** 包名 `@dsh-earhartzhao/dsh-mobile-plugin`——npm 组织只收 scoped 包，所以 0.2.27 顺势改了名（迁移见 README 与下一段）。同一个 release job 里还有一步 `npm publish`：仓库 secrets 配了 `NPM_TOKEN` 就发，没配就打印一行跳过（GitHub Release 资产照常出），npm 上已有同版本号也跳过——所以重跑发布、或者同一个 tag 先手工发过一次，都不会失败。这一步排在「Publish release assets」**之后**，因为 token 若被 2FA/权限挡下，不该连带丢掉 Release 资产。registry 侧无需再操心 `prepare`：它在发布那一刻跑，装的人拿到的 tarball 里已经有 `lib/`。发版顺序不变：改三处版本号 → 提交 → 打 tag → 推 tag。
+
+改名的连带效应还有一处：`pnpm pack` 对 scoped 包产出 `dsh-earhartzhao-dsh-mobile-plugin-<version>.tgz`（npm 自己会去掉 scope，pnpm 不去），而 release 资产与 `releaseAssetSpec` 认的是从来不带 scope 的 `dsh-mobile-plugin-<version>.tgz` + `dsh-mobile-plugin.tgz`——老装法的更新 URL 里嵌着这个名字，改了就等于让它们更新不到。所以 `release.yml` 的 `pnpm pack` 之后会把文件名改回去再上传。
 
 凭据用 automation token（`NPM_TOKEN`）。想彻底不存 token，可以在 npmjs.com 该包的 Settings → Trusted Publisher 里登记本仓库与工作流名，再给 job 加 `id-token: write` 并去掉 token 那步——当前没走这条，因为首次发布时包还不存在。
 

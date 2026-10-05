@@ -217,7 +217,7 @@ leafnodes {
 
 ## 4. 插件侧配置
 
-在「插件」页的 `dsh-mobile-plugin` 配置区（或回环控制台 `http://127.0.0.1:3080/mobile-bridge`）填写：
+在「插件」页的 `@dsh-earhartzhao/dsh-mobile-plugin` 配置区（或回环控制台 `http://127.0.0.1:3080/mobile-bridge`）填写：
 
 | 字段 | 填什么 | 默认 |
 |---|---|---|

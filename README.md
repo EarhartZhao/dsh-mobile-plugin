@@ -13,7 +13,7 @@
 
 本仓库是**树外插件**，不在 dsh 官方 bundle 里，接入有两条路径：
 
-**一、插件页安装（推荐）。** 本包声明了 `dsh.bundle`（即随包发布的 `cordis.patch.yml`），插件页可以直接装：在「插件」页填包名、git 地址或绝对路径，宿主先 inspect spec，再交给 pnpm 安装，装好后提供「启用」。按包名安装需要先发到 npm（当前 `pnpm view dsh-mobile-plugin` 返回 404），没发布之前用 git 地址或本地路径即可。
+**一、插件页安装（推荐）。** 本包声明了 `dsh.bundle`（即随包发布的 `cordis.patch.yml`），插件页可以直接装：在「插件」页填包名、git 地址或绝对路径，宿主先 inspect spec，再交给 pnpm 安装，装好后提供「启用」。按包名安装走 npm 上的 `@dsh-earhartzhao/dsh-mobile-plugin`（见第三条），也可以填 git 地址或本地路径。
 
 **一之一、git 地址装要多一步批准构建。** 仓库里没有构建产物（`.gitignore` 忽略 `lib/`），本包用 `prepare` 脚本在安装时现场编译；pnpm ≥10 默认会拦下这个脚本，所以第一次装必然失败并打印一条 `allowBuilds` 键，把它抄进 profile 的 `pnpm-workspace.yaml` 再装一次；这条键跟着 commit 走，**每发一个新版本都会再来一次**。细节见 [00-plugin-plan.md](docs/00-plugin-plan.md#从-git-安装prepare-补上缺失的构建2026-09-30)。
 
@@ -25,17 +25,26 @@ pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2
 
 每个 Release 同时挂一份版本无关的 `dsh-mobile-plugin.tgz`，所以 `…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 会标成 pre-release，不会顶掉它）。控制台的「检查更新」对这类装法照样有效：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并换掉（`src/update.ts` 的 `releaseAssetSpec`），否则重新装同一个 URL 只会拿回旧字节。
 
-**三、npm（发布过的版本，最省事）。** 打 tag 时同一个流水线也会 `npm publish`，装的就是发布产物：
+**三、npm（发布过的版本，最省事）。** 打 tag 时同一个流水线也会 `npm publish`（包名 `@dsh-earhartzhao/dsh-mobile-plugin`，组织要求 scope），装的就是发布产物：
 
 ```bash
-pnpm add dsh-mobile-plugin          # 或 dsh-mobile-plugin@0.2.26
+pnpm add @dsh-earhartzhao/dsh-mobile-plugin          # 或 @dsh-earhartzhao/dsh-mobile-plugin@0.2.27
 ```
 
-registry 装的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在发布那一刻跑，安装时不跑，所以同样不需要任何 `allowBuilds`，而且完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」也是这条路。控制台检查更新时对 registry spec 去问 `dist-tags.latest`，再按 `dsh-mobile-plugin@<最新版>` 更新（`registrySpec` / `updateSpec`）。
+registry 装的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在发布那一刻跑，安装时不跑，所以同样不需要任何 `allowBuilds`，而且完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」也是这条路。控制台检查更新时对 registry spec 去问 `dist-tags.latest`，再按 `@dsh-earhartzhao/dsh-mobile-plugin@<最新版>` 更新（`registrySpec` / `updateSpec`）。
 
-**装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
+**四、0.2.26 及更早装的裸包名要迁移（换 scope 的代价）。** 0.2.26 之前包名是 `dsh-mobile-plugin`，0.2.27 起是 `@dsh-earhartzhao/dsh-mobile-plugin`（npm 组织只收 scoped 包）。profile 里那条覆盖行是**按 id 加包名断言**匹配的（宿主 `packages/boot/plugin-manager/README.md`：*Matching uses the entry id and any module-name assertion*），所以「重装新包」这一步本身不够：`name: 'dsh-mobile-plugin'` 那一行不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 全部静默失效——而且插件自己修不了，失配的那一轮里插件根本没被加载。停掉 dsh 后跑一次迁移脚本即可：
 
-装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是**同一个 profile patch** 里那条覆盖行的 `config:`（宿主 `configEditor` 落盘），优先于组合层；因为字段都声明为 schema-volatile，保存不会重启宿主，插件就地重建 NATS 桥。
+```bash
+# 先停掉 dsh；脚本自己会把 dsh.profile.bundles 里的裸名原地换成 scoped 名
+node scripts/migrate-to-scoped.mjs ~/.dsh/profiles/web
+```
+
+脚本做四件事：装 scoped 包、把 `dsh.profile.bundles` 里的裸名**原地**换掉（列表顺序就是配置优先级，不能改位置）、改写 profile patch 里每一处 `id: mobile-bridge` 行的 `name`（顶层覆盖行与 `insert:` 里的行都改，注释不丢）、移除旧依赖。改 patch 之前先把原文件备份成 `cordis.patch.yml.bak`（那里面有明文密码）。只改文件、安装自己负责就加 `--no-install`；换安装源用 `--spec <spec>`，默认是 npm 上的 scoped 包。
+
+**装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "@dsh-earhartzhao/dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
+
+装好后 `mobile-bridge` 这一行由包自带的 patch 提供（默认只有 `natsUrl` 与 `instanceId`，凭证留空）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: @dsh-earhartzhao/dsh-mobile-plugin` 加 `config:`，不要再套 `insert:`——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是**同一个 profile patch** 里那条覆盖行的 `config:`（宿主 `configEditor` 落盘），优先于组合层；因为字段都声明为 schema-volatile，保存不会重启宿主，插件就地重建 NATS 桥。
 
 **旧写法由插件自动修正。** 如果 profile 是用 `insert:` 手工挂的这一行（早期文档和从 `$DSH_HOME/settings.yaml.imported` 搬迁都这么写），宿主的整包与行开关都管不了它：包名不在 `dsh.profile.bundles` 里，所以整包开关是关的；行开关只在整包启用时才渲染，于是也看不到；点卸载则直接报 `bundle-in-use`，因为这一行不是组合包提供的，关掉组合包它仍然在。插件加载时会把这种形态改回组合包形态，分两步、只改 profile 的两个文件、配置值一个不丢：① 把包名补进 `dsh.profile.bundles`（这一条到下**一次启动**才生效，本次不动正在运行的行）；② 重启后行已由组合包提供，再把 profile patch 里的 `insert` 改成按 id 的覆盖行。关掉配置项 `autoMigrateProfile` 可以让插件完全不碰 profile 文件，改由控制台页上的「修复安装形态」按钮手动触发。
 
@@ -46,9 +55,9 @@ registry 装的是发包时打好的 tarball，里面已经有 `lib/`——`prep
 ```jsonc
 // package.json
 {
-  "dependencies": { "dsh-mobile-plugin": "link:<本仓库路径>" },
+  "dependencies": { "@dsh-earhartzhao/dsh-mobile-plugin": "link:<本仓库路径>" },
   "dsh": { "profile": { "bundles": [
-    "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-mobile-plugin"
+    "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@dsh-earhartzhao/dsh-mobile-plugin"
   ] } }
 }
 ```
@@ -56,7 +65,7 @@ registry 装的是发包时打好的 tarball，里面已经有 `lib/`——`prep
 ```yaml
 # cordis.patch.yml：这一行由组合包提供，这里只覆盖它的配置
 - id: mobile-bridge
-  name: dsh-mobile-plugin
+  name: '@dsh-earhartzhao/dsh-mobile-plugin'
   config:
     natsUrl: 'nats://127.0.0.1:4222'
     hubWssUrl: 'wss://<hub-host>:8443'
@@ -149,11 +158,13 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 1. dsh 0.1.7 起把插件配置从「设置」搬到了侧边栏的「插件」页，`settings.plugin.item` 槽位退役。浏览器半边改为注册进 `plugins.bundle.config`（以包名 `dsh-mobile-plugin` 为 key），渲染在 bundle 详情页的配置区；`dsh.client.inject` 相应改为 `@deepseek-ai/dsh-client-ui-plugin-manager`。
 2. profile 用 `nodeLinker: hoisted` 加 `link:` 引用本仓库时，pnpm 会把整个目录复制进 profile，本仓库 `node_modules` 里的符号链接在非提权的 dsh 宿主上无法重建，安装会以 `ERR_PNPM_EPERM` 失败。本仓库因此改用 `nodeLinker: hoisted`，保持目录无符号链接。
 
+0.2.27 把这个包发到 npm（组织 `dsh-earhartzhao`），包名随之从 `dsh-mobile-plugin` 改成 `@dsh-earhartzhao/dsh-mobile-plugin`，移动端 wire 不变：npm 组织只收 scoped 包，而「装 npm 包」是别的机器最省事的一条路——git 源要 `allowBuilds`，Release 资产要那台机器够得着 GitHub，registry 两者都不用。改名对已装的 profile 不是无痛的：那条覆盖行按「id + 包名断言」匹配，裸名的 `name:` 行换了包就不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 会**静默失效**，而插件在失配的那一轮里根本没被加载、无从自愈——所以换法是迁移 profile（`scripts/migrate-to-scoped.mjs`），见 README「安装与接入」第四条。
+
 ## 首次配置（顺序不能颠倒）
 
 手机连 Hub 用的是**插件里配置的 Hub 账号凭证**——它随配对二维码下发，App 不内置任何账号。所以首次必须先配置、再发码：
 
-1. 打开**侧边栏 → 插件 → `dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码，并把 Hub 的 `ca.crt` 粘进 CA 字段后保存。密码是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"（点「显示」时才走一次 `/api/reveal`）。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
+1. 打开**侧边栏 → 插件 → `@dsh-earhartzhao/dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`），填写 Hub 地址、账号、密码，并把 Hub 的 `ca.crt` 粘进 CA 字段后保存。密码是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"（点「显示」时才走一次 `/api/reveal`）。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
 2. 确认状态为「已连接」（本地 NATS 就绪）。
 3. 再点「生成配对二维码」。
 

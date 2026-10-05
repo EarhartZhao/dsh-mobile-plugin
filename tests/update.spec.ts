@@ -81,12 +81,13 @@ describe('prebuilt release assets', () => {
 
 describe('registry installs', () => {
   it('reads a bare package name, with or without a version', () => {
-    for (const spec of ['dsh-mobile-plugin', 'dsh-mobile-plugin@0.2.26', 'dsh-mobile-plugin@^0.2.0']) {
-      expect([spec, parseUpdateSource(spec)?.registry]).toEqual([spec, 'dsh-mobile-plugin'])
+    for (const spec of ['@dsh-earhartzhao/dsh-mobile-plugin', '@dsh-earhartzhao/dsh-mobile-plugin@0.2.27', '@dsh-earhartzhao/dsh-mobile-plugin@^0.2.0']) {
+      expect([spec, parseUpdateSource(spec)?.registry]).toEqual([spec, '@dsh-earhartzhao/dsh-mobile-plugin'])
     }
-    expect(parseUpdateSource('@scope/plugin@1.0.0')?.registry).toBe('@scope/plugin')
+    // A bare name is still a registry spec, so an old install keeps updating.
+    expect(parseUpdateSource('dsh-mobile-plugin@0.2.26')?.registry).toBe('dsh-mobile-plugin')
     // A registry install has no repository, and asking for a tag would fail.
-    expect(parseUpdateSource('dsh-mobile-plugin')?.repo).toBeNull()
+    expect(parseUpdateSource('@dsh-earhartzhao/dsh-mobile-plugin')?.repo).toBeNull()
   })
 
   it('still reads owner/repo as a repository, not as a package name', () => {
@@ -94,9 +95,9 @@ describe('registry installs', () => {
   })
 
   it('updates the same package name at the newest version', () => {
-    const source = parseUpdateSource('dsh-mobile-plugin@^0.2.0')!
-    expect(registrySpec(source, '0.2.26')).toBe('dsh-mobile-plugin@0.2.26')
-    expect(updateSpec(source, '0.2.26')).toBe('dsh-mobile-plugin@0.2.26')
+    const source = parseUpdateSource('@dsh-earhartzhao/dsh-mobile-plugin@^0.2.0')!
+    expect(registrySpec(source, '0.2.27')).toBe('@dsh-earhartzhao/dsh-mobile-plugin@0.2.27')
+    expect(updateSpec(source, '0.2.27')).toBe('@dsh-earhartzhao/dsh-mobile-plugin@0.2.27')
   })
 
   it('dispatches by install shape, so no shape is forgotten by the update button', () => {
@@ -114,14 +115,14 @@ describe('fetchLatestRegistryVersion', () => {
 
   it('reads dist-tags.latest off the registry document', async () => {
     const seen: string[] = []
-    const version = await fetchLatestRegistryVersion('dsh-mobile-plugin', {
+    const version = await fetchLatestRegistryVersion('@dsh-earhartzhao/dsh-mobile-plugin', {
       fetch: (async (url: string | URL | Request) => {
         seen.push(String(url))
-        return jsonResponse({ 'dist-tags': { latest: '0.2.26', next: '0.3.0-rc.1' } })
+        return jsonResponse({ 'dist-tags': { latest: '0.2.27', next: '0.3.0-rc.1' } })
       }) as typeof fetch,
     })
-    expect(version).toBe('0.2.26')
-    expect(seen[0]).toBe('https://registry.npmjs.org/dsh-mobile-plugin')
+    expect(version).toBe('0.2.27')
+    expect(seen[0]).toBe('https://registry.npmjs.org/@dsh-earhartzhao/dsh-mobile-plugin')
   })
 
   it('refuses a latest tag that is not a version, instead of offering it', async () => {

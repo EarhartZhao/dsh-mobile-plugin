@@ -1,6 +1,6 @@
 {
-  "name": "dsh-mobile-plugin",
-  "version": "0.2.26",
+  "name": "@dsh-earhartzhao/dsh-mobile-plugin",
+  "version": "0.2.27",
   "description": "dsh-mobile bridge: NATS outbound bridge plugin for deepseek-harness (mobile client transport, pairing, device tokens)",
   "type": "module",
   "main": "lib/index.js",
@@ -30,6 +30,9 @@
     "lib",
     "cordis.patch.yml"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "prepare": "pnpm run build",

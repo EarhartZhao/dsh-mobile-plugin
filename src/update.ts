@@ -11,8 +11,9 @@
  * fork (or a pinned tag) updates from its own source. Tags stay the version
  * source even when the install came from a prebuilt release asset: the asset
  * only decides *where bytes come from*, never which version is newest.
- * A registry install (`dsh-mobile-plugin@0.2.26`) asks npm for the newest
- * version instead, since a published tarball carries no repository identity.
+ * A registry install (`@dsh-earhartzhao/dsh-mobile-plugin@0.2.27`) asks npm for
+ * the newest version instead, since a published tarball carries no repository
+ * identity.
  */
 
 /** Where this install came from, as the profile's manifest declares it. */
@@ -37,7 +38,7 @@ export interface UpdateSource {
   readonly tag: string | null
   /**
    * npm package name when the profile installs from the registry
-   * (`dsh-mobile-plugin`, `dsh-mobile-plugin@0.2.26`), else null. Installing
+   * (`@dsh-earhartzhao/dsh-mobile-plugin`, or the older bare name), else null. Installing
    * this way runs no build script at all — the published tarball already
    * carries `lib/` — so it needs no `allowBuilds` approval, and
    * {@link fetchLatestRegistryVersion} is what answers "which version is newest".
@@ -148,7 +149,7 @@ export function releaseAssetSpec(source: UpdateSource, tag: string): string {
  * The spec an update should install for a registry install: the same package
  * name at the newest published version.
  * @param source Where this install came from.
- * @param version Version to install, as npm names it (`0.2.26`).
+ * @param version Version to install, as npm names it (`0.2.27`).
  * @returns The spec to hand to the host's plugin manager.
  */
 export function registrySpec(source: UpdateSource, version: string): string {

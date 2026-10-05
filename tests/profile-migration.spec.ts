@@ -12,16 +12,16 @@ import {
 } from '../src/profile-migration.js'
 
 const ids: ProfileIdentifiers = {
-  packageName: 'dsh-mobile-plugin',
+  packageName: '@dsh-earhartzhao/dsh-mobile-plugin',
   rowId: 'mobile-bridge',
-  rowName: 'dsh-mobile-plugin',
+  rowName: '@dsh-earhartzhao/dsh-mobile-plugin',
 }
 
 /** The shape a hand-written profile ends up with: the row lives in the patch. */
 const legacyPatch = `# Your patch layer for this dsh profile.
 - insert:
     - id: mobile-bridge
-      name: 'dsh-mobile-plugin'
+      name: '@dsh-earhartzhao/dsh-mobile-plugin'
       config:
         natsUrl: 'nats://127.0.0.1:4222'
         hubUser: 'c-end-test'
@@ -37,7 +37,7 @@ const legacyPatch = `# Your patch layer for this dsh profile.
 
 /** The shape the host's own Plugins page writes. */
 const migratedPatch = `- id: mobile-bridge
-  name: 'dsh-mobile-plugin'
+  name: '@dsh-earhartzhao/dsh-mobile-plugin'
   config:
     natsUrl: 'nats://127.0.0.1:4222'
   disabled: false
@@ -53,7 +53,7 @@ async function fixture(patch: string, bundles: readonly string[] = ['@deepseek-a
   await writeFile(join(dir, 'package.json'), `${JSON.stringify({
     name: 'dsh-profile-web',
     private: true,
-    dependencies: { 'dsh-mobile-plugin': 'github:EarhartZhao/dsh-mobile-plugin' },
+    dependencies: { '@dsh-earhartzhao/dsh-mobile-plugin': 'github:EarhartZhao/dsh-mobile-plugin' },
     dsh: { profile: { bundles: [...bundles], patchReload: 'live' } },
   }, undefined, 2)}\n`)
   return {
@@ -76,7 +76,7 @@ describe('readProfileShape', () => {
   })
 
   it('accepts the shape the host writes, with nothing left to repair', async () => {
-    const { location } = await fixture(migratedPatch, ['@deepseek-ai/dsh-base', 'dsh-mobile-plugin'])
+    const { location } = await fixture(migratedPatch, ['@deepseek-ai/dsh-base', '@dsh-earhartzhao/dsh-mobile-plugin'])
     const shape = await readProfileShape(location, ids)
     expect(shape).toEqual({ bundleListed: true, legacyInsert: false, overrideRow: true })
     expect(needsRepair(shape)).toBe(false)
@@ -99,14 +99,14 @@ describe('migrateProfile', () => {
     // before the bundle layer is composed would unmount the running one.
     expect(result.changed).toEqual([join(location.dir, 'package.json')])
     expect(await readFile(location.patchPath, 'utf8')).toBe(before)
-    expect(bundles(await manifest())).toEqual(['@deepseek-ai/dsh-base', 'dsh-mobile-plugin'])
+    expect(bundles(await manifest())).toEqual(['@deepseek-ai/dsh-base', '@dsh-earhartzhao/dsh-mobile-plugin'])
     expect(result.pendingRestart).toBe(true)
     expect(result.shape).toEqual({ bundleListed: true, legacyInsert: true, overrideRow: true })
     expect(result.notes.join('\n')).toContain('重启 dsh')
   })
 
   it('lifts the row into an override once the bundle is live, keeping its config', async () => {
-    const { location, manifest } = await fixture(legacyPatch, ['@deepseek-ai/dsh-base', 'dsh-mobile-plugin'])
+    const { location, manifest } = await fixture(legacyPatch, ['@deepseek-ai/dsh-base', '@dsh-earhartzhao/dsh-mobile-plugin'])
     const result = await migrateProfile(location, ids, { removeInsert: true })
     const text = await readFile(location.patchPath, 'utf8')
 
@@ -117,7 +117,7 @@ describe('migrateProfile', () => {
     expect(text.indexOf('# Your patch layer')).toBeLessThan(text.indexOf('- id: mobile-bridge'))
     expect(text).not.toContain('insert:')
     expect(text).toContain("hubPass: 'secret'")
-    expect(bundles(await manifest())).toEqual(['@deepseek-ai/dsh-base', 'dsh-mobile-plugin'])
+    expect(bundles(await manifest())).toEqual(['@deepseek-ai/dsh-base', '@dsh-earhartzhao/dsh-mobile-plugin'])
 
     // One row per id: the host files its later edits into the last match, so a
     // duplicate left behind would make the file lie about where config lives.
@@ -130,7 +130,7 @@ describe('migrateProfile', () => {
   })
 
   it('is idempotent: a second pass rewrites nothing', async () => {
-    const { location } = await fixture(legacyPatch, ['dsh-mobile-plugin'])
+    const { location } = await fixture(legacyPatch, ['@dsh-earhartzhao/dsh-mobile-plugin'])
     await migrateProfile(location, ids, { removeInsert: true })
     const settled = await readFile(location.patchPath, 'utf8')
     const second = await migrateProfile(location, ids, { removeInsert: true })
@@ -146,11 +146,11 @@ describe('migrateProfile', () => {
     - id: telemetry
       name: '@deepseek-ai/dsh-telemetry'
     - id: mobile-bridge
-      name: dsh-mobile-plugin
+      name: '@dsh-earhartzhao/dsh-mobile-plugin'
       config:
         instanceId: 'home-test'
 `
-    const { location } = await fixture(patch, ['dsh-mobile-plugin'])
+    const { location } = await fixture(patch, ['@dsh-earhartzhao/dsh-mobile-plugin'])
     await migrateProfile(location, ids, { removeInsert: true })
     const text = await readFile(location.patchPath, 'utf8')
 
@@ -165,9 +165,9 @@ describe('migrateProfile', () => {
     const patch = `- id: some-group
   insert:
     - id: mobile-bridge
-      name: dsh-mobile-plugin
+      name: '@dsh-earhartzhao/dsh-mobile-plugin'
 `
-    const { location } = await fixture(patch, ['dsh-mobile-plugin'])
+    const { location } = await fixture(patch, ['@dsh-earhartzhao/dsh-mobile-plugin'])
     const result = await migrateProfile(location, ids, { removeInsert: true })
 
     expect(await readFile(location.patchPath, 'utf8')).toBe(patch)
