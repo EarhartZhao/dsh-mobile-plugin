@@ -9,7 +9,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
-import type { MobileBridge } from './index.js'
+import type { MobileBridge, UpdateReport } from './index.js'
 import type { Config } from './config.js'
 import { checkHubCertificate, checkHubPath, normalizeHubWssUrl, type HubCheckResult } from './hub-check.js'
 import { readHubCa } from './hub-ca.js'
@@ -47,6 +47,10 @@ export interface ConsoleBackend {
   repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
   checkHub?: (config: Config) => Promise<HubCheckResult>
+  /** Ask GitHub for the newest version tag and compare it with the running one. */
+  checkUpdate?: () => Promise<UpdateReport>
+  /** Install the newest version through the host's plugin manager. */
+  applyUpdate?: () => Promise<UpdateReport>
 }
 
 /** Install-shape report produced by the plugin's own repair (`ProfileMigrationStatus`). */
@@ -276,6 +280,44 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         }
       },
     }),
+    // Checking reaches GitHub, which is a read: no console header needed, the
+    // same shape as hub-check. It never installs anything.
+    webServer.register({
+      kind: 'exact',
+      path: '/mobile-bridge/api/update/check',
+      handler: async (req, res) => {
+        const rejected = consoleRequestRejection(req, { mutating: false })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
+        if (backend.checkUpdate === undefined) {
+          return json(res, 400, { error: '这个宿主没有实现版本检查。' })
+        }
+        try {
+          json(res, 200, await backend.checkUpdate())
+        } catch (error) {
+          json(res, 400, { error: String(error) })
+        }
+      },
+    }),
+    // Installing rewrites the profile's dependency and runs pnpm, so it is a
+    // state change: POST, console header, JSON body, like the other writes.
+    webServer.register({
+      kind: 'exact',
+      path: '/mobile-bridge/api/update/apply',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        const rejected = consoleRequestRejection(req, { mutating: true })
+        if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
+        if (backend.applyUpdate === undefined) {
+          return json(res, 400, { error: '这个宿主没有实现插件更新。' })
+        }
+        try {
+          const report = await backend.applyUpdate()
+          json(res, report.phase === 'failed' ? 400 : 200, report)
+        } catch (error) {
+          json(res, 400, { error: String(error) })
+        }
+      },
+    }),
     webServer.register({
       kind: 'exact',
       path: '/mobile-bridge/api/pair',
@@ -468,6 +510,14 @@ const CONSOLE_HTML = `<!doctype html>
   <dt>最近错误</dt><dd id="lastError">无</dd>
 </dl>
 
+<h2>插件更新</h2>
+<div class="row">
+  <button id="updateCheckBtn" class="secondary">刷新</button>
+  <button id="updateApplyBtn" hidden>更新</button>
+  <span id="updateMsg"></span>
+</div>
+<p id="updateHint" style="font-size:12px;opacity:.7;margin:6px 0 0;white-space:pre-line"></p>
+
 <h2>服务器信息（NATS Hub）</h2>
 <p style="font-size:12px;opacity:.7;margin:0 0 4px">配对二维码里带的就是这里的地址与账号凭证，手机靠它连 Hub，因此三项都必须先填写并保存，否则二维码扫了也连不上。地址可以只填主机或 IP，缺端口按 8443 补。</p>
 <label>Hub 地址（wss://…:8443）</label><input id="hubWssUrl" placeholder="wss://203.0.113.10:8443">
@@ -617,6 +667,9 @@ async function refreshStatus() {
     $('lastError').textContent = s.lastError || '无'
     renderProfile(s.profile)
     renderLocalNats(s.localNats)
+    // A check or an install in flight owns the panel until it answers, so the
+    // poll must not repaint over "正在更新…" with the last stored report.
+    if (!updateBusy) renderUpdate(s.update)
     // Prefill only while the field is untouched; a poll every 5s must not
     // paste over an edit in progress (see prefill).
     prefill('hubWssUrl', s.config.hubWssUrl)
@@ -710,6 +763,65 @@ function renderProfile(profile) {
     || shape === null
   const notes = profile && Array.isArray(profile.notes) ? profile.notes : []
   $('profileNotes').textContent = notes.join('\\n')
+}
+
+/**
+ * What the version panel shows. The update button only exists while a check
+ * has found something newer: an always-present button that mostly answers
+ * "已是最新" trains the owner to ignore it, and there is nothing to press
+ * between checks anyway.
+ */
+let updateBusy = false
+
+function renderUpdate(u) {
+  if (!u) return
+  const apply = $('updateApplyBtn')
+  const newer = u.updatable === true
+  apply.hidden = !newer
+  if (newer) apply.textContent = '更新到 ' + (u.latest || '最新版本')
+  const text = u.message || u.reason || ''
+  $('updateMsg').className = u.phase === 'failed' ? 'error' : (u.phase === 'restart-required' ? 'ok' : '')
+  $('updateMsg').textContent = text
+  // The reason explains a missing update button ("有新版本，但这个宿主没有插件
+  // 管理器"); it is the same sentence as the message on a failed check, and
+  // repeating it twice reads like two problems.
+  $('updateHint').textContent = u.reason && u.reason !== text ? u.reason : ''
+}
+
+$('updateCheckBtn').onclick = async () => {
+  updateBusy = true
+  $('updateCheckBtn').disabled = true
+  $('updateMsg').className = ''; $('updateMsg').textContent = '正在获取最新版本…'
+  $('updateHint').textContent = ''
+  try {
+    const r = await api('update/check')
+    if (r.error) { $('updateApplyBtn').hidden = true; $('updateMsg').className = 'error'; $('updateMsg').textContent = r.error; return }
+    renderUpdate(r)
+  } catch (error) {
+    $('updateMsg').className = 'error'; $('updateMsg').textContent = String(error)
+  } finally {
+    updateBusy = false
+    $('updateCheckBtn').disabled = false
+  }
+}
+
+$('updateApplyBtn').onclick = async () => {
+  updateBusy = true
+  $('updateCheckBtn').disabled = true
+  $('updateApplyBtn').disabled = true
+  $('updateMsg').className = ''; $('updateMsg').textContent = '正在更新…'
+  $('updateHint').textContent = ''
+  try {
+    const r = await api('update/apply', {})
+    if (r.error) { $('updateMsg').className = 'error'; $('updateMsg').textContent = r.error; return }
+    renderUpdate(r)
+  } catch (error) {
+    $('updateMsg').className = 'error'; $('updateMsg').textContent = String(error)
+  } finally {
+    updateBusy = false
+    $('updateCheckBtn').disabled = false
+    $('updateApplyBtn').disabled = false
+  }
 }
 
 /** Device names come from the pairing client, so they are data, not markup. */

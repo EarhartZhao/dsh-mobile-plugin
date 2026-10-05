@@ -247,6 +247,18 @@ async function readManifest(dir: string): Promise<ProfileManifest> {
   }
 }
 
+/**
+ * The spec the profile installs this plugin with (`github:owner/repo`,
+ * `link:../dsh-mobile-plugin`, …). This is what the console's update button
+ * hands back to the host's plugin manager, so updating never has to guess a
+ * source: it re-installs exactly what the profile already asks for.
+ * @returns The declared spec, or null when the manifest names none.
+ */
+export async function readProfileDependency(dir: string, name: string): Promise<string | null> {
+  const declared = (await readManifest(dir)).dependencies?.[name]
+  return typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : null
+}
+
 /** Replace a file in one step: a reader either sees the old or the new bytes. */
 async function writeFileAtomic(path: string, content: string): Promise<void> {
   const temporary = `${path}.${process.pid}.tmp`

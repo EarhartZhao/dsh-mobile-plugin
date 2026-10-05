@@ -29,11 +29,13 @@ import { natsEndpoint, probePort, resolveLeafConfig, resolveNatsServer, type Loc
 import {
   migrateProfile,
   needsRepair,
+  readProfileDependency,
   readProfileShape,
   type ProfileIdentifiers,
   type ProfileLocation,
   type ProfileShape,
 } from './profile-migration.js'
+import { fetchLatestTag, isNewerVersion, parseUpdateSource } from './update.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -124,6 +126,48 @@ interface ProfileContextLike {
   startedBundles: readonly string[]
 }
 
+/**
+ * Structural view of the host's plugin manager (`ctx.pluginManager`) — the
+ * service behind the Plugins page. The update button hands it the spec the
+ * profile already declares, so pnpm resolves and builds the package exactly as
+ * it did on install; nothing here downloads or unpacks anything itself.
+ */
+interface PluginManagerLike {
+  installBundle(spec: string, options?: {
+    enabled?: boolean
+    requestId?: string
+  }): Promise<PluginChangeResult>
+}
+
+/** The part of the manager's result this plugin reports. */
+interface PluginChangeResult {
+  application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  error?: { code?: string, diagnostic?: string }
+  packageResult?: { exitCode?: number, output?: string }
+}
+
+/** One version check's outcome, as the console renders it. */
+export interface UpdateReport {
+  /** Version this process is running. */
+  current: string
+  /** Spec the profile installs the package with, when it can be read. */
+  spec: string | null
+  /** Repository the spec names, when it names one. */
+  repo: string | null
+  /** Newest version tag GitHub reports; null before a check, or when none parsed. */
+  latest: string | null
+  /** Whether `latest` is newer than {@link current}. */
+  newer: boolean
+  /** Whether pressing update can do anything (newer, a repository, and a manager). */
+  updatable: boolean
+  /** Why {@link updatable} is false, or why the last check failed. */
+  reason: string | null
+  checkedAt: string | null
+  /** What the last update did. */
+  phase: 'idle' | 'checking' | 'installing' | 'restart-required' | 'failed'
+  message: string
+}
+
 /** How the profile mounts this plugin's row, as the console reports it. */
 export interface ProfileMigrationStatus {
   state: 'unknown' | 'ok' | 'migrated' | 'awaiting-restart' | 'disabled' | 'unavailable' | 'error'
@@ -177,6 +221,30 @@ export function sameConfig(left: Config, right: Config): boolean {
     && left.natsConfigPath === right.natsConfigPath
     && left.natsServerPath === right.natsServerPath
     && left.autoMigrateProfile === right.autoMigrateProfile
+}
+
+/**
+ * Why the plugin manager refused an update, or null when it went through.
+ *
+ * The manager reports a failure as a bare `application` code plus whatever
+ * pnpm printed, and the console cannot act on either on its own: the exit code
+ * says nothing, and the output's last lines are the only part that names the
+ * real cause (a missing repository, a prepare that threw). Fold both into one
+ * line the owner can read.
+ */
+function updateFailure(result: PluginChangeResult): string | null {
+  if (result.application === 'applied' || result.application === 'restart-required') return null
+  const lines: string[] = []
+  const diagnostic = result.error?.diagnostic ?? result.error?.code
+  if (typeof diagnostic === 'string' && diagnostic.trim() !== '') lines.push(diagnostic.trim())
+  const output = result.packageResult?.output
+  if (typeof output === 'string' && output.trim() !== '') {
+    const tail = output.trim().split('\n').slice(-6).join('\n')
+    if (!lines.some(line => line.includes(tail))) lines.push(tail)
+  }
+  const detail = lines.join('\n')
+  const verdict = result.application === 'cancelled' ? '更新被取消' : '更新失败'
+  return detail === '' ? verdict : `${verdict}：${detail}`
 }
 
 export class MobileBridge extends Service {
@@ -242,6 +310,16 @@ export class MobileBridge extends Service {
       this.applyConfig(configValues(this.raw))
     })
 
+    // The long half of an update is pnpm fetching and building the package, so
+    // the phase the manager reports is what the console shows while it waits.
+    ctx.on('plugin-manager/install-state', ({ requestId, phase }) => {
+      if (requestId !== this.updateRequestId) return
+      this.update = {
+        ...this.update,
+        message: phase === 'applying' ? '正在应用新版本…' : '正在下载并构建新版本…',
+      }
+    })
+
     // Loopback console routes when a webserver is in the composition (web profile).
     ctx.inject(['webServer'], (sctx) => {
       const webServer = sctx.get('webServer') as unknown as WebRouter
@@ -252,6 +330,8 @@ export class MobileBridge extends Service {
         startNats: () => this.startLocalNats(),
         localNats: () => this.localNatsInfo(),
         repairProfile: () => this.repairProfileShape(true),
+        checkUpdate: () => this.checkUpdate(),
+        applyUpdate: () => this.applyUpdate(),
       })
     })
 
@@ -282,6 +362,14 @@ export class MobileBridge extends Service {
       })
     })
 
+    // Version checks and updates go through the host's own plugin manager, the
+    // same pnpm path the Plugins page uses. Optional: a host without it (or a
+    // headless composition) still runs, the console just reports why it cannot
+    // update itself.
+    ctx.inject(['pluginManager'], (sctx) => {
+      this.pluginManager = sctx.get('pluginManager') as unknown as PluginManagerLike
+    })
+
     ctx.effect(() => {
       this.wantRunning = true
       void this.kick()
@@ -294,7 +382,23 @@ export class MobileBridge extends Service {
 
   private settings: SettingsService | null = null
   private profile: ProfileContextLike | null = null
+  private pluginManager: PluginManagerLike | null = null
   private profileMigration: ProfileMigrationStatus = { state: 'unknown', shape: null, notes: [] }
+  /** The request id of the update in flight, so install-state events match it. */
+  private updateRequestId: string | null = null
+  /** Last version check and update outcome; starts unchecked. */
+  private update: UpdateReport = {
+    current: PLUGIN_VERSION,
+    spec: null,
+    repo: null,
+    latest: null,
+    newer: false,
+    updatable: false,
+    reason: null,
+    checkedAt: null,
+    phase: 'idle',
+    message: '',
+  }
 
   /** Effective config (settings user layer over the composition entry). */
   get activeConfig(): Config {
@@ -361,6 +465,7 @@ export class MobileBridge extends Service {
     lastReconnectAt: string | null
     lastError: string | null
     profile: ProfileMigrationStatus
+    update: UpdateReport
   } {
     return {
       connection: this.connectionStatus,
@@ -378,6 +483,7 @@ export class MobileBridge extends Service {
       lastReconnectAt: this.lastReconnectAt,
       lastError: this.lastError,
       profile: this.profileMigration,
+      update: this.update,
     }
   }
 
@@ -458,6 +564,121 @@ export class MobileBridge extends Service {
   private recordMigration(status: ProfileMigrationStatus): ProfileMigrationStatus {
     this.profileMigration = status
     return status
+  }
+
+  /**
+   * What the console's version panel shows. Read-only; the check itself is
+   * {@link checkUpdate}, which the owner triggers from the page.
+   */
+  get updateState(): UpdateReport {
+    return this.update
+  }
+
+  /**
+   * Ask GitHub for the newest version tag of the repository this install came
+   * from, and compare it with the running version.
+   *
+   * A failed check is reported, never smoothed over: "已是最新版本" is exactly
+   * the wrong answer for a rate limit, a typo'd repository, or a machine with
+   * no route to GitHub, and each of those has a different fix.
+   * @returns The report now stored for `/api/status` (also returned to the caller).
+   */
+  async checkUpdate(): Promise<UpdateReport> {
+    this.update = { ...this.update, phase: 'checking', message: '正在获取最新版本…', reason: null }
+    const profile = this.profile
+    try {
+      const spec = profile === null
+        ? null
+        : await readProfileDependency(profile.dir, PLUGIN_PACKAGE_NAME).catch(() => null)
+      const source = parseUpdateSource(spec)
+      if (source === null) {
+        throw new Error(profile === null
+          ? '这个进程没有 profileContext，读不到安装来源。'
+          : `profile 的 package.json 里没有 ${PLUGIN_PACKAGE_NAME} 依赖，无法确定更新来源。`)
+      }
+      if (source.local) {
+        throw new Error(`这个 profile 用本地路径安装（${source.spec}），请在源码目录 git pull 后重启 dsh。`)
+      }
+      if (source.repo === null) {
+        throw new Error(`从 ${source.spec} 看不出 GitHub 仓库，无法查询最新版本。`)
+      }
+      const latest = await fetchLatestTag(source.repo)
+      if (latest === null) throw new Error(`${source.repo} 上没有版本 tag。`)
+      const newer = isNewerVersion(latest, PLUGIN_VERSION)
+      const blocked = this.pluginManager === null
+        ? '这个宿主没有插件管理器，请用 dsh 的插件页更新。'
+        : null
+      this.update = {
+        current: PLUGIN_VERSION,
+        spec: source.spec,
+        repo: source.repo,
+        latest,
+        newer,
+        updatable: newer && blocked === null,
+        reason: newer ? blocked : null,
+        checkedAt: new Date().toISOString(),
+        phase: 'idle',
+        message: newer ? `发现新版本 ${latest}。` : `已是最新版本（${PLUGIN_VERSION}）。`,
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.update = {
+        ...this.update,
+        latest: null,
+        newer: false,
+        updatable: false,
+        reason: message,
+        checkedAt: new Date().toISOString(),
+        phase: 'failed',
+        message,
+      }
+    }
+    return this.update
+  }
+
+  /**
+   * Install the newest version through the host's plugin manager.
+   *
+   * The spec handed over is the profile's own dependency line, so pnpm does
+   * exactly what an install does — resolve, fetch, run `prepare` — and the
+   * running process keeps the code it booted with until dsh restarts. That
+   * restart is the answer the owner gets, not a hidden failure.
+   * @returns The report now stored for `/api/status`.
+   */
+  async applyUpdate(): Promise<UpdateReport> {
+    const current = this.update
+    if (current.spec === null || !current.updatable) {
+      this.update = { ...current, phase: 'failed', message: current.reason ?? '当前没有可用的更新，请先刷新版本。' }
+      return this.update
+    }
+    const manager = this.pluginManager
+    if (manager === null) {
+      this.update = { ...current, phase: 'failed', message: '这个宿主没有插件管理器，请用 dsh 的插件页更新。' }
+      return this.update
+    }
+    const requestId = `dsh-mobile-update-${Date.now()}`
+    this.updateRequestId = requestId
+    this.update = { ...current, phase: 'installing', message: `正在更新到 ${current.latest ?? '最新版本'}…` }
+    try {
+      const result = await manager.installBundle(current.spec, { enabled: true, requestId })
+      const failure = updateFailure(result)
+      this.update = failure === null
+        ? {
+            ...this.update,
+            newer: false,
+            updatable: false,
+            phase: 'restart-required',
+            message: `新版本已经装好，重启 dsh 后生效（当前运行的是 ${PLUGIN_VERSION}）。`,
+          }
+        : { ...this.update, newer: true, updatable: true, phase: 'failed', message: failure }
+      return this.update
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.update = { ...this.update, newer: true, updatable: true, phase: 'failed', message: `更新失败：${message}` }
+      return this.update
+    } finally {
+      this.updateRequestId = null
+    }
   }
 
   async revokeDevice(deviceId: string): Promise<boolean> {

@@ -258,6 +258,65 @@ describe('console pairing route', () => {
 })
 
 describe('console page', () => {
+  const report = {
+    current: '0.2.24',
+    spec: 'github:EarhartZhao/dsh-mobile-plugin',
+    repo: 'EarhartZhao/dsh-mobile-plugin',
+    latest: '0.2.25',
+    newer: true,
+    updatable: true,
+    reason: null,
+    checkedAt: '2026-10-05T00:00:00.000Z',
+    phase: 'idle',
+    message: '发现新版本 0.2.25。',
+  }
+
+  it('shows only the refresh button until a check finds a newer version', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('id="updateCheckBtn"')
+    // The update button is hidden in the markup and only revealed by a check,
+    // so a fresh page never offers an update it has not found.
+    expect(html).toContain('id="updateApplyBtn" hidden')
+    expect(html).toContain("api('update/check')")
+    expect(html).toContain("api('update/apply', {})")
+  })
+
+  it('checks the newest version through its own route', async () => {
+    const route = captureRoutes(baseConfig, undefined, { checkUpdate: () => Promise.resolve(report) })
+      .get('/mobile-bridge/api/update/check')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+
+    expect(call.status()).toBe(200)
+    expect(call.json()).toMatchObject({ latest: '0.2.25', updatable: true })
+  })
+
+  it('installs the newest version through its own route', async () => {
+    const route = captureRoutes(baseConfig, undefined, {
+      applyUpdate: () => Promise.resolve({ ...report, newer: false, updatable: false, phase: 'restart-required', message: '重启 dsh 后生效' }),
+    }).get('/mobile-bridge/api/update/apply')!
+    const call = exchange('127.0.0.1', 'POST')
+    await route(call.req, call.res)
+
+    expect(call.status()).toBe(200)
+    expect(call.json().phase).toBe('restart-required')
+  })
+
+  it('answers a failed update with a 400 and the reason', async () => {
+    const route = captureRoutes(baseConfig, undefined, {
+      applyUpdate: () => Promise.resolve({ ...report, phase: 'failed', message: '更新失败：pnpm 退出 1' }),
+    }).get('/mobile-bridge/api/update/apply')!
+    const call = exchange('127.0.0.1', 'POST')
+    await route(call.req, call.res)
+
+    expect(call.status()).toBe(400)
+    expect(String(call.json().message)).toContain('pnpm')
+  })
+
   it('shows the install shape and offers the repair beside the status line', async () => {
     const route = captureRoutes(baseConfig).get('/mobile-bridge')!
     const call = exchange('127.0.0.1', 'GET')
@@ -351,6 +410,7 @@ describe('console request gate', () => {
     '/mobile-bridge/api/status',
     '/mobile-bridge/api/devices',
     '/mobile-bridge/api/hub-check',
+    '/mobile-bridge/api/update/check',
   ]
   const writePaths = [
     '/mobile-bridge/api/config',
@@ -360,6 +420,7 @@ describe('console request gate', () => {
     '/mobile-bridge/api/forget',
     '/mobile-bridge/api/nats/start',
     '/mobile-bridge/api/migrate',
+    '/mobile-bridge/api/update/apply',
   ]
 
   it('refuses every route for a peer that is not loopback', async () => {

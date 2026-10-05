@@ -124,6 +124,7 @@ allowBuilds:
 - 双端同步实测：Web 端（loopback `/api`）创建的会话经事件桥推到 NATS；NATS 端创建的会话进 `session.list`。
 - 无 token 调用被 `mobile-unauthenticated` 拒绝；设置卡浏览器半已被模块系统收编（`/plugins/dsh-mobile-plugin/client.js` 可服务，boot 图含 `?rev=` 注册行）。
 - 设置卡状态接口与经设备 token 保护的 `mobile.health` 返回同一组运行信息：插件版本、mobileApi、功能、构建 ID、真实加载路径、实例 ID、启动时间、最近连接/重连和最近错误；任何输出都不包含 Hub 密码或设备 token。
+- 控制台「插件更新」一栏：**刷新**去 GitHub 查本仓库最新版本 tag，有新版才显示**更新**按钮，点了交给宿主插件管理器按 profile 声明的依赖 spec 重装（`pluginManager.installBundle`），装完提示重启 dsh 生效。检查失败原样报原因，绝不把失败说成「已是最新」。
 - 踩坑记录：① 同一实例曾被挂出两个响应者——boot effect 与 settings watch 并发触发 start 导致重复 NATS 订阅，生命周期已串行化（kick/cycle 队列）；② 见上 `file:` vs `link:`。
 
 ### 追加：broker 硬重启恢复（2026-08-27，实测）
