@@ -1,0 +1,97 @@
+# Tag-triggered release: attach the prebuilt tarball to the tag.
+#
+# Installing the package straight from the source tree makes pnpm run `prepare`
+# (the repository ignores `lib/`, so there is nothing to import until it does),
+# and pnpm >= 10 refuses dependency build scripts until the profile's
+# `pnpm-workspace.yaml` lists the exact commit under `allowBuilds`. The tarball
+# built here already contains `lib/`, so installing it needs no approval at all:
+#   pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.25/dsh-mobile-plugin-0.2.25.tgz
+#
+# Both names are attached — `dsh-mobile-plugin-<version>.tgz` and the
+# version-free `dsh-mobile-plugin.tgz` — because the plugin's update button
+# rewrites the tag in an asset URL and keeps the file name (see
+# `releaseAssetSpec` in src/update.ts).
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish prebuilt tarball
+    runs-on: ubuntu-latest
+    env:
+      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # tests/integration.spec.ts spawns a real nats-server child process.
+      - name: Install NATS server
+        run: |
+          set -euo pipefail
+          version=2.14.6
+          work="$RUNNER_TEMP/nats-server"
+          mkdir -p "$work"
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.tar.gz" | tar -xz -C "$work" --strip-components=1
+          sudo install -m 0755 "$work/nats-server" /usr/local/bin
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # Publishing an artifact is the one place a mismatch must stop the run:
+      # the tag names the version users install, `package.json` names the
+      # tarball, and `src/bridge.ts` is what a running plugin reports.
+      - name: Check the tag, package.json and PLUGIN_VERSION agree
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$tag" != "$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          fi
+          if ! grep -q "PLUGIN_VERSION = '${version}'" src/bridge.ts; then
+            echo "src/bridge.ts does not report PLUGIN_VERSION '${version}'" >&2
+            exit 1
+          fi
+      - name: Typecheck host half
+        run: pnpm run typecheck
+      - name: Typecheck client half
+        run: pnpm run typecheck:client
+      - name: Test
+        run: pnpm test
+      - name: Build and pack
+        run: |
+          set -euo pipefail
+          pnpm run build
+          pnpm pack
+          # The version-free alias is what a "always newest" URL points at.
+          cp "./dsh-mobile-plugin-$(node -p 'require("./package.json").version').tgz" dsh-mobile-plugin.tgz
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          assets=("dsh-mobile-plugin-${version}.tgz" "dsh-mobile-plugin.tgz")
+          # A tag suffix means a pre-release, and `releases/latest` must keep
+          # pointing at a stable one: it is a documented install URL.
+          prerelease=''
+          case "${GITHUB_REF_NAME}" in *-*) prerelease='--prerelease' ;; esac
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" \
+            --generate-notes ${prerelease} "${assets[@]}" \
+            || gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber

@@ -48,6 +48,8 @@ pnpm run build
 
 CI（`.github/workflows/ci.yml`）跑的就是这四条，另外内置了一个真实 `nats-server` 进程给 `tests/integration.spec.ts` 用；本地跑集成用例需要 PATH 里有 `nats-server`（2.14.6 与 CI 一致）。
 
+发版走 `.github/workflows/release.yml`（tag `v*` 触发，tag 推送不触发 `ci.yml`，所以它自己把这四条再跑一遍）：先校验 tag、`package.json` 的 `version` 与 `src/bridge.ts` 的 `PLUGIN_VERSION` 三者一致，再 `pnpm pack` 把预构建包挂成 Release 资产（`dsh-mobile-plugin-<version>.tgz` + 版本无关的 `dsh-mobile-plugin.tgz`），带 `-rc` 的 tag 标成 pre-release。顺序因此是：改三处版本号 → 提交 → `git tag v<version>` → 推 tag。别的机器的安装源就是这些资产（见 README「安装与接入」），改安装形态或资产命名要同步 `src/update.ts` 的 `releaseAssetSpec` 与那份文档。
+
 对运行中的宿主做端到端验收（需要本机 NATS 与已加载插件的 dsh web profile）：
 
 ```bash

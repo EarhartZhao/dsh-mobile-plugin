@@ -15,7 +15,15 @@
 
 **一、插件页安装（推荐）。** 本包声明了 `dsh.bundle`（即随包发布的 `cordis.patch.yml`），插件页可以直接装：在「插件」页填包名、git 地址或绝对路径，宿主先 inspect spec，再交给 pnpm 安装，装好后提供「启用」。按包名安装需要先发到 npm（当前 `pnpm view dsh-mobile-plugin` 返回 404），没发布之前用 git 地址或本地路径即可。
 
-从 git 装要多一步：仓库里没有构建产物（`.gitignore` 忽略 `lib/`），本包用 `prepare` 脚本在安装时现场编译；pnpm ≥10 默认会拦下这个脚本，所以第一次装必然失败并打印一条 `allowBuilds` 键，把它抄进 profile 的 `pnpm-workspace.yaml` 再装一次。细节与替代方案（npm / `pnpm pack`）见 [00-plugin-plan.md](docs/00-plugin-plan.md#从-git-安装prepare-补上缺失的构建2026-09-30)。
+**一之一、git 地址装要多一步批准构建。** 仓库里没有构建产物（`.gitignore` 忽略 `lib/`），本包用 `prepare` 脚本在安装时现场编译；pnpm ≥10 默认会拦下这个脚本，所以第一次装必然失败并打印一条 `allowBuilds` 键，把它抄进 profile 的 `pnpm-workspace.yaml` 再装一次；这条键跟着 commit 走，**每发一个新版本都会再来一次**。细节见 [00-plugin-plan.md](docs/00-plugin-plan.md#从-git-安装prepare-补上缺失的构建2026-09-30)。
+
+**二、预构建 tarball（给别人机器装、不想每次批准构建脚本）。** 打 tag 时 CI（`.github/workflows/release.yml`）会 `pnpm pack` 出带 `lib/` 的包并挂成 Release 资产，装它不需要任何 `allowBuilds`：
+
+```bash
+pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.25/dsh-mobile-plugin-0.2.25.tgz
+```
+
+每个 Release 同时挂一份版本无关的 `dsh-mobile-plugin.tgz`，所以 `…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 会标成 pre-release，不会顶掉它）。控制台的「检查更新」对这类装法照样有效：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并换掉（`src/update.ts` 的 `releaseAssetSpec`），否则重新装同一个 URL 只会拿回旧字节。
 
 **装完必须「启用」。** bundle 的 patch 层只在它被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，往下看）。
 

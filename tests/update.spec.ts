@@ -5,6 +5,7 @@ import {
   isNewerVersion,
   latestTag,
   parseUpdateSource,
+  releaseAssetSpec,
   versionParts,
 } from '../src/update.js'
 
@@ -39,6 +40,39 @@ describe('parseUpdateSource', () => {
     expect(parseUpdateSource(undefined)).toBeNull()
     expect(parseUpdateSource(null)).toBeNull()
     expect(parseUpdateSource('   ')).toBeNull()
+  })
+})
+
+describe('prebuilt release assets', () => {
+  it('reads the repository and asset out of a release download URL', () => {
+    const tagged = parseUpdateSource('https://github.com/owner/repo/releases/download/v0.2.24/dsh-mobile-plugin-0.2.24.tgz')
+    expect(tagged).toMatchObject({ repo: 'owner/repo', asset: 'dsh-mobile-plugin-0.2.24.tgz', tag: 'v0.2.24', local: false })
+    // The `latest` form names no version of its own; the check still reads it.
+    const latest = parseUpdateSource('https://github.com/owner/repo/releases/latest/download/dsh-mobile-plugin.tgz')
+    expect(latest).toMatchObject({ repo: 'owner/repo', asset: 'dsh-mobile-plugin.tgz', tag: null, local: false })
+  })
+
+  it('leaves a source install with no asset, so an update re-installs its own spec', () => {
+    const source = parseUpdateSource('github:owner/repo')
+    expect(source?.asset).toBeNull()
+    expect(releaseAssetSpec(source!, 'v0.2.25')).toBe('github:owner/repo')
+  })
+
+  it('rewrites the tag of an asset install, because the path is what pins the version', () => {
+    const source = parseUpdateSource('https://github.com/owner/repo/releases/download/v0.2.24/dsh-mobile-plugin-0.2.24.tgz')!
+    expect(releaseAssetSpec(source, 'v0.2.25'))
+      .toBe('https://github.com/owner/repo/releases/download/v0.2.25/dsh-mobile-plugin-0.2.25.tgz')
+    // A `latest` URL has to become version-bound here: re-installing the same
+    // `latest` URL would hand pnpm a cached integrity for the old bytes.
+    const floating = parseUpdateSource('https://github.com/owner/repo/releases/latest/download/dsh-mobile-plugin.tgz')!
+    expect(releaseAssetSpec(floating, 'v0.2.25'))
+      .toBe('https://github.com/owner/repo/releases/download/v0.2.25/dsh-mobile-plugin.tgz')
+  })
+
+  it('leaves an asset name alone when it carries no version to swap', () => {
+    const source = parseUpdateSource('https://github.com/owner/repo/releases/download/v0.2.24/dsh-mobile-plugin.tgz')!
+    expect(releaseAssetSpec(source, 'v0.2.25'))
+      .toBe('https://github.com/owner/repo/releases/download/v0.2.25/dsh-mobile-plugin.tgz')
   })
 })
 

@@ -35,7 +35,7 @@ import {
   type ProfileLocation,
   type ProfileShape,
 } from './profile-migration.js'
-import { fetchLatestTag, isNewerVersion, parseUpdateSource } from './update.js'
+import { fetchLatestTag, isNewerVersion, parseUpdateSource, releaseAssetSpec } from './update.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -640,9 +640,12 @@ export class MobileBridge extends Service {
    * Install the newest version through the host's plugin manager.
    *
    * The spec handed over is the profile's own dependency line, so pnpm does
-   * exactly what an install does — resolve, fetch, run `prepare` — and the
-   * running process keeps the code it booted with until dsh restarts. That
-   * restart is the answer the owner gets, not a hidden failure.
+   * exactly what an install does — resolve, fetch, build when the source needs
+   * it — and the running process keeps the code it booted with until dsh
+   * restarts. A release-asset install instead gets that URL rewritten to the
+   * newest tag, because its path is what pins the version; see
+   * {@link releaseAssetSpec}. That restart is the answer the owner gets, not a
+   * hidden failure.
    * @returns The report now stored for `/api/status`.
    */
   async applyUpdate(): Promise<UpdateReport> {
@@ -656,11 +659,15 @@ export class MobileBridge extends Service {
       this.update = { ...current, phase: 'failed', message: '这个宿主没有插件管理器，请用 dsh 的插件页更新。' }
       return this.update
     }
+    const source = parseUpdateSource(current.spec)
+    const target = source === null || current.latest === null
+      ? current.spec
+      : releaseAssetSpec(source, current.latest)
     const requestId = `dsh-mobile-update-${Date.now()}`
     this.updateRequestId = requestId
     this.update = { ...current, phase: 'installing', message: `正在更新到 ${current.latest ?? '最新版本'}…` }
     try {
-      const result = await manager.installBundle(current.spec, { enabled: true, requestId })
+      const result = await manager.installBundle(target, { enabled: true, requestId })
       const failure = updateFailure(result)
       this.update = failure === null
         ? {

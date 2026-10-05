@@ -8,8 +8,9 @@
  * a tag on it is newer than what is running.
  *
  * Repository identity comes from the installed spec, not from a constant, so a
- * fork (or a pinned tag) updates from its own source. Tags, not releases, are
- * the version source: this package has no GitHub Releases.
+ * fork (or a pinned tag) updates from its own source. Tags stay the version
+ * source even when the install came from a prebuilt release asset: the asset
+ * only decides *where bytes come from*, never which version is newest.
  */
 
 /** Where this install came from, as the profile's manifest declares it. */
@@ -20,6 +21,18 @@ export interface UpdateSource {
   readonly repo: string | null
   /** A local path install (`link:` / `file:` / a plain path): updated from git, not from here. */
   readonly local: boolean
+  /**
+   * Prebuilt release asset this install came from (`dsh-mobile-plugin-0.2.24.tgz`),
+   * or null for a source install. Release assets carry `lib/`, so installing one
+   * runs no build script and needs no `allowBuilds` approval — see
+   * {@link releaseAssetSpec}.
+   */
+  readonly asset: string | null
+  /**
+   * Tag named in that asset's URL, or null when the URL went through
+   * `releases/latest` and so names no version of its own.
+   */
+  readonly tag: string | null
 }
 
 const LOCAL_SPEC = /^(?:link:|file:|portal:|\.{1,2}\/|\/|[A-Za-z]:[\\/])/u
@@ -27,6 +40,10 @@ const GITHUB_SHORT = /^(?:github|git\+github):([^/\s#]+)\/([^/\s#]+?)(?:\.git)?(
 const GITHUB_URL = /^(?:git\+)?(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?github\.com\/([^/\s#]+)\/([^/\s#]+?)(?:\.git)?(?:#.*)?$/u
 const GITHUB_SSH = /^git@github\.com:([^/\s#]+)\/([^/\s#]+?)(?:\.git)?(?:#.*)?$/u
 const BARE_REPO = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:#.*)?$/u
+/** `…/releases/download/<tag>/<asset>`: a release-bound asset URL. */
+const GITHUB_ASSET_TAG = /^(?:git\+)?https?:\/\/github\.com\/([^/\s#]+)\/([^/\s#]+?)\/releases\/download\/([^/\s#]+)\/([^/\s#]+)$/u
+/** `…/releases/latest/download/<asset>`: the same asset, always the newest release. */
+const GITHUB_ASSET_LATEST = /^(?:git\+)?https?:\/\/github\.com\/([^/\s#]+)\/([^/\s#]+?)\/releases\/latest\/download\/([^/\s#]+)$/u
 
 /** Narrows a spec to a repository; null when it names none this code can read. */
 function repoOf(spec: string): string | null {
@@ -34,6 +51,21 @@ function repoOf(spec: string): string | null {
     const match = pattern.exec(spec)
     if (match !== null) return `${match[1]}/${match[2]}`
   }
+  return null
+}
+
+/**
+ * Reads a GitHub release-asset spec. Tried before {@link repoOf}, whose
+ * patterns reject these URLs outright: the extra `releases/…` segments used to
+ * make the console answer "看不出 GitHub 仓库" for a perfectly good install.
+ * @param spec Trimmed dependency spec.
+ * @returns The source when the spec is a release-asset URL, else null.
+ */
+function assetSource(spec: string): UpdateSource | null {
+  const tagged = GITHUB_ASSET_TAG.exec(spec)
+  if (tagged !== null) return { spec, repo: `${tagged[1]}/${tagged[2]}`, local: false, asset: tagged[4], tag: tagged[3] }
+  const latest = GITHUB_ASSET_LATEST.exec(spec)
+  if (latest !== null) return { spec, repo: `${latest[1]}/${latest[2]}`, local: false, asset: latest[3], tag: null }
   return null
 }
 
@@ -46,8 +78,38 @@ function repoOf(spec: string): string | null {
 export function parseUpdateSource(spec: string | undefined | null): UpdateSource | null {
   const trimmed = typeof spec === 'string' ? spec.trim() : ''
   if (trimmed === '') return null
-  if (LOCAL_SPEC.test(trimmed)) return { spec: trimmed, repo: null, local: true }
-  return { spec: trimmed, repo: repoOf(trimmed), local: false }
+  if (LOCAL_SPEC.test(trimmed)) return { spec: trimmed, repo: null, local: true, asset: null, tag: null }
+  return assetSource(trimmed) ?? { spec: trimmed, repo: repoOf(trimmed), local: false, asset: null, tag: null }
+}
+
+/** The numbers a tag names, without the leading `v` (`v0.2.24` → `0.2.24`). */
+function tagVersion(tag: string): string {
+  return tag.startsWith('v') ? tag.slice(1) : tag
+}
+
+/**
+ * The spec an update should install for `tag`.
+ *
+ * A release-asset install is pinned by its path, so re-installing the same URL
+ * would fetch the same bytes and call that an update. Rewriting the tag in that
+ * path gives pnpm a new URL — and therefore a new integrity — instead of a cache
+ * hit. The file name moves with it: releases carry both
+ * `dsh-mobile-plugin-<version>.tgz` and a version-free `dsh-mobile-plugin.tgz`,
+ * so an asset that embeds the old version has to have that version swapped for
+ * the new one, and one that does not only needs the tag in the path changed.
+ * Every other install re-installs exactly what the profile declared.
+ * @param source Where this install came from.
+ * @param tag Version tag to install, as GitHub names it (`v0.2.25`).
+ * @returns The spec to hand to the host's plugin manager.
+ */
+export function releaseAssetSpec(source: UpdateSource, tag: string): string {
+  if (source.asset === null || source.repo === null) return source.spec
+  const was = source.tag === null ? null : tagVersion(source.tag)
+  const now = tagVersion(tag)
+  const asset = was === null || was === now || !source.asset.includes(was)
+    ? source.asset
+    : source.asset.split(was).join(now)
+  return `https://github.com/${source.repo}/releases/download/${tag}/${asset}`
 }
 
 /**
