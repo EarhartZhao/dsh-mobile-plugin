@@ -125,6 +125,8 @@ describe('RpcBridge', () => {
     invoke?: (request: { namespace: string, method: string, args: Record<string, unknown> }, calls: any[]) => Promise<unknown>
     /** Carrier-side failure decoding, so tests exercise codes instead of messages. */
     failure?: (error: unknown) => { code: string, message: string, details: object }
+    /** What the fake connection reports as its publish ceiling, in bytes. */
+    maxPayload?: number
   } = {}): { calls: any[] } {
     const calls: any[] = []
     const gateway: GatewayCarrier = {
@@ -143,7 +145,10 @@ describe('RpcBridge', () => {
         }),
       },
     }
-    const nc = { subscribe: () => fakeSubscription([]) } as never
+    const nc = {
+      subscribe: () => fakeSubscription([]),
+      ...(options.maxPayload === undefined ? {} : { info: { max_payload: options.maxPayload } }),
+    } as never
     bridge = new RpcBridge(nc, {
       instanceId: 'test', instanceName: 'test', carrier, gateway, tokens,
       tokenTtlDays: 90, maxDevices: 10,
@@ -654,6 +659,79 @@ describe('RpcBridge', () => {
     expect(replyJson(msg).result.value.events[0].event.type).toBe('turn/start')
   })
 
+  it('trims a history page to what one publish carries, keeping the newest records', async () => {
+    // The Hub serves `max_payload: 1 MiB` and the client refuses anything
+    // larger, so a Session whose window exceeds it could never be opened at
+    // all: the App's read failed and the transcript stayed empty.
+    const records = Array.from({ length: 12 }, (_, index) => ({
+      type: 'event',
+      event: { type: 'assistant/message', seq: index + 1, time: index, data: { text: 'x'.repeat(600) } },
+    }))
+    useGateway({
+      maxPayload: 4096,
+      stream: [{ type: 'snapshot', cursor: 12, records, hasMore: false, projections: { asOfSeq: 12, values: {} } }],
+      value: { records, hasMore: true },
+    })
+    const tail = makeMsg(`${PREFIX}session.history`, {
+      type: 'client-request', rpcId: 'trim-tail', method: 'session.history',
+      payload: { sessionId: 's1', maxMessages: 120 },
+    }, validToken)
+    await drive(tail)
+    const reply = replyJson(tail)
+    expect(reply.result.ok).toBe(true)
+    const seqs = reply.result.value.events.map((entry: any) => entry.event.seq)
+    expect(seqs.length).toBeGreaterThan(0)
+    expect(seqs.length).toBeLessThan(records.length)
+    expect(seqs).toEqual(
+      records.slice(records.length - seqs.length).map(record => record.event.seq),
+    )
+    // Dropped records are still reachable, so the page must say there are more.
+    expect(reply.result.value.hasMore).toBe(true)
+    expect(tail.replies[0]!.length).toBeLessThanOrEqual(4096)
+
+    const page = makeMsg(`${PREFIX}session.history`, {
+      type: 'client-request', rpcId: 'trim-page', method: 'session.history',
+      payload: { sessionId: 's1', beforeSeq: 12, maxMessages: 120 },
+    }, validToken)
+    await drive(page)
+    const pageReply = replyJson(page)
+    expect(pageReply.result.value.events.length).toBe(seqs.length)
+    expect(pageReply.result.value.events.at(-1).event.seq).toBe(12)
+    expect(pageReply.result.value.hasMore).toBe(true)
+    expect(page.replies[0]!.length).toBeLessThanOrEqual(4096)
+  })
+
+  it('caps a single record too large for one publish instead of dropping it', async () => {
+    // There is no window smaller than one record to ask for, so a record this
+    // big has to arrive short: dropping it (or failing the page) would strand
+    // every older page behind it.
+    const huge = 'x'.repeat(6000)
+    useGateway({
+      maxPayload: 4096,
+      stream: [{
+        type: 'snapshot', cursor: 1, hasMore: false,
+        records: [{ type: 'event', event: { type: 'tool/result', seq: 1, time: 0, data: { text: huge } } }],
+      }],
+    })
+    const msg = makeMsg(`${PREFIX}session.history`, {
+      type: 'client-request', rpcId: 'capped', method: 'session.history',
+      payload: { sessionId: 's1', maxMessages: 120 },
+    }, validToken)
+    await drive(msg)
+    const reply = replyJson(msg)
+    expect(reply.result.ok).toBe(true)
+    const events = reply.result.value.events
+    expect(events).toHaveLength(1)
+    // Shape survives the cap: same type, same seq, only the long string is cut.
+    expect(events[0].event.type).toBe('tool/result')
+    expect(events[0].event.seq).toBe(1)
+    expect(events[0].event.data.text).toContain('已截断')
+    expect(events[0].event.data.text.length).toBeLessThan(huge.length)
+    // Nothing older is left behind, so the page must not claim there is.
+    expect(reply.result.value.hasMore).toBe(false)
+    expect(msg.replies[0]!.length).toBeLessThanOrEqual(4096)
+  })
+
   it('allows the three RPC methods used by durable images and ordering', async () => {
     for (const method of ['session.attachment', 'workspace.insertBefore', 'workspace.insertSessionBefore']) {
       const envelope = { type: 'client-request', rpcId: `r-${method}`, method, payload: {} }
@@ -740,7 +818,7 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.35',
+      pluginVersion: '0.2.36',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',

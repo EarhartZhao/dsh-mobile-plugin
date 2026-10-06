@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect, headers, type Msg, type NatsConnection } from 'nats'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { RpcBridge, TOKEN_HEADER, type FetchCarrier } from '../src/bridge.js'
+import { RpcBridge, TOKEN_HEADER, type FetchCarrier, type GatewayCarrier } from '../src/bridge.js'
 import { EventBridge, type EventStreams, type StreamFrame } from '../src/events.js'
 import { TokenStore } from '../src/tokens.js'
 
@@ -109,7 +109,7 @@ afterAll(async () => {
  * shown flaky reply correlation under vitest workers, while the real app's
  * transport correlates replies by the echoed rpcId anyway.
  */
-async function appRequest(method: string, payload: unknown, token?: string) {
+async function appRequest(method: string, payload: unknown, token?: string, instance = INSTANCE) {
   const inbox = `_INBOX.itest.${crypto.randomUUID()}`
   const msgPromise = new Promise<Msg>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('reply timeout')), 5000)
@@ -126,7 +126,7 @@ async function appRequest(method: string, payload: unknown, token?: string) {
   const h = headers()
   if (token !== undefined) h.set(TOKEN_HEADER, token)
   appNc.publish(
-    `svc.dsh.${INSTANCE}.${method}`,
+    `svc.dsh.${instance}.${method}`,
     JSON.stringify({ type: 'client-request', rpcId: `app-${method}`, method, payload }),
     { reply: inbox, headers: h },
   )
@@ -180,5 +180,79 @@ integrationTest('runs the full flow: pair, gated RPC, events, hello replay', asy
     expect(received).not.toContain('approval/requested')
 
     sub.unsubscribe()
+  }, 15000)
+
+  /**
+   * One history read answered from a canned host page, over the same real
+   * server: the ceiling under test here is the server's own `max_payload`, not
+   * a number the test picked.
+   * @param records - the page the fake host returns.
+   * @param instance - namespace to run the throwaway bridge on.
+   * @returns the reply an App-shaped client received.
+   */
+  async function historyReplyFor(records: unknown[], instance: string): Promise<Msg> {
+    const gateway = {
+      invoke: async () => ({ records, hasMore: true }),
+      stream: async () => (async function* snapshots() {
+        yield {
+          type: 'snapshot', cursor: records.length, records, hasMore: false,
+          projections: { asOfSeq: records.length, values: {} },
+        }
+      })(),
+      wireStream: { failure: (error: unknown) => ({ code: 'internal', message: String(error), details: {} }) },
+    } as unknown as GatewayCarrier
+    const bridge = new RpcBridge(pluginNc, {
+      instanceId: instance, instanceName: instance, gateway, tokens, tokenTtlDays: 90, maxDevices: 10,
+    })
+    bridge.start()
+    await pluginNc.flush()
+    const { code } = tokens.createPairingCode(120)
+    const token = (await tokens.redeemPairingCode(code, instance, 90, 10))?.token ?? ''
+    try {
+      return await appRequest('session.history', { sessionId: 's1', maxMessages: 120 }, token, instance)
+    } finally {
+      await bridge.stop()
+    }
+  }
+
+  integrationTest('answers a page bigger than one publish with the newest records', async () => {
+    // 8 × 400 KiB ≈ 3.2 MiB, past the 1 MiB every NATS server starts at. The
+    // client refuses an oversized publish itself, so before the trim this read
+    // reached neither the Hub nor the phone — the Session simply looked empty.
+    const records = Array.from({ length: 8 }, (_, index) => ({
+      type: 'event',
+      event: { type: 'assistant/message', seq: index + 1, time: index, data: { text: 'x'.repeat(400 * 1024) } },
+    }))
+    expect(pluginNc.info?.max_payload).toBe(1024 * 1024)
+    const reply = await historyReplyFor(records, 'itest-trim')
+    const parsed = JSON.parse(reply.string())
+    expect(parsed.result.ok).toBe(true)
+    const seqs = parsed.result.value.events.map((entry: { event: { seq: number } }) => entry.event.seq)
+    expect(seqs.length).toBeGreaterThan(0)
+    expect(seqs.length).toBeLessThan(records.length)
+    expect(seqs).toEqual(records.slice(records.length - seqs.length).map(record => record.event.seq))
+    expect(seqs.at(-1)).toBe(records.length)
+    // Short, not lost: the App keeps walking back from the oldest record it got.
+    expect(parsed.result.value.hasMore).toBe(true)
+    expect(reply.data.length).toBeLessThanOrEqual(1024 * 1024)
+  }, 15000)
+
+  integrationTest('caps a single record too big for one publish instead of failing the read', async () => {
+    // There is no window smaller than one record to ask for, so this one has to
+    // arrive short: failing it would strand every older page behind it.
+    const huge = 'x'.repeat(2 * 1024 * 1024)
+    const reply = await historyReplyFor(
+      [{ type: 'event', event: { type: 'tool/result', seq: 1, time: 0, data: { text: huge } } }],
+      'itest-cap',
+    )
+    const parsed = JSON.parse(reply.string())
+    expect(parsed.result.ok).toBe(true)
+    expect(parsed.result.value.events).toHaveLength(1)
+    // Shape survives: same type, same seq, only the long string is cut.
+    expect(parsed.result.value.events[0].event.type).toBe('tool/result')
+    expect(parsed.result.value.events[0].event.seq).toBe(1)
+    expect(parsed.result.value.events[0].event.data.text).toContain('已截断')
+    expect(parsed.result.value.events[0].event.data.text.length).toBeLessThan(huge.length)
+    expect(reply.data.length).toBeLessThanOrEqual(1024 * 1024)
   }, 15000)
 })

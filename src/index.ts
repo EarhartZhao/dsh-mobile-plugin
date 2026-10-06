@@ -23,6 +23,7 @@ import { readInstalledVersion } from './installed-version.js'
 import { normalizeHubWssUrl } from './hub-check.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { GatewayIdentityStore } from './identity.js'
+import { InstanceIdStore, INSTANCES_FILE, installKey, type InstanceIdSource } from './instance-id.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
@@ -314,6 +315,15 @@ export class MobileBridge extends Service {
   )
   private readonly tokens: TokenStore
   private readonly identity: GatewayIdentityStore
+  /** Generated instance ids, one per install key (see src/instance-id.ts). */
+  private readonly instanceIds: InstanceIdStore
+  /**
+   * The namespace this install answers on and where it came from. `null` until
+   * the store has been read; the configured value is the fallback surface.
+   */
+  private instance: { id: string, source: InstanceIdSource } | null = null
+  /** Serializes instance-id resolution with the lifecycle it feeds. */
+  private instanceReady: Promise<void> = Promise.resolve()
   private gatewayId: string | null = null
   /** A process started from the local console. NATS is a host service, so it
    * intentionally survives bridge restarts and is never killed by stop(). */
@@ -333,6 +343,7 @@ export class MobileBridge extends Service {
     this.current = configValues(entryConfig)
     this.tokens = new TokenStore(join(dshHome(), 'mobile-bridge', 'tokens.json'))
     this.identity = new GatewayIdentityStore(join(dshHome(), 'mobile-bridge', 'identity.json'))
+    this.instanceIds = new InstanceIdStore(join(dshHome(), INSTANCES_FILE))
 
     // Settings layering: the profile patch's user document over the composition
     // entry. Every field is schema-volatile, so the settings page's write commits
@@ -368,6 +379,7 @@ export class MobileBridge extends Service {
       return registerConsoleRoutes(webServer, {
         bridge: () => this,
         currentConfig: () => this.current,
+        instanceId: () => this.effectiveInstanceId,
         updateConfig: patch => this.updateConfig(patch),
         startNats: () => this.startLocalNats(),
         localNats: () => this.localNatsInfo(),
@@ -415,7 +427,9 @@ export class MobileBridge extends Service {
 
     ctx.effect(() => {
       this.wantRunning = true
-      void this.kick()
+      // Resolve the namespace before the first transition: the bridge cannot
+      // subscribe without it, and the console reports it while disconnected.
+      void this.ensureInstance().then(() => this.kick(), () => this.kick())
       return () => {
         this.wantRunning = false
         return this.kick()
@@ -446,6 +460,55 @@ export class MobileBridge extends Service {
   /** Effective config (settings user layer over the composition entry). */
   get activeConfig(): Config {
     return this.current
+  }
+
+  /**
+   * Config as the wire sees it: an empty `instanceId` is filled in with this
+   * install's generated one, so everything built from the config — the RPC
+   * prefix, the event subjects, the pairing QR — names one namespace.
+   */
+  get effectiveConfig(): Config {
+    const id = this.effectiveInstanceId
+    return id === this.current.instanceId ? this.current : { ...this.current, instanceId: id }
+  }
+
+  /** The namespace this install answers on, for status surfaces. */
+  get effectiveInstanceId(): string {
+    return this.instance?.id ?? this.current.instanceId.trim()
+  }
+
+  /** Where {@link effectiveInstanceId} came from; null until it is resolved. */
+  get instanceIdSource(): InstanceIdSource | null {
+    return this.instance?.source ?? null
+  }
+
+  /**
+   * Resolve the namespace, then re-resolve on every lifecycle transition so a
+   * config edit (or a repair of the store) is picked up without a restart.
+   * Serialized: two callers must not mint two ids.
+   */
+  private ensureInstance(): Promise<void> {
+    const run = this.instanceReady.catch(() => undefined).then(() => this.resolveInstance())
+    this.instanceReady = run
+    return run
+  }
+
+  private async resolveInstance(): Promise<void> {
+    const configured = this.current.instanceId.trim()
+    if (configured !== '') {
+      this.instance = { id: configured, source: 'configured' }
+      return
+    }
+    const key = installKey(PLUGIN_LOADED_FROM)
+    const { id, created } = await this.instanceIds.load(key)
+    this.instance = { id, source: 'auto' }
+    if (created) {
+      console.info('[mobile-bridge] 已为本安装生成实例 ID', {
+        instanceId: id,
+        installKey: key,
+        file: join(dshHome(), INSTANCES_FILE),
+      })
+    }
   }
 
   /**
@@ -487,7 +550,7 @@ export class MobileBridge extends Service {
    */
   private instanceName(): string {
     const configured = this.current.instanceName.trim()
-    return configured === '' ? this.current.instanceId : configured
+    return configured === '' ? this.effectiveInstanceId : configured
   }
 
   // ---- service surface for the Plugins page / CLI ----
@@ -503,6 +566,7 @@ export class MobileBridge extends Service {
     buildId: string
     loadedFrom: string
     instanceId: string
+    instanceIdSource: InstanceIdSource | null
     instanceName: string
     gatewayId: string | null
     startedAt: string | null
@@ -526,7 +590,8 @@ export class MobileBridge extends Service {
       features: PLUGIN_FEATURES,
       buildId: PLUGIN_BUILD_ID,
       loadedFrom: PLUGIN_LOADED_FROM,
-      instanceId: this.current.instanceId,
+      instanceId: this.effectiveInstanceId,
+      instanceIdSource: this.instanceIdSource,
       instanceName: this.instanceName(),
       gatewayId: this.gatewayId,
       startedAt: this.bridgeStartedAt,
@@ -905,7 +970,9 @@ export class MobileBridge extends Service {
     return {
       code,
       expiresAt,
-      payload: buildPairingPayload(this.current, code, {
+      // The QR carries the namespace the bridge actually subscribes on, which
+      // is the generated one when the field is empty.
+      payload: buildPairingPayload(this.effectiveConfig, code, {
         gatewayId: identity.gatewayId,
         expiresAt,
       }),
@@ -952,6 +1019,9 @@ export class MobileBridge extends Service {
   }
 
   private async start(): Promise<void> {
+    // Re-resolve on every start: the owner may have just emptied or filled the
+    // field, and the store is the only stable answer for an empty one.
+    await this.ensureInstance()
     if (!this.shouldRun()) return
     const identity = await this.identity.load()
     this.gatewayId = identity.gatewayId
@@ -978,7 +1048,7 @@ export class MobileBridge extends Service {
       mobileApi: PLUGIN_MOBILE_API,
       buildId: PLUGIN_BUILD_ID,
       loadedFrom: PLUGIN_LOADED_FROM,
-      instanceId: this.current.instanceId,
+      instanceId: this.effectiveInstanceId,
       features: PLUGIN_FEATURES,
     })
     void this.trackStatus(nc)
@@ -997,7 +1067,7 @@ export class MobileBridge extends Service {
       this.toolViews,
     )
     this.eventBridge = new EventBridge(nc, eventAdapter, {
-      instanceId: this.current.instanceId,
+      instanceId: this.effectiveInstanceId,
       coalesceMs: this.current.chunkCoalesceMs,
       eventKeys: () => this.tokens.eventKeys(),
       legacyShared: () => this.tokens.hasLegacyActiveDevices(),
@@ -1005,7 +1075,7 @@ export class MobileBridge extends Service {
     this.eventBridge.start()
 
     this.rpcBridge = new RpcBridge(nc, {
-      instanceId: this.current.instanceId,
+      instanceId: this.effectiveInstanceId,
       instanceName: this.instanceName(),
       gatewayId: identity.gatewayId,
       carrier,

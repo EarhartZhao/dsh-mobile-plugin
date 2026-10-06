@@ -1,11 +1,13 @@
 # This package's own composition layer: the row a profile gets by installing the
 # bundle from the Plugins page. Per-deployment values — Hub address, account,
-# password, instance id — stay out of the package. A profile's own patch
-# overrides this row by id (without `insert`, which would append a second row),
-# and the console writes the same namespace into the user settings layer.
+# password, instance id — stay out of the package, which is why `instanceId` is
+# not set here: empty means "generate one for this installation" (see
+# src/instance-id.ts), while a literal default would put every install on one
+# Hub into the same subject namespace. A profile's own patch overrides this row
+# by id (without `insert`, which would append a second row), and the console
+# writes the same namespace into the user settings layer.
 - insert:
     - id: mobile-bridge
       name: '@dsh-earhartzhao/dsh-mobile-plugin'
       config:
         natsUrl: 'nats://127.0.0.1:4222'
-        instanceId: 'home'

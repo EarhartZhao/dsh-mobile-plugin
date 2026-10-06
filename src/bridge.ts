@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.35'
+export const PLUGIN_VERSION = '0.2.36'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -587,6 +587,25 @@ function expandChunkEvent(event: Record<string, unknown>): Record<string, unknow
 }
 
 /**
+ * One record as the App's wire carries it: the event, plus the tool card the
+ * host's registry projects for it when there is one.
+ */
+interface HistoryEntry {
+  event: Record<string, unknown>
+  view?: unknown
+}
+
+/**
+ * A history read's answer before it is encoded: the records, whether the
+ * Session has older ones, and the projection watermark a tail read carries.
+ */
+interface HistoryPageValue {
+  entries: HistoryEntry[]
+  hasMore: boolean
+  projections?: unknown
+}
+
+/**
  * One page's or snapshot's records as wire entries.
  *
  * @param value - the Remote snapshot or page being translated.
@@ -596,7 +615,7 @@ function expandChunkEvent(event: Record<string, unknown>): Record<string, unknow
 function historyEntries(
   value: unknown,
   view?: (event: Record<string, unknown>) => unknown,
-): { event: Record<string, unknown>, view?: unknown }[] {
+): HistoryEntry[] {
   if (!isRecord(value) || !Array.isArray(value.records)) return []
   return value.records.flatMap((record) => {
     if (!isRecord(record) || !isRecord(record.event)) return []
@@ -607,20 +626,153 @@ function historyEntries(
   })
 }
 
-function historyValue(snapshot: unknown, project?: (event: Record<string, unknown>) => unknown): unknown {
+function historyValue(snapshot: unknown, project?: (event: Record<string, unknown>) => unknown): HistoryPageValue {
   if (!isRecord(snapshot) || snapshot.type !== 'snapshot') {
     throw new Error('session follow did not begin with a snapshot')
   }
   return {
-    events: historyEntries(snapshot, project),
+    entries: historyEntries(snapshot, project),
     hasMore: snapshot.hasMore === true,
     ...(isRecord(snapshot.projections) ? { projections: snapshot.projections } : {}),
   }
 }
 
-function pageValue(page: unknown, project?: (event: Record<string, unknown>) => unknown): unknown {
+function pageValue(page: unknown, project?: (event: Record<string, unknown>) => unknown): HistoryPageValue {
   if (!isRecord(page)) throw new Error('session page returned an invalid value')
-  return { events: historyEntries(page, project), hasMore: page.hasMore === true }
+  return { entries: historyEntries(page, project), hasMore: page.hasMore === true }
+}
+
+/**
+ * One reply's ceiling, when a connection does not report its own. Every NATS
+ * deployment this bridge talks to starts from the 1 MiB default, and the Hub
+ * this plugin targets serves exactly that.
+ */
+const DEFAULT_MAX_PAYLOAD = 1024 * 1024
+
+/**
+ * Of a reply's budget, the part not spent on records. `max_payload` counts the
+ * whole published body, so the RPC envelope and the page's own fields have to
+ * fit next to the records.
+ */
+const REPLY_HEADROOM = 512
+
+/** The longest string one capped record keeps, before the halving starts. */
+const TRUNCATE_CAP = 4096
+
+/**
+ * The largest body this connection can publish in one go.
+ *
+ * The client refuses an oversized publish itself (`MaxPayloadExceeded`), so a
+ * reply that ignores this ceiling never reaches the phone: the call fails
+ * instead of delivering a shorter page.
+ * @param nc - the connection the reply will go out on.
+ * @returns a byte ceiling for one reply body.
+ */
+function replyBudget(nc: NatsConnection): number {
+  const reported = nc.info?.max_payload
+  const ceiling = typeof reported === 'number' && reported > 0 ? reported : DEFAULT_MAX_PAYLOAD
+  return Math.max(1024, ceiling - REPLY_HEADROOM)
+}
+
+/**
+ * Encode a history reply that fits one publish, dropping the oldest records
+ * until it does.
+ *
+ * Records run oldest-first, so the trim keeps the newest window of the page and
+ * answers `hasMore: true`: the App's next read starts from the oldest record it
+ * did receive and walks back through the same Session. A record that cannot be
+ * published even alone is sent with its long strings capped instead of being
+ * dropped — there is no window smaller than one record to ask for, so dropping
+ * it would strand every page from there on. Without both of these a Session
+ * whose window exceeds the Hub's ceiling can never be opened — the App's tail
+ * read fails and the transcript stays empty.
+ * @param rpcId - correlation id, echoed in the envelope.
+ * @param value - the page's records and fields.
+ * @param budget - byte ceiling for the reply body, from {@link replyBudget}.
+ * @returns the encoded reply, and how many records it carries. Zero means even
+ *   a capped single record is over budget, which the caller reports.
+ */
+function encodeHistoryReply(
+  rpcId: string,
+  value: HistoryPageValue,
+  budget: number,
+): { text: string, kept: number } {
+  const encode = (entries: HistoryEntry[], hasMore: boolean): { text: string, bytes: number } => {
+    const text = serverResult(rpcId, {
+      events: entries,
+      hasMore,
+      ...(value.projections === undefined ? {} : { projections: value.projections }),
+    })
+    return { text, bytes: new TextEncoder().encode(text).length }
+  }
+  const full = encode(value.entries, value.hasMore)
+  if (full.bytes <= budget) return { text: full.text, kept: value.entries.length }
+  // The reply shrinks as records are dropped, so bisect for the largest suffix
+  // that fits instead of re-encoding every prefix of the page.
+  let low = 1
+  let high = value.entries.length
+  let best: { text: string, kept: number } | null = null
+  while (low <= high) {
+    const start = (low + high) >> 1
+    // A trimmed page always has older records left, whatever the page said.
+    const candidate = encode(value.entries.slice(start), true)
+    if (candidate.bytes <= budget) {
+      best = { text: candidate.text, kept: value.entries.length - start }
+      high = start - 1
+    } else {
+      low = start + 1
+    }
+  }
+  if (best !== null && best.kept > 0) return best
+  const newest = value.entries.at(-1)
+  if (newest !== undefined) {
+    for (let cap = TRUNCATE_CAP; cap >= 16; cap >>= 1) {
+      const candidate = encode(
+        [truncateStrings(newest, cap) as HistoryEntry],
+        value.entries.length > 1 || value.hasMore,
+      )
+      if (candidate.bytes <= budget) return { text: candidate.text, kept: 1 }
+    }
+  }
+  // Not even a capped record fits, which means the page's own envelope is over
+  // budget (an enormous `projections` block, say). The caller reports it rather
+  // than handing the App an empty page it can never page past.
+  return { text: encode([], value.hasMore).text, kept: 0 }
+}
+
+/**
+ * One record with every string inside it capped.
+ *
+ * Shape is untouched — only long values are shortened and marked — so the App
+ * still renders the record as the same kind of row (a shorter message, a
+ * shorter tool output) instead of an unknown event.
+ * @param value - any JSON value from the record.
+ * @param cap - longest string to keep, in characters.
+ */
+function truncateStrings(value: unknown, cap: number): unknown {
+  if (typeof value === 'string') {
+    return value.length <= cap ? value : `${value.slice(0, cap)}…（此条记录超过单次传输上限，已截断）`
+  }
+  if (Array.isArray(value)) return value.map(entry => truncateStrings(entry, cap))
+  if (!isRecord(value)) return value
+  const capped: Record<string, unknown> = {}
+  for (const [key, inner] of Object.entries(value)) capped[key] = truncateStrings(inner, cap)
+  return capped
+}
+
+/**
+ * A page the App cannot be given: one record on its own is larger than this
+ * connection can publish even with its strings capped. The `mobile-` prefix is
+ * the machine-readable signal, matching the gate's vocabulary, and the App
+ * renders it as a load failure.
+ * @param rpcId - correlation id, echoed in the envelope.
+ */
+function oversizedHistoryFailure(rpcId: string): string {
+  return JSON.stringify({
+    type: 'server-response',
+    rpcId: typeof rpcId === 'string' ? rpcId : 'unknown',
+    result: { ok: false, error: { code: 'internal', message: 'mobile-history-too-large', details: {} } },
+  })
 }
 
 async function firstValue(stream: AsyncIterable<unknown>): Promise<unknown> {
@@ -676,6 +828,20 @@ export class RpcBridge {
       if (oldest === undefined) break
       this.historyCursors.delete(oldest)
     }
+  }
+
+  /**
+   * Answer one history read inside this connection's publish budget, so a
+   * Session with heavy records still opens (trimmed) instead of failing.
+   * @param msg - the request being answered.
+   * @param id - correlation id.
+   * @param value - the page's records and fields.
+   */
+  private respondHistory(msg: Msg, id: string, value: HistoryPageValue): void {
+    const encoded = encodeHistoryReply(id, value, replyBudget(this.nc))
+    msg.respond(new TextEncoder().encode(encoded.kept === 0 && value.entries.length > 0
+      ? oversizedHistoryFailure(id)
+      : encoded.text))
   }
 
   /** This Session's tool-view projection, when the host exposed a tool registry. */
@@ -877,7 +1043,7 @@ export class RpcBridge {
               args: { request: { address, throughSeq, beforeSeq, maxMessages: request.maxMessages } },
             })
             const target = sessionAddressTarget(address)
-            msg.respond(new TextEncoder().encode(serverResult(id, pageValue(page, this.projector(target)))))
+            this.respondHistory(msg, id, pageValue(page, this.projector(target)))
             return
           }
           const stream = await this.options.gateway.stream({
@@ -886,7 +1052,7 @@ export class RpcBridge {
           })
           const first = await firstValue(stream)
           if (isRecord(first) && typeof first.cursor === 'number') this.rememberCursor(key, first.cursor)
-          msg.respond(new TextEncoder().encode(serverResult(id, historyValue(first, this.projector(sessionAddressTarget(address))))))
+          this.respondHistory(msg, id, historyValue(first, this.projector(sessionAddressTarget(address))))
           return
         }
         if (method === 'subagent.list') {

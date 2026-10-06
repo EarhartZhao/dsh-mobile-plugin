@@ -91,6 +91,8 @@ interface BridgeStatus {
   buildId: string
   loadedFrom: string
   instanceId: string
+  /** Where {@link instanceId} came from: the generated one, or a written value. */
+  instanceIdSource: 'configured' | 'auto' | null
   instanceName: string
   gatewayId: string | null
   startedAt: string | null
@@ -309,6 +311,18 @@ const PANEL_CSS = `
 }
 .dsh-mobile-input::placeholder,
 .dsh-mobile-textarea::placeholder { color: var(--dsh-mobile-quiet); }
+/* Values the owner cannot edit: the generated instance id and the like. */
+.dsh-mobile-readonly {
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px dashed var(--dsh-mobile-border);
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: var(--dsh-mobile-surface-muted, transparent);
+  color: var(--dsh-mobile-text);
+  font-size: 13px;
+  font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-wrap: anywhere;
+}
 .dsh-mobile-password { display: flex; align-items: center; gap: 6px; }
 .dsh-mobile-password .dsh-mobile-input { flex: 1; }
 .dsh-mobile-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -707,7 +721,6 @@ function MobileBridgePanel(): ReactNode {
         ...(form.hubPass === '' ? {} : { hubPass: form.hubPass }),
         hubCaCert: form.hubCaCert,
         hubCaFingerprint: form.hubCaFingerprint,
-        instanceId: form.instanceId,
         instanceName: form.instanceName,
       })
       setForm(current => current === null ? current : { ...current, hubPass: '' })
@@ -854,6 +867,22 @@ function MobileBridgePanel(): ReactNode {
     ? 0
     : Math.max(0, Math.round((pairing.expiresAt - now) / 1000))
   const pairExpired = pairing !== null && pairSecondsLeft <= 0
+  /**
+   * The first-run order, named. The two steps owners kept missing — the Hub's
+   * CA certificate and starting the local NATS — are the middle two, so the
+   * panel says what is still missing instead of leaving them to be hunted for
+   * behind a collapsed block or another tab.
+   */
+  const pendingSetup = form === null
+    ? []
+    : [
+        form.hubWssUrl.trim() !== '' && form.hubUser.trim() !== '' && (status?.config.hubPassConfigured ?? false)
+          ? ''
+          : 'Hub 地址与账号',
+        status?.config.hubCaSummary == null ? 'Hub CA 证书（自签 Hub 必填）' : '',
+        status?.localNatsRuntime?.running === true ? '' : '本机 NATS',
+        connected ? '' : '连接 Hub',
+      ].filter(text => text !== '')
 
   return (
     <>
@@ -933,8 +962,8 @@ function MobileBridgePanel(): ReactNode {
               <section className="dsh-mobile-section" aria-label="连接">
                 <div className="dsh-mobile-section-head">
                   <div>
-                    <h4>连接 Hub</h4>
-                    <p>保存后立即验证本机 NATS、Hub 和当前实例。</p>
+                    <h4>1. 连接 Hub</h4>
+                    <p>按顺序来：填 Hub 凭证与 CA → 启动本机 NATS → 去「配对手机」扫码。保存后会立即验证本机与 Hub 链路。</p>
                   </div>
                   <Button
                     variant="outline"
@@ -946,6 +975,19 @@ function MobileBridgePanel(): ReactNode {
                     {checkingHub ? '检查中' : '测试链路'}
                   </Button>
                 </div>
+                {pendingSetup.length === 0
+                  ? (
+                    <div className="dsh-mobile-callout" data-tone="success">
+                      <IconCheckOutlineRegular size={15} />
+                      <p className="dsh-mobile-notice" data-tone="success">Hub 凭证、CA 与本机 NATS 都就绪了，可以去「配对手机」扫码。</p>
+                    </div>
+                  )
+                  : (
+                    <div className="dsh-mobile-callout" data-tone="warning">
+                      <IconWarningOutlineRegular size={15} />
+                      <p className="dsh-mobile-notice" data-tone="warning">第一次接入还差：{pendingSetup.join('、')}。</p>
+                    </div>
+                  )}
                 <div className="dsh-mobile-fields">
                   <div className="dsh-mobile-field dsh-mobile-field-full">
                     <label htmlFor="dsh-mobile-hub-url">Hub 地址</label>
@@ -1010,43 +1052,22 @@ function MobileBridgePanel(): ReactNode {
                       </Button>
                     </span>
                   </div>
-                  <div className="dsh-mobile-field">
-                    <label htmlFor="dsh-mobile-instance-id">实例 ID</label>
-                    <input
-                      id="dsh-mobile-instance-id"
-                      className="dsh-mobile-input"
-                      value={form.instanceId}
-                      placeholder="home"
-                      autoComplete="off"
-                      spellCheck={false}
-                      onChange={event => { setForm({ ...form, instanceId: event.currentTarget.value }) }}
-                    />
-                  </div>
-                  <div className="dsh-mobile-field">
-                    <label htmlFor="dsh-mobile-instance-name">本机名称</label>
-                    <input
-                      id="dsh-mobile-instance-name"
-                      className="dsh-mobile-input"
-                      value={form.instanceName}
-                      placeholder="例如：家里的 Mac mini"
-                      autoComplete="off"
-                      spellCheck={false}
-                      onChange={event => { setForm({ ...form, instanceName: event.currentTarget.value }) }}
-                    />
-                  </div>
-                </div>
-
-                <details className="dsh-mobile-details">
-                  <summary>Hub CA 证书</summary>
-                  <div className="dsh-mobile-details-body">
+                  {/*
+                    The CA rides with the Hub credential rather than inside a
+                    collapsed block: a self-signed Hub cannot be connected to
+                    without it, and first-run owners were not finding it.
+                  */}
+                  <div className="dsh-mobile-field dsh-mobile-field-full">
+                    <label htmlFor="dsh-mobile-hub-ca">Hub CA 证书</label>
                     <p className="dsh-mobile-notice">
                       {form.hubCaCert === ''
-                        ? '未配置：二维码不带证书，只适用于公共 CA 签发的 Hub。'
+                        ? '未配置：二维码不带证书，只适用于公共 CA 签发的 Hub。自签 Hub 必须在这里配一份 ca.crt。'
                         : status?.config.hubCaSummary === null || status?.config.hubCaSummary === undefined
                           ? '已填写，但当前无法解析，请检查是否为完整 PEM。'
                           : `${status.config.hubCaSummary.subject} · 有效期至 ${status.config.hubCaSummary.validTo}`}
                     </p>
                     <textarea
+                      id="dsh-mobile-hub-ca"
                       className="dsh-mobile-textarea"
                       value={form.hubCaCert}
                       placeholder={'-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----'}
@@ -1075,10 +1096,47 @@ function MobileBridgePanel(): ReactNode {
                             })
                         }}
                       >
-                        从 Hub 获取
+                        从 Hub 获取 CA
                       </Button>
                       <span className="dsh-mobile-notice">公开材料，不含私钥。</span>
                     </div>
+                  </div>
+                  <div className="dsh-mobile-field">
+                    <label htmlFor="dsh-mobile-instance-id">实例 ID（自动生成）</label>
+                    <output id="dsh-mobile-instance-id" className="dsh-mobile-readonly">
+                      {(status?.instanceId || '—')
+                        + (status?.instanceIdSource === 'auto'
+                          ? '（本次安装自动生成）'
+                          : status?.instanceIdSource === 'configured' ? '（profile 里手写覆盖）' : '')}
+                    </output>
+                    <p className="dsh-mobile-notice">
+                      它是这台机器在 Hub 上的命名空间，随安装生成、升级不变，不用也不需要在这里填。
+                      同一台机器上的多个 dsh 实例各有各的 ID。
+                    </p>
+                  </div>
+                  <div className="dsh-mobile-field">
+                    <label htmlFor="dsh-mobile-instance-name">本机名称</label>
+                    <input
+                      id="dsh-mobile-instance-name"
+                      className="dsh-mobile-input"
+                      value={form.instanceName}
+                      placeholder="例如：家里的 Mac mini"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={event => { setForm({ ...form, instanceName: event.currentTarget.value }) }}
+                    />
+                  </div>
+                </div>
+
+                <details className="dsh-mobile-details">
+                  <summary>ca.crt 从哪里来？</summary>
+                  <div className="dsh-mobile-details-body">
+                    <p className="dsh-mobile-notice">
+                      Hub 是别人搭的：向对方要一份 ca.crt（公开材料，不含私钥），或直接点上面的「从 Hub 获取」。
+                      Hub 是你自己搭的：先在服务器上生成自己的 CA（私钥 ca.key 留在管理机），步骤见仓库里的
+                      docs/03-nats-self-host.md「上 TLS：自签私有 CA」。
+                      由公共 CA 签发证书的 Hub 不用配这一项。
+                    </p>
                   </div>
                 </details>
 
@@ -1102,6 +1160,76 @@ function MobileBridgePanel(): ReactNode {
                       ))}
                     </ul>
                   )}
+                {/*
+                  Step 2 of first run, on the same tab as the Hub credential
+                  rather than behind "高级诊断": the bridge cannot connect
+                  without the local NATS, and owners were not finding the
+                  button that starts it.
+                */}
+                <div className="dsh-mobile-subsection">
+                  <h5>本机 NATS（Leaf）</h5>
+                  <div className="dsh-mobile-state">
+                    <StateDot state={status?.localNatsRuntime?.running ? 'done' : 'idle'} />
+                    <strong>{status?.localNatsRuntime?.message ?? '本机 NATS 状态未知'}</strong>
+                  </div>
+                  <p className="dsh-mobile-notice">
+                    插件不监听端口，只出站连这台电脑上的 NATS，再由它连 Hub。这台电脑还没装过？
+                    把仓库里的 docs/04-ai-onboarding.md 整页交给它上面的 AI，照着装好再点下面的按钮。
+                  </p>
+                  <div className="dsh-mobile-actions">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={natsStarting}
+                      onClick={() => { void startNats() }}
+                    >
+                      {natsStarting ? '启动中…' : '启动本机 NATS'}
+                    </Button>
+                    <DetailMessage notice={advancedNotice} />
+                  </div>
+                  {status?.localNats?.config === null || status?.localNats?.config === undefined
+                    ? null
+                    : (
+                      <p className="dsh-mobile-notice">
+                        配置 {status.localNats.config.exists ? '已找到' : '未找到'}：{status.localNats.config.path}
+                        {status.localNats.server === null
+                          ? ''
+                          : `\n服务 ${status.localNats.server.exists ? '已找到' : '未找到'}：${status.localNats.server.path}`}
+                      </p>
+                    )}
+                  <details className="dsh-mobile-details">
+                    <summary>手动指定路径</summary>
+                    <div className="dsh-mobile-details-body">
+                      <div className="dsh-mobile-fields">
+                        <div className="dsh-mobile-field">
+                          <label htmlFor="dsh-mobile-nats-config">leaf.conf 路径</label>
+                          <input
+                            id="dsh-mobile-nats-config"
+                            className="dsh-mobile-input"
+                            value={natsPaths.config}
+                            placeholder="留空 = 自动查找"
+                            spellCheck={false}
+                            onChange={event => { setNatsPaths(current => ({ ...current, config: event.currentTarget.value })) }}
+                          />
+                        </div>
+                        <div className="dsh-mobile-field">
+                          <label htmlFor="dsh-mobile-nats-server">nats-server 路径</label>
+                          <input
+                            id="dsh-mobile-nats-server"
+                            className="dsh-mobile-input"
+                            value={natsPaths.server}
+                            placeholder="留空 = 自动查找"
+                            spellCheck={false}
+                            onChange={event => { setNatsPaths(current => ({ ...current, server: event.currentTarget.value })) }}
+                          />
+                        </div>
+                      </div>
+                      <div className="dsh-mobile-actions">
+                        <Button variant="outline" size="sm" onClick={() => { void saveNatsPaths() }}>保存路径</Button>
+                      </div>
+                    </div>
+                  </details>
+                </div>
               </section>
             )
             : null}
@@ -1128,7 +1256,7 @@ function MobileBridgePanel(): ReactNode {
                 {!enabled
                   ? <div className="dsh-mobile-callout" data-tone="warning"><IconWarningOutlineRegular size={15} /><p className="dsh-mobile-notice" data-tone="warning">移动桥已停用，启用后才能配对。</p></div>
                   : !connected
-                    ? <div className="dsh-mobile-callout" data-tone="warning"><IconWarningOutlineRegular size={15} /><p className="dsh-mobile-notice" data-tone="warning">本机 NATS 未连接，请先在「连接」中保存并测试，或到「高级诊断」启动本机 NATS。</p></div>
+                    ? <div className="dsh-mobile-callout" data-tone="warning"><IconWarningOutlineRegular size={15} /><p className="dsh-mobile-notice" data-tone="warning">本机 NATS 未连接：回「连接」标签页，填好 Hub 凭证后点「启动本机 NATS」。</p></div>
                     : null}
 
                 <div className="dsh-mobile-qr-layout">
@@ -1231,67 +1359,6 @@ function MobileBridgePanel(): ReactNode {
           {tab === 'advanced'
             ? (
               <section className="dsh-mobile-section" aria-label="高级诊断">
-                <div className="dsh-mobile-subsection">
-                  <h5>本机 NATS</h5>
-                  <div className="dsh-mobile-state">
-                    <StateDot state={status?.localNatsRuntime?.running ? 'done' : 'idle'} />
-                    <strong>{status?.localNatsRuntime?.message ?? '本机 NATS 状态未知'}</strong>
-                  </div>
-                  <div className="dsh-mobile-actions">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={natsStarting}
-                      onClick={() => { void startNats() }}
-                    >
-                      {natsStarting ? '启动中…' : '启动本机 NATS'}
-                    </Button>
-                    <DetailMessage notice={advancedNotice} />
-                  </div>
-                  {status?.localNats?.config === null || status?.localNats?.config === undefined
-                    ? null
-                    : (
-                      <p className="dsh-mobile-notice">
-                        配置 {status.localNats.config.exists ? '已找到' : '未找到'}：{status.localNats.config.path}
-                        {status.localNats.server === null
-                          ? ''
-                          : `\n服务 ${status.localNats.server.exists ? '已找到' : '未找到'}：${status.localNats.server.path}`}
-                      </p>
-                    )}
-                  <details className="dsh-mobile-details">
-                    <summary>手动指定路径</summary>
-                    <div className="dsh-mobile-details-body">
-                      <div className="dsh-mobile-fields">
-                        <div className="dsh-mobile-field">
-                          <label htmlFor="dsh-mobile-nats-config">leaf.conf 路径</label>
-                          <input
-                            id="dsh-mobile-nats-config"
-                            className="dsh-mobile-input"
-                            value={natsPaths.config}
-                            placeholder="留空 = 自动查找"
-                            spellCheck={false}
-                            onChange={event => { setNatsPaths(current => ({ ...current, config: event.currentTarget.value })) }}
-                          />
-                        </div>
-                        <div className="dsh-mobile-field">
-                          <label htmlFor="dsh-mobile-nats-server">nats-server 路径</label>
-                          <input
-                            id="dsh-mobile-nats-server"
-                            className="dsh-mobile-input"
-                            value={natsPaths.server}
-                            placeholder="留空 = 自动查找"
-                            spellCheck={false}
-                            onChange={event => { setNatsPaths(current => ({ ...current, server: event.currentTarget.value })) }}
-                          />
-                        </div>
-                      </div>
-                      <div className="dsh-mobile-actions">
-                        <Button variant="outline" size="sm" onClick={() => { void saveNatsPaths() }}>保存路径</Button>
-                      </div>
-                    </div>
-                  </details>
-                </div>
-
                 <div className="dsh-mobile-subsection">
                   <h5>安装与更新</h5>
                   <div className="dsh-mobile-grid-2">

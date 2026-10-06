@@ -56,6 +56,12 @@ export interface ConsoleBackend {
   repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
   checkHub?: (config: Config) => Promise<HubCheckResult>
+  /**
+   * Namespace in effect. An empty `instanceId` means "auto", and the generated
+   * value lives in the plugin's own store, so the page cannot derive it: every
+   * check that dials `svc.dsh.<instance>.…` has to ask.
+   */
+  instanceId?: () => string
   /** Fetch the Hub's CA certificate from its TLS chain; overridable for tests. */
   fetchHubCa?: (config: Config) => Promise<HubCaFetchResult>
   /** Ask GitHub for the newest version tag and compare it with the running one. */
@@ -195,6 +201,16 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
     localConnected: backend.bridge().status().connection === 'connected',
   }))
   const fetchHubCa = backend.fetchHubCa ?? ((config: Config) => fetchHubCertificate(config))
+
+  /**
+   * Config as the wire sees it. The saved `instanceId` may be empty — that is
+   * "auto", and only the plugin knows which id it generated — so the checks
+   * that build subjects ask for the resolved one rather than dial `svc.dsh..`.
+   */
+  const effective = (config: Config): Config => {
+    const resolved = backend.instanceId?.() ?? ''
+    return resolved === '' || resolved === config.instanceId ? config : { ...config, instanceId: resolved }
+  }
   const disposers = [
     webServer.register({
       kind: 'exact',
@@ -379,14 +395,14 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         // phone as an opaque NATS error, so stop it here. An unreachable Hub
         // is not proof of anything (the port may be blocked from this host),
         // so it mints with a warning instead.
-        const hub = await checkHub(backend.currentConfig())
+        const hub = await checkHub(effective(backend.currentConfig()))
         if (hub.reason === 'rejected') return json(res, 400, { error: hub.message })
         // A certificate that is missing, unreadable or simply not the one the
         // Hub signs with does not stop the QR from being minted — the owner may
         // be fixing the Hub side right now — but a scan that will fail at the
         // handshake deserves a warning here instead of that same failure on the
         // phone, where nothing can explain it.
-        const certificate = await checkHubCertificate(backend.currentConfig())
+        const certificate = await checkHubCertificate(effective(backend.currentConfig()))
         const hubWarning = [hub.ok ? null : hub.message, certificate.ok ? null : certificate.message]
           .filter((line): line is string => line !== null)
           .join('\n\n')
@@ -421,7 +437,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       handler: async (req, res) => {
         const rejected = consoleRequestRejection(req, { mutating: false })
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
-        const config = backend.currentConfig()
+        const config = effective(backend.currentConfig())
         const result = await checkHub(config)
         // The certificate is the one link the phone cannot report on: a wrong
         // one is an opaque handshake failure there, so it rides along here as
@@ -623,11 +639,18 @@ const CONSOLE_HTML = `<!doctype html>
     display: grid;
     grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
     grid-template-areas:
+      "setup setup"
       "connection pair"
+      "nats pair"
       "devices pair";
     gap: 14px;
     align-items: start;
   }
+  .setupPanel { grid-area: setup; }
+  .connectionPanel { grid-area: connection; }
+  .natsPanel { grid-area: nats; }
+  .devicesPanel { grid-area: devices; }
+  .pairPanel { grid-area: pair; }
   .connectionPanel { grid-area: connection; }
   .pairPanel { grid-area: pair; }
   .panel {
@@ -647,6 +670,43 @@ const CONSOLE_HTML = `<!doctype html>
   .panelHeader h2 { margin: 0; font-size: 15px; line-height: 1.3; }
   .panelHeader p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
   .panelBody { padding: 14px 16px 16px; }
+  /* First run: the order the steps have to happen in, and what is still
+     missing. Each row is one thing to do; the jump link goes to the control
+     that does it. */
+  .setupList {
+    display: grid;
+    /* Four steps read as one row on a wide screen and stack on a narrow one. */
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 8px;
+    margin: 14px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .setupItem {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: start;
+    padding: 10px 11px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .setupItem[data-state="done"] { border-color: var(--success); background: var(--success-soft); }
+  .setupItem[data-state="todo"] { border-color: var(--warning); background: var(--warning-soft); }
+  .setupMark {
+    width: 10px;
+    height: 10px;
+    margin: 5px 0 0 3px;
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+  }
+  .setupItem[data-state="done"] .setupMark { border-color: var(--success); background: var(--success); }
+  .setupItem[data-state="todo"] .setupMark { border-color: var(--warning); background: var(--warning); }
+  .setupText b { font-size: 13px; }
+  .setupText p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .setupJump { align-self: center; color: var(--accent); font-size: 12px; white-space: nowrap; }
+  .message.warn { color: var(--warning); }
   .formGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
   .span2 { grid-column: 1 / -1; }
   .field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
@@ -660,6 +720,17 @@ const CONSOLE_HTML = `<!doctype html>
     color: var(--text);
   }
   .field input::placeholder, .field textarea::placeholder { color: var(--muted); opacity: .75; }
+  /* A value the owner cannot edit here: the generated instance id. */
+  .field .readOnly {
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 6px;
+    background: var(--surface-soft);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere;
+  }
   .field textarea {
     resize: vertical;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -833,7 +904,9 @@ const CONSOLE_HTML = `<!doctype html>
     .workspace {
       grid-template-columns: minmax(0, 1fr);
       grid-template-areas:
+        "setup"
         "connection"
+        "nats"
         "pair"
         "devices";
     }
@@ -870,11 +943,60 @@ const CONSOLE_HTML = `<!doctype html>
   <p id="versionDrift" role="status"></p>
 
   <main class="workspace">
+    <section class="panel setupPanel" aria-labelledby="setupTitle">
+      <div class="panelHeader">
+        <div>
+          <h2 id="setupTitle">开箱清单</h2>
+          <p>第一次接入按顺序走一遍：1 填 Hub 凭证 → 2 拿 CA 证书 → 3 启动本机 NATS → 4 手机扫码。</p>
+        </div>
+        <span id="setupSummary" class="message" role="status"></span>
+      </div>
+      <ol class="setupList" id="setupChecklist">
+        <li class="setupItem" id="setupHub" data-state="todo">
+          <span class="setupMark" aria-hidden="true"></span>
+          <div class="setupText">
+            <b>1. 填 Hub 地址与账号</b>
+            <p>Hub 是手机要连的那台服务器：地址形如 <code>wss://&lt;hub-host&gt;:8443</code>，账号是管理员给的 C 端受限账号（不是 Hub 的管理员账号）。</p>
+          </div>
+          <a class="setupJump" href="#hubUser">去填写</a>
+        </li>
+        <li class="setupItem" id="setupCa" data-state="todo">
+          <span class="setupMark" aria-hidden="true"></span>
+          <div class="setupText">
+            <b>2. 拿到 Hub 的 CA 证书</b>
+            <p>App 里不内置任何 CA：Hub 用自签证书时必须把 ca.crt 配进来，点「从 Hub 获取 CA」一般能自动取到；
+              Hub 的证书由公共 CA 签发时这一步可以跳过。Hub 是你自己搭的、还没有 ca.crt？看
+              <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03</a>
+              的「上 TLS：自签私有 CA」。</p>
+          </div>
+          <a class="setupJump" href="#hubCaCert">去获取</a>
+        </li>
+        <li class="setupItem" id="setupNats" data-state="todo">
+          <span class="setupMark" aria-hidden="true"></span>
+          <div class="setupText">
+            <b>3. 启动本机 NATS（Leaf）</b>
+            <p>插件出站连的是这台电脑上的 NATS，再由它连 Hub。这台电脑还没装过？把
+              <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md" target="_blank" rel="noreferrer">docs/04 新电脑接入清单</a>
+              整页交给它上面的 AI 照着做，再回来点「启动本地 NATS」。</p>
+          </div>
+          <a class="setupJump" href="#startNatsBtn">去启动</a>
+        </li>
+        <li class="setupItem" id="setupPair" data-state="todo">
+          <span class="setupMark" aria-hidden="true"></span>
+          <div class="setupText">
+            <b>4. 让手机扫码接入</b>
+            <p>前三步就绪后二维码里才会带上正确的 Hub 地址、账号与证书；提前扫会卡在 TLS 握手上。</p>
+          </div>
+          <a class="setupJump" href="#pairBtn">去配对</a>
+        </li>
+      </ol>
+    </section>
+
     <section class="panel connectionPanel" aria-labelledby="connectionTitle">
       <div class="panelHeader">
         <div>
-          <h2 id="connectionTitle">连接 Hub</h2>
-          <p>保存后会立即检查本机、Hub 与实例链路。</p>
+          <h2 id="connectionTitle">1. 连接 Hub</h2>
+          <p>Hub 的地址、账号密码，以及 App 要信任的 CA 证书，都在这里配。</p>
         </div>
       </div>
       <div class="panelBody">
@@ -895,6 +1017,29 @@ const CONSOLE_HTML = `<!doctype html>
             </div>
           </div>
         </div>
+        <div class="formGrid" style="margin-top: 12px;">
+          <div class="field span2">
+            <label for="hubCaCert">Hub CA 证书</label>
+            <div class="actions tight">
+              <button id="fetchCaBtn" class="secondary" type="button">从 Hub 获取 CA</button>
+              <span id="fetchCaMsg" class="message" role="status"></span>
+            </div>
+            <p id="hubCaHint" class="message"></p>
+            <textarea id="hubCaCert" rows="4" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+            <details class="disclosure">
+              <summary>ca.crt 从哪里来？</summary>
+              <div class="disclosureBody">
+                <p id="caOriginHint" class="message">
+                  还不知道 ca.crt 该从哪来？两种情况：<b>Hub 是别人搭的</b>，向对方要一份（ca.crt 是公开材料，不含私钥）；
+                  <b>Hub 是你自己搭的（或还没搭）</b>，就得先在服务器上生成自己的 CA——私钥 ca.key 留在管理机、绝不进服务器，
+                  只有 ca.crt 填在这里。从零建 Hub 的完整步骤（生成 CA → 签发服务器证书 → 把 ca.crt 拼进 cert_file）见
+                  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
+                  的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」——这本仓库里也有同一份文件。
+                </p>
+              </div>
+            </details>
+          </div>
+        </div>
         <div class="actions">
           <button id="saveBtn" type="button">保存并测试</button>
           <span id="saveMsg" class="message" role="status"></span>
@@ -902,38 +1047,66 @@ const CONSOLE_HTML = `<!doctype html>
         <p id="hubCheckMsg" class="message checkResult" role="status"></p>
 
         <details class="disclosure">
-          <summary>实例与证书</summary>
+          <summary>实例与身份（一般不用改）</summary>
           <div class="disclosureBody">
             <div class="formGrid">
               <div class="field">
-                <label for="instanceId">实例 ID</label>
-                <input id="instanceId" placeholder="home" autocomplete="off" spellcheck="false">
+                <label for="instanceIdValue">实例 ID（自动生成）</label>
+                <p class="readOnly" id="instanceIdValue">—</p>
+                <p class="message">它是这台机器在 Hub 上的命名空间：RPC 走 <code>svc.dsh.&lt;id&gt;.*</code>，配对二维码里带的也是它。
+                  这次安装第一次启动时自动生成一个 8 位 ID（时间戳 + 随机，存在
+                  <code>$DSH_HOME/mobile-bridge/instances.json</code>），升级、重装、重启都不变，这里不需要填、也改不了；
+                  同一台机器上的多个 dsh 实例各有各的 ID。控制台从不改写它——写进 profile 的值仍然生效（升级前手写过 ID 的机器不会换号），
+                  但一般只有「同一台机器上多个 dsh 实例共用同一份检出」才需要那样做。</p>
               </div>
               <div class="field">
                 <label for="instanceName">本机名称</label>
                 <input id="instanceName" placeholder="例如：家里的 Mac mini" autocomplete="off" spellcheck="false">
               </div>
-              <div class="field span2">
-                <label for="hubCaCert">Hub CA 证书</label>
-                <div class="actions tight">
-                  <button id="fetchCaBtn" class="secondary" type="button">从 Hub 获取 CA</button>
-                  <span id="fetchCaMsg" class="message" role="status"></span>
-                </div>
-                <p id="hubCaHint" class="message"></p>
-                <textarea id="hubCaCert" rows="4" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
-                <details class="disclosure">
-                  <summary>ca.crt 从哪里来？</summary>
-                  <div class="disclosureBody">
-                    <p id="caOriginHint" class="message">
-                      还不知道 ca.crt 该从哪来？两种情况：<b>Hub 是别人搭的</b>，向对方要一份（ca.crt 是公开材料，不含私钥）；
-                      <b>Hub 是你自己搭的（或还没搭）</b>，就得先在服务器上生成自己的 CA——私钥 ca.key 留在管理机、绝不进服务器，
-                      只有 ca.crt 填在这里。从零建 Hub 的完整步骤（生成 CA → 签发服务器证书 → 把 ca.crt 拼进 cert_file）见
-                      <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
-                      的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」——这本仓库里也有同一份文件。
-                    </p>
-                  </div>
-                </details>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="panel natsPanel" aria-labelledby="natsTitle">
+      <div class="panelHeader">
+        <div>
+          <h2 id="natsTitle">2. 本机 NATS（Leaf）</h2>
+          <p>插件不监听端口，只出站连这台电脑上的 NATS；本机 NATS 再把流量带到 Hub。</p>
+        </div>
+      </div>
+      <div class="panelBody">
+        <div class="actions tight">
+          <button id="startNatsBtn" class="secondary" type="button">启动本地 NATS</button>
+          <span id="natsMsg" class="message" role="status"></span>
+        </div>
+        <p id="natsPathLine" class="message"></p>
+        <p id="natsHelpLine" class="message">
+          这个按钮只启动<b>已经装好</b>的本机 NATS；这台电脑还没有 nats-server 或还没有 leaf.conf 时，把
+          <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md" target="_blank" rel="noreferrer">docs/04-ai-onboarding.md</a>
+          整页交给这台电脑上的 AI，让它照着装（装 nats-server → 写 leaf.conf → 取 CA → 自检 Hub 账号）；
+          自己动手就看
+          <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
+          的「3. Leaf：dsh 电脑上的本机节点」。
+        </p>
+        <p class="message">状态每 5 秒自动刷新一次；装好或修好之后点一次上面的按钮即可。</p>
+        <details class="disclosure">
+          <summary>手动指定路径</summary>
+          <div class="disclosureBody">
+            <div class="formGrid">
+              <div class="field">
+                <label for="natsConfigPath">leaf.conf 路径</label>
+                <input id="natsConfigPath" placeholder="留空 = 自动查找" autocomplete="off" spellcheck="false">
               </div>
+              <div class="field">
+                <label for="natsServerPath">nats-server 路径</label>
+                <input id="natsServerPath" placeholder="留空 = 自动查找，含 PATH" autocomplete="off" spellcheck="false">
+              </div>
+            </div>
+            <div class="actions">
+              <button id="saveNatsPathBtn" class="secondary" type="button">保存路径</button>
+              <span id="natsPathMsg" class="message" role="status"></span>
             </div>
           </div>
         </details>
@@ -943,8 +1116,8 @@ const CONSOLE_HTML = `<!doctype html>
     <section class="panel pairPanel" aria-labelledby="pairTitle">
       <div class="panelHeader">
         <div>
-          <h2 id="pairTitle">配对新设备</h2>
-          <p>生成一次性二维码，让 App 扫码接入。</p>
+          <h2 id="pairTitle">3. 配对新设备</h2>
+          <p>生成一次性二维码，让 App 扫码接入（有效期 120 秒）。</p>
         </div>
       </div>
       <div class="panelBody">
@@ -967,7 +1140,7 @@ const CONSOLE_HTML = `<!doctype html>
     <section class="panel devicesPanel" aria-labelledby="devicesTitle">
       <div class="panelHeader">
         <div>
-          <h2 id="devicesTitle">已配对设备</h2>
+          <h2 id="devicesTitle">4. 已配对设备</h2>
           <p>查看设备状态，吊销不再使用的访问令牌。</p>
         </div>
       </div>
@@ -982,44 +1155,8 @@ const CONSOLE_HTML = `<!doctype html>
   </main>
 
   <details class="advanced">
-    <summary>高级设置与诊断 <span>本机 NATS、安装形态、更新和运行信息</span></summary>
+    <summary>高级设置与诊断 <span>安装形态、更新和运行信息</span></summary>
     <div class="advancedBody">
-      <section class="advancedSection">
-        <h3>本机 NATS</h3>
-        <div class="actions tight">
-          <button id="startNatsBtn" class="secondary" type="button">启动本地 NATS</button>
-          <span id="natsMsg" class="message" role="status"></span>
-        </div>
-        <p id="natsPathLine" class="message"></p>
-        <p id="natsHelpLine" class="message">
-          这个按钮只启动<b>已经装好</b>的本机 NATS；这台电脑还没有 nats-server 或还没有 leaf.conf 时，把
-          <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md" target="_blank" rel="noreferrer">docs/04-ai-onboarding.md</a>
-          整页交给这台电脑上的 AI，让它照着装（装 nats-server → 写 leaf.conf → 取 CA → 自检 Hub 账号）；
-          自己动手就看
-          <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
-          的「3. Leaf：dsh 电脑上的本机节点」。
-        </p>
-        <details class="disclosure">
-          <summary>手动指定路径</summary>
-          <div class="disclosureBody">
-            <div class="formGrid">
-              <div class="field">
-                <label for="natsConfigPath">leaf.conf 路径</label>
-                <input id="natsConfigPath" placeholder="留空 = 自动查找" autocomplete="off" spellcheck="false">
-              </div>
-              <div class="field">
-                <label for="natsServerPath">nats-server 路径</label>
-                <input id="natsServerPath" placeholder="留空 = 自动查找，含 PATH" autocomplete="off" spellcheck="false">
-              </div>
-            </div>
-            <div class="actions">
-              <button id="saveNatsPathBtn" class="secondary" type="button">保存路径</button>
-              <span id="natsPathMsg" class="message" role="status"></span>
-            </div>
-          </div>
-        </details>
-      </section>
-
       <section class="advancedSection">
         <h3>安装与更新</h3>
         <div class="advancedGrid">
@@ -1094,7 +1231,7 @@ function prefill(id, value) {
   field.value = value
 }
 
-for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'instanceName', 'natsConfigPath', 'natsServerPath']) {
+for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceName', 'natsConfigPath', 'natsServerPath']) {
   $(id).addEventListener('input', () => { editedFields.add(id) })
 }
 
@@ -1173,7 +1310,10 @@ async function refreshStatus() {
     $('versionDrift').textContent = s.versionDrift || ''
     $('mobileApi').textContent = String(s.mobileApi ?? '—')
     $('buildId').textContent = s.buildId || '—'
-    $('activeInstance').textContent = s.instanceId || '—'
+    // Where the namespace came from matters: an auto id is this install's own
+    // and changing it is what breaks every paired phone.
+    $('activeInstance').textContent = (s.instanceId || '—')
+      + (s.instanceIdSource === 'auto' ? '（本次安装自动生成）' : '')
     $('activeInstanceName').textContent = s.instanceName || s.instanceId || '—'
     $('gatewayId').textContent = s.gatewayId || '—'
     $('loadedFrom').textContent = s.loadedFrom || '—'
@@ -1184,6 +1324,7 @@ async function refreshStatus() {
     $('lastError').textContent = s.lastError || '无'
     renderProfile(s.profile)
     renderLocalNats(s.localNats, s.localNatsRuntime)
+    renderSetup(s)
     // A check or an install in flight owns the panel until it answers, so the
     // poll must not repaint over "正在更新…" with the last stored report.
     if (!updateBusy) renderUpdate(s.update)
@@ -1192,7 +1333,12 @@ async function refreshStatus() {
     prefill('hubWssUrl', s.config.hubWssUrl)
     prefill('hubUser', s.config.hubUser)
     renderHubCa(s.config)
-    prefill('instanceId', s.config.instanceId)
+    // The instance id is generated, not editable: the form shows the one in
+    // effect (and where it came from), and never writes it back.
+    $('instanceIdValue').textContent = (s.instanceId || '—')
+      + (s.instanceIdSource === 'auto'
+        ? '（本次安装自动生成）'
+        : s.instanceIdSource === 'configured' ? '（profile 里手写覆盖）' : '')
     prefill('instanceName', s.config.instanceName || '')
     prefill('natsConfigPath', s.config.natsConfigPath || '')
     prefill('natsServerPath', s.config.natsServerPath || '')
@@ -1211,7 +1357,7 @@ async function refreshStatus() {
     } else if (s.connection === 'connected') {
       $('pairHint').textContent = '本地 NATS 已连接，可以生成二维码'
     } else {
-      $('pairHint').textContent = '当前状态为“' + ({ connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection) + '”，请先点击“启动本地 NATS”'
+      $('pairHint').textContent = '当前状态为“' + ({ connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection) + '”，请先完成上面第 2 步「启动本地 NATS」'
     }
   } catch (error) {
     $('status').textContent = '状态读取失败'
@@ -1250,6 +1396,40 @@ $('runtimeToggle').onclick = async () => {
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+}
+
+/**
+ * How far along the first-run order is.
+ *
+ * The CA row is the one step a Hub with a publicly signed certificate never
+ * needs, so an empty field there reads as "skip it if it does not apply"
+ * rather than "not done yet" — otherwise the checklist would send every owner
+ * of a public-CA Hub hunting for a file they do not have.
+ */
+function renderSetup(s) {
+  const hubReady = s.config.hubWssUrl.trim() !== '' && s.config.hubUser.trim() !== '' && s.config.hubPassConfigured
+  const caReady = !!(s.config.hubCaSummary)
+  const natsReady = !!(s.localNatsRuntime && s.localNatsRuntime.running)
+  const connected = s.enabled !== false && s.connection === 'connected'
+  const pending = []
+  const mark = (id, ready, optional, label, action) => {
+    const item = $(id)
+    item.dataset.state = ready ? 'done' : (optional ? 'optional' : 'todo')
+    // A finished row keeps the jump, so the control is still one click away;
+    // it stops advertising an action that is already done.
+    const jump = item.querySelector('.setupJump')
+    if (jump) jump.textContent = ready ? '查看' : action
+    if (!ready && !optional) pending.push(label)
+  }
+  mark('setupHub', hubReady, false, 'Hub 凭证', '去填写')
+  mark('setupCa', caReady, true, 'CA 证书', '去获取')
+  mark('setupNats', natsReady, false, '本机 NATS', '去启动')
+  mark('setupPair', connected, false, '连接 Hub', '去配对')
+  const summary = $('setupSummary')
+  summary.className = pending.length === 0 ? 'message ok' : 'message warn'
+  summary.textContent = pending.length === 0
+    ? '✓ 必需的几项都就绪了，可以扫码配对'
+    : '还剩 ' + pending.length + ' 项：' + pending.join('、')
 }
 
 /**
@@ -1433,7 +1613,6 @@ $('saveBtn').onclick = async () => {
   const r = await api('config', {
     hubWssUrl: $('hubWssUrl').value, hubUser: $('hubUser').value,
     hubPass: $('hubPass').value, hubCaCert: $('hubCaCert').value,
-    instanceId: $('instanceId').value,
     instanceName: $('instanceName').value,
     natsConfigPath: $('natsConfigPath').value, natsServerPath: $('natsServerPath').value,
   })

@@ -21,6 +21,18 @@ describe('plugin config schema', () => {
     expect(isVolatile(parsed.natsUrl)).toBe(true)
     expect(isVolatile(parsed.hubPass)).toBe(true)
   })
+
+  it('leaves instanceId empty by default, so each install generates its own', () => {
+    // `home` was the old default, which put every install that never picked a
+    // name into one namespace: two hosts answering `svc.dsh.home.>` both reply
+    // and the phone takes whichever lands first. Empty means "auto" — see
+    // src/instance-id.ts.
+    expect(configValues(Config({})).instanceId).toBe('')
+    // A hand-written value still has to work as a subject token…
+    expect(configValues(Config({ instanceId: 'home-test' })).instanceId).toBe('home-test')
+    // …and a generated one has to survive the schema.
+    expect(configValues(Config({ instanceId: 'n4q7x82b' })).instanceId).toBe('n4q7x82b')
+  })
 })
 
 describe('configValues', () => {

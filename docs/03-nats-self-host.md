@@ -283,7 +283,7 @@ leafnodes {
 | `hubUser` / `hubPass` | 上面的 C 端账号；任一为空时拒绝发码 | 空 |
 | `hubCaCert` | Hub 的 CA 证书（`ca.crt` 的 PEM 或 base64）；二维码带的就是它——App 不内置任何 CA，自签 Hub 留空必然连不上。手边没有 ca.crt 就点「从 Hub 获取 CA」（需 Hub 的链里带 CA，见 2.6） | 空 |
 | `hubCaFingerprint` | Hub CA 指纹，仅作展示与人工核对 | 空 |
-| `instanceId` | 本实例的命名空间；一个 Hub 上多台电脑必须各不相同 | `home` |
+| `instanceId` | 本实例的命名空间（`svc.dsh.<id>.*` / `evt.dsh.<id>.*`）。**留空 = 自动**：这次安装会生成一个 8 位 ID（时间戳 + 随机，存在 `$DSH_HOME/mobile-bridge/instances.json`），升级、重装都不变；一个 Hub 上多台电脑必须各不相同，同一台机器上的多个 dsh 实例也各有各的 | 空（自动生成） |
 | `instanceName` | 这台电脑在手机「连接」列表里显示的名字（`mobile.info` 上报）；留空则回退 `instanceId` | 空 |
 | `tokenTtlDays` / `pairCodeTtlSec` / `maxDevices` / `chunkCoalesceMs` | 设备 token 有效期 / 配对码有效期 / 终端上限 / 弱网合帧 | 90 / 120 / 10 / 0 |
 | `natsConfigPath` | 「启动本地 NATS」要读的 Leaf 配置路径；留空则自动查找（`$DSH_HOME/mobile-bridge/leaf.conf` → `~/.nats-leaf/leaf.conf` → `~/.config/nats/leaf.conf` → 平台惯例），`NATS_CONFIG_PATH` 可覆盖 | 空 |

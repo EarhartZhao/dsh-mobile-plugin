@@ -22,7 +22,13 @@ export interface Config {
   hubCaCert: string
   /** Hub CA fingerprint; when set it must match {@link hubCaCert}. */
   hubCaFingerprint: string
-  /** Subject namespace: svc.dsh.{instanceId}.* / evt.dsh.{instanceId}.* */
+  /**
+   * Subject namespace: svc.dsh.{instanceId}.* / evt.dsh.{instanceId}.*.
+   * Empty means "auto": the install generates an 8-character id once and keeps
+   * it in `$DSH_HOME/mobile-bridge/instances.json`, so two fresh installs never
+   * share a namespace. Setting this field pins the namespace instead — see
+   * src/instance-id.ts.
+   */
   instanceId: string
   /**
    * What this machine calls itself on the phone. Empty falls back to
@@ -81,7 +87,11 @@ export const Config = z.object({
   hubPass: z.string().role('secret').default('').volatile(),
   hubCaCert: z.string().default('').volatile(),
   hubCaFingerprint: z.string().default('').volatile(),
-  instanceId: z.string().pattern(/^[a-z0-9-]+$/).default('home').volatile(),
+  /**
+   * Empty = auto (see src/instance-id.ts). The pattern keeps a hand-written
+   * value usable as a NATS subject token; the generated ids are `[0-9a-z]{8}`.
+   */
+  instanceId: z.string().pattern(/^[a-z0-9-]*$/).default('').volatile(),
   /**
    * Display name for this machine, as the phone shows it in its connection
    * list. Empty means "use instanceId": an existing install gets a readable

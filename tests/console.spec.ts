@@ -435,10 +435,10 @@ describe('console page', () => {
     // The poll fires every 5s. Assigning into these inputs erased whatever was
     // being typed — on a profile with nothing saved yet, the whole field.
     expect(html).toContain('function prefill(id, value)')
-    for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
+    for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceName', 'natsConfigPath', 'natsServerPath']) {
       expect(html).toContain(`prefill('${id}'`)
     }
-    for (const id of ['hubWssUrl', 'hubUser', 'instanceId', 'natsConfigPath', 'natsServerPath']) {
+    for (const id of ['hubWssUrl', 'hubUser', 'instanceName', 'natsConfigPath', 'natsServerPath']) {
       expect(html).not.toContain(`$('${id}').value =`)
     }
     // The CA field has exactly one deliberate writer — the fetch button — and
@@ -565,6 +565,91 @@ describe('console page', () => {
     expect(html).toContain('这个按钮只启动<b>已经装好</b>的本机 NATS')
     // Naming what is missing is only useful if it also hands over to that line.
     expect(html).toContain("lines.push('缺 ' + missing.join(' 和 ')")
+  })
+
+  it('orders the first run: Hub credential and CA, then the local NATS, then the QR', async () => {
+    // The two things first-run owners kept failing to find — the Hub's CA
+    // certificate and the button that starts the local NATS — now sit before
+    // the QR that cannot work without them, and neither is behind a disclosure
+    // whose name says something else.
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+    const at = (needle: string): number => html.indexOf(needle)
+
+    expect(at('id="setupChecklist"')).toBeGreaterThan(-1)
+    expect(at('id="setupChecklist"')).toBeLessThan(at('id="hubWssUrl"'))
+    expect(at('id="hubCaCert"')).toBeLessThan(at('id="saveBtn"'))
+    expect(at('id="startNatsBtn"')).toBeLessThan(at('id="pairBtn"'))
+    // The certificate is a labelled field of the Hub form, not a footnote in
+    // the instance block it used to live in.
+    expect(html).toContain('<label for="hubCaCert">Hub CA 证书</label>')
+    expect(html).not.toContain('<summary>实例与证书</summary>')
+    // The launch button left the advanced block, and the copy that explains a
+    // machine without a local NATS travelled with it.
+    expect(html).toContain('<h2 id="natsTitle">2. 本机 NATS（Leaf）</h2>')
+    expect(at('id="natsTitle"')).toBeLessThan(at('id="startNatsBtn"'))
+    expect(at('id="startNatsBtn"')).toBeLessThan(at('id="pairTitle"'))
+  })
+
+  it('ticks the checklist off as each first-run step lands', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('function renderSetup(s)')
+    expect(html).toContain("item.dataset.state = ready ? 'done' : (optional ? 'optional' : 'todo')")
+    expect(html).toContain("mark('setupHub', hubReady, false, 'Hub 凭证', '去填写')")
+    expect(html).toContain("mark('setupNats', natsReady, false, '本机 NATS', '去启动')")
+    expect(html).toContain("summary.textContent = pending.length === 0")
+    expect(html).toContain('renderSetup(s)')
+    // A Hub with a publicly signed certificate has no ca.crt to find, so that
+    // row is the one that must not hold the checklist back.
+    expect(html).toContain("mark('setupCa', caReady, true, 'CA 证书', '去获取')")
+    // Once a row is done its link stops offering the action it already got.
+    expect(html).toContain("if (jump) jump.textContent = ready ? '查看' : action")
+  })
+
+  it('shows the generated instance id as a value, with no way to type over it', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    // The id is generated per install and is what the phone dials, so the page
+    // reports it instead of offering a field: a typo here silently moves the
+    // machine to another namespace and every paired phone stops answering.
+    expect(html).toContain('<p class="readOnly" id="instanceIdValue">')
+    expect(html).not.toContain('<input id="instanceId"')
+    expect(html).not.toContain("$('instanceId').value")
+    expect(html).toContain("$('instanceIdValue').textContent = (s.instanceId || '—')")
+    expect(html).toContain("'（本次安装自动生成）'")
+    expect(html).toContain("'（profile 里手写覆盖）'")
+    expect(html).toContain('$DSH_HOME/mobile-bridge/instances.json')
+    // Saving must not carry the field either: the route merges, so leaving it
+    // out is what keeps an older hand-written id in place.
+    expect(html).not.toContain("instanceId: $('instanceId')")
+  })
+
+  it('dials the resolved namespace when the config field is empty', async () => {
+    // `instanceId: ''` means "auto": the generated value lives in the plugin's
+    // own store, so a check that fell back to the empty config would dial
+    // `svc.dsh..pair` and report the Hub as broken.
+    const seen: string[] = []
+    const route = captureRoutes(
+      { ...baseConfig, instanceId: '' },
+      (config: Config) => {
+        seen.push(config.instanceId)
+        return Promise.resolve({ ok: true, reason: 'ok', message: 'stubbed', steps: [] })
+      },
+      { instanceId: () => 'n4q7x82b' },
+    ).get('/mobile-bridge/api/hub-check')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+
+    expect(seen).toEqual(['n4q7x82b'])
   })
 
   it('hands the certificate it fetched to the page, unmodified', async () => {

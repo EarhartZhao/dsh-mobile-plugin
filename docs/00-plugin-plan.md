@@ -66,6 +66,7 @@ phone (外网) ──wss:8443──► NATS Hub (<hub-host>, 既有)
 - **Hub**：已上线运行（v2.14.4；实测 4222/7422 可达，支持 headers，max_payload 1 MiB）。与知识库等其他服务共用同一 Hub，以 subject 命名空间隔离。地址与账号只留在部署机上，仓库里一律用 `<hub-host>` / `<account>` 占位。换 Hub 或自建见 [02](02-nats-server.md) 与 [03](03-nats-self-host.md)。
 - **Hub 侧需追加**（仅此一项服务端改动）：私有 CA + `websocket` 监听 8443 原生 TLS（手机只走 wss://IP:8443，不用域名，不碰明文 4222）、dsh 专用 C 端账号。改动清单见 [02-nats-server.md](02-nats-server.md)。
 - **dsh 电脑**：部署本地 Leaf 节点（沿用既有 leaf-a~d 模式，见 Hub 文档第 4.5 节），插件连接 `localhost:4222`，无需账号（本机）。
+- **1 MiB 是回包的硬上限**：一次发布的正文超过连接的 `max_payload`，客户端自己就会拒绝（`MaxPayloadExceeded`），Hub 收不到、手机更收不到。所以 `session.history` / `subagent.history` 的回包会按 `max_payload` 裁剪——超出时丢掉**最旧**的记录并保持 `hasMore` 为真，App 从收到的第一条继续用 `beforeSeq` 往前翻；连单条记录都放不下时回 `mobile-history-too-large`，由 App 显示加载失败与重试。内容多的会话因此总能打开，只是首屏短一些。
 
 ## 为什么不是其他内网穿透方案
 
@@ -107,7 +108,7 @@ allowBuilds:
 不想让使用方加这条就换预构建产物。现在走的是 Release 资产：打 tag 时 `.github/workflows/release.yml` 先跑一遍验证（typecheck / test / build），再 `pnpm pack`——`prepare` 在这里跑，`lib/` 进包——把 `dsh-mobile-plugin-<version>.tgz` 与版本无关的 `dsh-mobile-plugin.tgz` 一起挂到该 tag 的 Release：
 
 ```bash
-pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.35/dsh-mobile-plugin-0.2.35.tgz
+pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.36/dsh-mobile-plugin-0.2.36.tgz
 ```
 
 Release 资产是个普通远端 tarball，不经 git 托管路径，`prepare` 不会被调用，`allowBuilds` 也不再需要——代价是安装源从源码树变成资产，且这台机器要能访问 GitHub Release（源码 tarball 走的是 codeload，两者域名不同）。控制台的更新按钮认这种 spec：`releaseAssetSpec` 把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`dsh-mobile-plugin-0.2.24.tgz` → `dsh-mobile-plugin-0.2.25.tgz`），换 URL 也就换掉了 pnpm 的 integrity，不会拿回旧字节。带 `-rc` 的 tag 发布时标成 pre-release，`releases/latest` 因此不会指向预发布版。
@@ -156,7 +157,7 @@ registry 装上之后还有一处得自己拼：pnpm 在 profile 清单里只写
 ```yaml
 config:
   natsUrl: 'nats://127.0.0.1:4222'  # 本机 Leaf；Leaf 挂了插件自动重连
-  instanceId: 'home-pc'             # subject 命名空间 svc.dsh.{instance}.* / evt.dsh.{instance}.*
+  instanceId: 'home-pc'             # subject 命名空间 svc.dsh.{instance}.* / evt.dsh.{instance}.*；留空 = 为这次安装自动生成 8 位 ID
   instanceName: '工作台 Mac'         # 手机连接列表里显示的名字；留空回退 instanceId
   tokenTtlDays: 90
   pairCodeTtlSec: 120
