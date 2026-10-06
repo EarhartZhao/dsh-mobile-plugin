@@ -26,7 +26,15 @@ import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from '.
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
 import { registerConsoleRoutes, type WebRouter } from './console.js'
-import { natsEndpoint, probePort, resolveLeafConfig, resolveNatsServer, type LocalNatsResolution } from './nats-launch.js'
+import {
+  missingLeafConfigMessage,
+  missingNatsServerMessage,
+  natsEndpoint,
+  probePort,
+  resolveLeafConfig,
+  resolveNatsServer,
+  type LocalNatsResolution,
+} from './nats-launch.js'
 import {
   migrateProfile,
   needsRepair,
@@ -753,22 +761,11 @@ export class MobileBridge extends Service {
 
     const server = resolveNatsServer(this.localNatsInput('server'))
     if (!server.exists) {
-      return {
-        ok: false,
-        message: '找不到 nats-server 可执行文件，已按顺序查找：\n'
-          + server.candidates.map(candidate => `  · ${candidate}`).join('\n')
-          + '\n装好它、或把路径写进下方「nats-server 路径」（也可以设 NATS_SERVER_PATH 环境变量）。',
-      }
+      return { ok: false, message: missingNatsServerMessage(server) }
     }
     const leaf = resolveLeafConfig(this.localNatsInput('config'))
     if (!leaf.exists) {
-      return {
-        ok: false,
-        message: '找不到 NATS 配置文件，已按顺序查找：\n'
-          + leaf.candidates.map(candidate => `  · ${candidate}`).join('\n')
-          + '\n把 Leaf 配置放到其中之一，或把路径写进下方「本地 NATS 配置文件」'
-          + '（也可以设 NATS_CONFIG_PATH 环境变量）。',
-      }
+      return { ok: false, message: missingLeafConfigMessage(leaf) }
     }
     const command = server.path
     const configPath = leaf.path

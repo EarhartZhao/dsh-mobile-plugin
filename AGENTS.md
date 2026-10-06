@@ -21,7 +21,7 @@ dsh-mobile-plugin 是 deepseek-harness（dsh）的 cordis 插件，提供 NATS o
 
 ## 文档
 
-`docs/` 下四份，职责不同，别把内容写错地方：
+`docs/` 下五份，职责不同，别把内容写错地方：
 
 | 文档 | 写什么 |
 |---|---|
@@ -29,6 +29,7 @@ dsh-mobile-plugin 是 deepseek-harness（dsh）的 cordis 插件，提供 NATS o
 | `01-auth-pairing.md` | 双层凭证模型、配对流程、token 存储 |
 | `02-nats-server.md` | **现有部署**的 NATS 增量改动清单与实况记录 |
 | `03-nats-self-host.md` | 自建 NATS 服务教程（Hub 从零 → 本机 Leaf → 插件配置 → 验收 → 故障排查），面向部署者 |
+| `04-ai-onboarding.md` | 新电脑接入清单：装 `nats-server`、写 `leaf.conf`、接上 Hub 并自检，写给 AI 助手读（控制台本地 NATS 区与 README 都指向它） |
 
 写文档时的约定：
 

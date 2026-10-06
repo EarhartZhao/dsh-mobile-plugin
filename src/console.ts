@@ -543,6 +543,14 @@ const CONSOLE_HTML = `<!doctype html>
   <span id="natsMsg" style="white-space:pre-line"></span>
 </div>
 <p id="natsPathLine" style="font-size:12px;opacity:.7;margin:2px 0 0;white-space:pre-line"></p>
+<p id="natsHelpLine" style="font-size:12px;opacity:.7;margin:2px 0 0">
+  这个按钮只启动<b>已经装好</b>的本机 NATS；这台电脑还没有 nats-server 或还没有 leaf.conf 时，把
+  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md" target="_blank" rel="noreferrer">docs/04-ai-onboarding.md</a>
+  整页交给这台电脑上的 AI，让它照着装（装 nats-server → 写 leaf.conf → 取 CA → 自检 Hub 账号）；
+  自己动手就看
+  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
+  的「3. Leaf：dsh 电脑上的本机节点」。
+</p>
 <div class="row">
   <input id="natsConfigPath" placeholder="leaf.conf 路径（留空 = 自动查找）" style="flex:1" autocomplete="off" spellcheck="false">
   <button id="saveNatsPathBtn" class="secondary" type="button" style="white-space:nowrap">保存路径</button>
@@ -802,6 +810,16 @@ function renderLocalNats(localNats) {
     if (part && !part.exists && Array.isArray(part.candidates)) {
       lines.push('查找范围：\\n' + part.candidates.map(p => '  · ' + p).join('\\n'))
     }
+  }
+  // "找不到" alone leaves the owner with nothing to do next: the button only
+  // launches what is already installed, so name what is missing and hand over
+  // to the page's install line (docs/04) instead of letting them retry.
+  const missing = [
+    config.exists ? '' : 'leaf.conf（配置文件）',
+    server && server.exists ? '' : 'nats-server（可执行文件）',
+  ].filter(text => text !== '')
+  if (missing.length > 0) {
+    lines.push('缺 ' + missing.join(' 和 ') + '：这个按钮只启动装好的东西，按下面那条说明装好再点一次')
   }
   $('natsPathLine').textContent = lines.join('\\n')
 }

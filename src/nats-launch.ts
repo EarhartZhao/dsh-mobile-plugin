@@ -212,3 +212,30 @@ export function resolveNatsServer(input: LocalNatsInput = {}): LocalNatsResoluti
   const { platform } = resolvedInput(input)
   return resolve(input, natsServerCandidates(input), platform === 'win32' ? 'nats-server.exe' : 'nats-server')
 }
+
+/**
+ * The checklist a machine with no local NATS is missing.
+ *
+ * "Nothing found" is not an instruction: this button only launches what is
+ * already installed, so every miss has to name the path out of it. The manual
+ * steps live in the repo's `docs/04-ai-onboarding.md`, which is written to be
+ * handed whole to the AI assistant running on that machine.
+ */
+export const NATS_INSTALL_GUIDE = 'docs/04-ai-onboarding.md'
+
+/** Why the launch button found no executable, and what to do about it. */
+export function missingNatsServerMessage(server: LocalNatsResolution): string {
+  return '找不到 nats-server 可执行文件，已按顺序查找：\n'
+    + server.candidates.map(candidate => `  · ${candidate}`).join('\n')
+    + '\n装好它、或把路径写进下方「nats-server 路径」（也可以设 NATS_SERVER_PATH 环境变量）。'
+    + `\n从零装一份的完整清单见 ${NATS_INSTALL_GUIDE}（把那一页交给这台电脑上的 AI，它照着就能做完）。`
+}
+
+/** Why the launch button found no Leaf config, and what to do about it. */
+export function missingLeafConfigMessage(leaf: LocalNatsResolution): string {
+  return '找不到 NATS 配置文件，已按顺序查找：\n'
+    + leaf.candidates.map(candidate => `  · ${candidate}`).join('\n')
+    + '\n把 Leaf 配置放到其中之一，或把路径写进下方「本地 NATS 配置文件」'
+    + '（也可以设 NATS_CONFIG_PATH 环境变量）。'
+    + `\n从零写一份的完整清单见 ${NATS_INSTALL_GUIDE}（把那一页交给这台电脑上的 AI，它照着就能做完）。`
+}

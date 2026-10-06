@@ -10,6 +10,7 @@
 - [01-auth-pairing.md](docs/01-auth-pairing.md) — 双层凭证模型、配对流程、token 存储
 - [02-nats-server.md](docs/02-nats-server.md) — 复用既有 NATS Hub 的改动清单（websocket/TLS/账号/Leaf 部署）
 - [03-nats-self-host.md](docs/03-nats-self-host.md) — 自建 NATS 服务教程（Hub 从零 → 本机 Leaf → 插件配置 → 验收 → 故障排查）
+- [04-ai-onboarding.md](docs/04-ai-onboarding.md) — 新电脑接入清单：装 `nats-server`、写 `leaf.conf`、接上 Hub 并自检（写给 AI 助手读，人也能照做）
 
 ## 快速开始
 
@@ -21,6 +22,10 @@
 4. **发码。** 状态显示「已连接」后点「生成配对二维码」，用手机 App 扫。
 
 顺序不能颠倒：手机用的是**插件里配的那组 Hub 凭证**，它随二维码下发，App 不内置任何账号。每一步的字段与排错见[首次配置](#首次配置顺序不能颠倒)。
+
+这台电脑还没有本机 NATS——控制台点「启动本地 NATS」报找不到 `nats-server` 或 `leaf.conf`——就先读
+[docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)：它是一份**交给 AI 的清单**，把整页丢给这台电脑上的助手（或自己照做），
+装好 `nats-server`、写好 `leaf.conf`、取到 CA，再回到上面的第 2 步。
 
 ## 安装
 
@@ -157,6 +162,10 @@ node scripts/migrate-to-scoped.mjs ~/.dsh/profiles/web
 
 这个按钮先探测 `natsUrl` 的端口，已经在监听就直接复用（本机 Leaf 可能是手工、服务管理器或上一次 dsh 启动的，那种情况根本不需要配置文件）；否则在本机启动 `nats-server -c <配置文件>`，随后插件自动连接 `natsUrl`。**两条路径都不写死**，按 `NATS_CONFIG_PATH` / `NATS_SERVER_PATH` 环境变量 → 控制台「本地 NATS 配置文件」/「nats-server 路径」字段 → 自动查找的顺序定；自动查找依次看 `$DSH_HOME/mobile-bridge/`、本项目的 `~/.nats-leaf/`（配置与二进制同目录）、`~/.config/nats/`，再按平台补 macOS 的 Homebrew 前缀、Linux 的 `/etc/nats`、Windows 的 `C:\\nats`（可执行文件最后回落到 `PATH`）。控制台状态行显示最终选中的两条路径以及它们是否存在，找不到时报错会列出查找过的全部候选。该操作仅允许回环请求。
 
+新电脑上还没有这两样东西时，这个按钮帮不上忙——它只启动**已经装好**的 `nats-server` 与 `leaf.conf`。
+装法与自检顺序见 [docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)：那份文档就是为「整页交给这台电脑上的
+AI，让它照着做完」写的，控制台的本地 NATS 区也放了指向它的链接。
+
 ### 插件自述与诊断（App 侧）
 
 plugin 0.2 起提供可选的 `mobile.inventory`（需要设备 token），桥接宿主 `pluginInventory.list()`；App 在 `features` 含 `plugin-inventory` 时会在设置页显示只读插件清单。宿主未挂载清单服务时，设置页显示“当前桥未提供插件清单”，不影响连接和其它功能。
@@ -280,3 +289,5 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 0.2.32 修掉 0.2.30 那条会毁证书的补链命令，移动端 wire 不变：0.2.30 把「从 Hub 获取 CA」在 Hub 只发叶子时给出的命令改成就地重写，方向是对的（新建文件是 root 属主，以 `nats` 用户运行的服务读不到），但写成了 `cat server.crt /root/dsh-mobile-setup/ca.crt > server.crt` ——**输出和输入是同一个文件**，shell 会在 `cat` 读到它之前先把它清空，跑完 `server.crt` 里只剩 CA、叶子没了，Hub 的 websocket 当场起不来。现在改成先 `cp -p server.crt server.leaf.crt` 再从那一份拼（与 [docs/03 §2.6](docs/03-nats-self-host.md) 完全一致），幂等、属主与权限不变，并在提示里点明「输出不能指向输入」。测试加了一条回归守卫：文案里任何 `cat … > x` 都不得把 `x` 同时当输入。
 
 0.2.33 补上「CA 从哪来」这一问，移动端 wire 不变：控制台原有的提示都默认 Hub 与 `ca.crt` 已经存在——CA 字段标签指向「从 Hub 获取 CA」，拼链命令默认你手里有那份 ca.crt，唯一提到自建流程的地方藏在「测试 Hub 账号」密码被拒的文案里，而页面本身一个链接都没有。于是站在零起点的人（Hub 还没搭，或搭了但没人给过 ca.crt）在界面上问不出答案。现在 CA 区下面常驻一行小字，把两种情况讲清楚：Hub 是别人搭的就向对方要（ca.crt 是公开材料，不含私钥）；Hub 是自己搭的就得先在服务器上生成自己的 CA，私钥 `ca.key` 留在管理机、绝不进服务器，只有 `ca.crt` 要填进这个字段——并给出 [docs/03](docs/03-nats-self-host.md) 的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」直达链接（GitHub 上的同一份文件）。
+
+0.2.34 补上新电脑「本机 NATS 还没有」这一段空白，移动端 wire 不变：控制台的「启动本地 NATS」只启动**已经装好**的 `nats-server` 与 `leaf.conf`，而这台机器上两样都没有时，界面只会说「找不到 + 查找范围」——对着一台新电脑，那是死路，缺的正是「怎么装」。新增 **[docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)**：一份写给 AI 助手读的接入清单（要问用户哪三组值、三平台怎么装 `nats-server`、`leaf.conf` 模板与放置顺序、前台试跑的判定日志、常驻方案、插件里接 Hub 的六步、症状对照表、以及四条硬约束），把整页交给那台电脑上的 AI 就能照做，人也可以照着走。控制台本地 NATS 区常驻一行指向它的链接（GitHub 上的同一份文件），状态行在缺文件时除「查找范围」外再点名缺了哪一样；`nats-server` / 配置文件都找不到时返回的那两条错误也各自带上这份清单的路径。README 的文档索引与 [docs/03 §3](docs/03-nats-self-host.md) 同步加了指路。

@@ -2,6 +2,8 @@ import { createServer } from 'node:net'
 import { describe, expect, it } from 'vitest'
 import {
   leafConfigCandidates,
+  missingLeafConfigMessage,
+  missingNatsServerMessage,
   natsEndpoint,
   natsServerCandidates,
   probePort,
@@ -155,5 +157,32 @@ describe('resolveNatsServer', () => {
     expect(missing).toMatchObject({ path: 'nats-server', exists: false })
     const fromField = resolveNatsServer({ platform: 'linux', home: '/home/x', configured: '/opt/nats', exists: () => true })
     expect(fromField).toMatchObject({ path: '/opt/nats', exists: true, source: 'config', candidates: ['/opt/nats'] })
+  })
+})
+
+describe('missing-file messages', () => {
+  // A machine with no local NATS is the one case the launch button cannot fix
+  // itself, so the message has to do two things: name every path it looked at
+  // (the owner may keep the file somewhere else) and hand over to the install
+  // checklist that an AI assistant can execute.
+  const input = { platform: 'linux' as const, home: '/home/x', pathEnv: '', exists: () => false }
+
+  it('lists the guessed executable paths and points at the install checklist', () => {
+    const server = resolveNatsServer(input)
+    const message = missingNatsServerMessage(server)
+    expect(message).toContain('找不到 nats-server 可执行文件')
+    for (const candidate of server.candidates) expect(message).toContain(candidate)
+    expect(message).toContain('docs/04-ai-onboarding.md')
+    // The last candidate is the bare name (its meaning is "put it on PATH"),
+    // so the message has to keep telling the owner about the field too.
+    expect(message).toContain('NATS_SERVER_PATH')
+  })
+
+  it('lists the guessed config paths and points at the install checklist', () => {
+    const leaf = resolveLeafConfig(input)
+    const message = missingLeafConfigMessage(leaf)
+    expect(message).toContain('找不到 NATS 配置文件')
+    for (const candidate of leaf.candidates) expect(message).toContain(candidate)
+    expect(message).toContain('docs/04-ai-onboarding.md')
   })
 })

@@ -248,6 +248,10 @@ ssh root@<hub-host> 'set -e; cd /etc/nats/tls \
 
 ## 3. Leaf：dsh 电脑上的本机节点
 
+本节做的事（装 `nats-server`、写 `leaf.conf`、让它常驻、回插件里接上 Hub）另有一份**写给 AI 的清单**：
+[04-ai-onboarding.md](04-ai-onboarding.md)。新电脑上没有本机 NATS 时，把那份交给这台电脑上的 AI 去做最快；
+下面是同一件事的手工版。
+
 ```hcl
 # 放哪都行，插件按下面的顺序自己找（Windows: C:\nats\leaf.conf，Linux: /etc/nats/leaf.conf）
 host: 127.0.0.1        # 本机客户端口没有认证，只监听回环

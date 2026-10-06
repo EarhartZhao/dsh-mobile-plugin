@@ -513,6 +513,22 @@ describe('console page', () => {
     expect(html).toContain('连 ca.crt 都还没有？看下面那一行')
   })
 
+  it('points a machine with no local NATS at the install checklist', async () => {
+    // The button only launches what is already installed; a machine that has
+    // neither the binary nor the config needs a way out of that state, and the
+    // one written for an AI assistant to execute is docs/04.
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('id="natsHelpLine"')
+    expect(html).toContain('href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md"')
+    expect(html).toContain('这个按钮只启动<b>已经装好</b>的本机 NATS')
+    // Naming what is missing is only useful if it also hands over to that line.
+    expect(html).toContain("lines.push('缺 ' + missing.join(' 和 ')")
+  })
+
   it('hands the certificate it fetched to the page, unmodified', async () => {
     const pem = '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n'
     const route = captureRoutes(baseConfig, undefined, {
