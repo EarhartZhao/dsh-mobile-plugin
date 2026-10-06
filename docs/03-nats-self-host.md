@@ -238,6 +238,10 @@ ssh root@<hub-host> 'set -e; cd /etc/nats/tls \
 换成"新建 `fullchain.crt` 再改 `cert_file`"的话，新文件是 root 属主，而服务多半以 `nats` 用户运行——
 证书读不到，websocket 监听会直接起不来。`cert_file` 也依旧指着 `server.crt`，配置文件不用动。
 
+拼的时候还要注意**输出不能指向输入**：`cat server.crt ca.crt > server.crt` 这种写法里，重定向会在 `cat`
+读到 `server.crt` 之前先把它清空，跑完只剩 CA、叶子没了，Hub 的 TLS 当场挂掉。所以先把叶子 `cp -p` 成
+`server.leaf.crt`，再从**那一份**拼出 `server.crt`——这也正是上面命令幂等的原因（重复跑不会叠加 CA）。
+
 这件事只跟"别的机器怎么拿到 CA"有关：手机走的还是二维码里那张证书，链路和之前完全一样。
 
 ## 3. Leaf：dsh 电脑上的本机节点

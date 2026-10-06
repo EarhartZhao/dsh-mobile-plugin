@@ -105,7 +105,15 @@ describe('fetchHubCertificate', () => {
     expect(result.message).toContain('systemctl restart nats')
     // Writing in place is the part that keeps a nats-owned certificate
     // readable: a freshly created file would be root-owned.
-    expect(result.message).toContain('属主与权限不变')
+    expect(result.message).toContain('就地重写')
+    // The CA goes in beside a copy of the leaf. `cat server.crt ca.crt >
+    // server.crt` shipped in 0.2.30 and empties the source before cat reads
+    // it: the Hub would come back with a certificate file holding only the
+    // CA. No hint may ever redirect a file onto itself again.
+    expect(result.message).toContain('cat server.leaf.crt')
+    for (const [, sources, target] of result.message.matchAll(/cat\s+([^\n>]*?)\s*>\s*([^\s'"]+)/g)) {
+      expect(sources!.trim().split(/\s+/)).not.toContain(target)
+    }
   })
 
   it('withholds a certificate that fails its own verification', async () => {
