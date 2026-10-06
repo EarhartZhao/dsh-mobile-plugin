@@ -27,6 +27,7 @@ await build({
   format: 'cjs',
   platform: 'browser',
   target: 'es2022',
+  jsx: 'automatic',
   sourcemap: true,
   external: EXTERNALS,
   define: {

@@ -5,6 +5,8 @@ import { isVolatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
 
 export interface Config {
+  /** Whether the NATS bridge runs at all. Off keeps the console available. */
+  enabled: boolean
   /** Local Leaf node address; the Leaf owns Hub reachability and retries. */
   natsUrl: string
   /** Public Hub wss address handed to phones via the pairing QR. */
@@ -72,6 +74,7 @@ export interface Config {
 export type ConfigInput = { [K in keyof Config]: Volatile<Config[K]> }
 
 export const Config = z.object({
+  enabled: z.boolean().default(true).volatile(),
   natsUrl: z.string().default('nats://127.0.0.1:4222').volatile(),
   hubWssUrl: z.string().default('').volatile(),
   hubUser: z.string().default('').volatile(),
@@ -108,6 +111,7 @@ function field<T>(value: Volatile<T> | T): T {
  */
 export function configValues(input: ConfigInput | Config): Config {
   return {
+    enabled: field(input.enabled),
     natsUrl: field(input.natsUrl),
     hubWssUrl: field(input.hubWssUrl),
     hubUser: field(input.hubUser),

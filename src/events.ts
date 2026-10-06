@@ -35,6 +35,18 @@ export interface EventBridgeOptions {
    * always published immediately. 0 disables coalescing.
    */
   coalesceMs: number
+  /**
+   * Random subject segments for devices that paired with device-scoped event
+   * subscriptions. The key is not an authentication credential; publishing to
+   * it only keeps one phone from receiving another phone's stream.
+   */
+  eventKeys?: () => string[]
+  /**
+   * Whether at least one active device still predates device-scoped events and
+   * therefore needs the legacy `evt.dsh.{instance}.mux|host` subjects. Once
+   * every active device has re-paired, shared publishing stops automatically.
+   */
+  legacyShared?: () => boolean
 }
 
 type GatewayStreamName = 'remote events' | 'session control' | 'workspace follow' | 'workspace files'
@@ -1131,10 +1143,9 @@ export class EventBridge {
 
   start(): void {
     const { signal } = this.abort
-    const instance = this.options.instanceId
     this.pumps = [
-      this.pump(this.api.events.mux({ rpcId: randomUUID(), payload: {} }, signal), `evt.dsh.${instance}.mux`),
-      this.pump(this.api.events.host({ rpcId: randomUUID(), payload: {} }, signal), `evt.dsh.${instance}.host`),
+      this.pump(this.api.events.mux({ rpcId: randomUUID(), payload: {} }, signal), 'mux'),
+      this.pump(this.api.events.host({ rpcId: randomUUID(), payload: {} }, signal), 'host'),
     ]
     if (this.options.coalesceMs > 0) {
       this.coalesceTimer = setInterval(() => this.flushCoalesced(), this.options.coalesceMs)
@@ -1152,27 +1163,38 @@ export class EventBridge {
 
   /** Re-publish still-pending answerable frames (app reconnect hook). */
   replayPending(): void {
-    const subject = `evt.dsh.${this.options.instanceId}.mux`
-    for (const json of this.pending.values()) this.nc.publish(subject, json)
+    for (const json of this.pending.values()) this.publish('mux', json)
   }
 
-  private async pump(frames: AsyncIterable<StreamFrame>, subject: string): Promise<void> {
+  private subject(stream: 'mux' | 'host', eventKey?: string): string {
+    const base = `evt.dsh.${this.options.instanceId}`
+    return eventKey === undefined ? `${base}.${stream}` : `${base}.${eventKey}.${stream}`
+  }
+
+  /** Fan one frame out to the legacy subject when needed and every keyed device. */
+  private publish(stream: 'mux' | 'host', json: string): void {
+    if (this.options.legacyShared?.() ?? true) this.nc.publish(this.subject(stream), json)
+    for (const eventKey of this.options.eventKeys?.() ?? []) this.nc.publish(this.subject(stream, eventKey), json)
+  }
+
+  private async pump(frames: AsyncIterable<StreamFrame>, stream: 'mux' | 'host'): Promise<void> {
     for await (const frame of frames) {
       this.trackPending(frame)
       const json = serverRequest(frame)
       if (this.options.coalesceMs > 0 && frame.payload.type === 'session/projection') {
         const key = `${String(frame.payload['sessionId'])}:${String(frame.payload['key'])}`
-        this.coalesceBuffer.set(key, json)
+        this.coalesceBuffer.set(`${stream}:${key}`, json)
       } else {
-        this.nc.publish(subject, json)
+        this.publish(stream, json)
       }
     }
   }
 
   private flushCoalesced(): void {
     if (this.coalesceBuffer.size === 0) return
-    const subject = `evt.dsh.${this.options.instanceId}.mux`
-    for (const json of this.coalesceBuffer.values()) this.nc.publish(subject, json)
+    for (const [key, json] of this.coalesceBuffer) {
+      this.publish(key.startsWith('host:') ? 'host' : 'mux', json)
+    }
     this.coalesceBuffer.clear()
   }
 

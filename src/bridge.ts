@@ -5,7 +5,7 @@
  * by the plugin itself, everything else forwards verbatim.
  */
 import type { Msg, NatsConnection } from 'nats'
-import type { TokenStore } from './tokens.js'
+import type { DeviceEntry, TokenStore } from './tokens.js'
 
 /** Direct in-process view of the current Typert Gateway. */
 export interface GatewayCarrier {
@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.34'
+export const PLUGIN_VERSION = '0.2.35'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -128,6 +128,8 @@ export interface FetchCarrier {
 
 export interface BridgeOptions {
   instanceId: string
+  /** Stable identity of this plugin installation; additive on mobile.info/hello. */
+  gatewayId?: string
   /**
    * Human name for this machine, shown by the phone in its connection list.
    * Callers resolve the empty config value to `instanceId` before it gets
@@ -146,7 +148,7 @@ export interface BridgeOptions {
    * phone renames itself by stating a new one, without pairing again. Older
    * apps send no name, and the stored one is left alone.
    */
-  onHello: (deviceId: string, deviceName?: string) => void
+  onHello: (deviceId: string, deviceName: string | undefined, device: DeviceEntry) => void
   /** Optional read-only Loader snapshot; absent on hosts without the inventory plugin. */
   onInventory?: () => unknown | Promise<unknown>
   /** Authenticated operational snapshot for mobile connection diagnostics. */
@@ -725,12 +727,15 @@ export class RpcBridge {
     }
 
     if (method === PAIR_METHOD) {
-      const payload = (JSON.parse(new TextDecoder().decode(body)) as { payload?: { code?: string, deviceName?: string } }).payload
+      const payload = (JSON.parse(new TextDecoder().decode(body)) as {
+        payload?: { code?: string, deviceName?: string, installationId?: string }
+      }).payload
       const redeemed = await this.options.tokens.redeemPairingCodeResult(
         String(payload?.code ?? ''),
         String(payload?.deviceName ?? ''),
         this.options.tokenTtlDays,
         this.options.maxDevices,
+        payload?.installationId,
       )
       msg.respond(new TextEncoder().encode(redeemed.ok
         ? pairResult(rpcId, redeemed.value)
@@ -751,14 +756,30 @@ export class RpcBridge {
       // needing another pairing round. A malformed payload is not worth a
       // failed reconnect: the replay below is the part that matters.
       let deviceName: string | undefined
+      let installationId: string | undefined
+      let eventKey: string | undefined
       try {
-        const payload = (JSON.parse(new TextDecoder().decode(body)) as { payload?: { deviceName?: unknown } }).payload
+        const payload = (JSON.parse(new TextDecoder().decode(body)) as {
+          payload?: { deviceName?: unknown, installationId?: unknown, eventKey?: unknown }
+        }).payload
         if (typeof payload?.deviceName === 'string') deviceName = payload.deviceName
+        if (typeof payload?.installationId === 'string') installationId = payload.installationId
+        if (typeof payload?.eventKey === 'string') eventKey = payload.eventKey
       } catch {
         deviceName = undefined
       }
-      this.options.onHello(device.id, deviceName)
-      msg.respond(new TextEncoder().encode(pairResult(rpcId, { ok: true })))
+      if (installationId !== undefined) {
+        void this.options.tokens.rememberInstallation(device.id, installationId).catch(() => undefined)
+      }
+      if (eventKey !== undefined) {
+        await this.options.tokens.rememberEventCapability(device.id, eventKey).catch(() => undefined)
+      }
+      this.options.onHello(device.id, deviceName, device)
+      msg.respond(new TextEncoder().encode(pairResult(rpcId, {
+        ok: true,
+        ...(this.options.gatewayId === undefined ? {} : { gatewayId: this.options.gatewayId }),
+        gatewayName: this.options.instanceName,
+      })))
       return
     }
 
@@ -768,6 +789,7 @@ export class RpcBridge {
         mobileApi: PLUGIN_MOBILE_API,
         features: PLUGIN_FEATURES,
         instanceName: this.options.instanceName,
+        ...(this.options.gatewayId === undefined ? {} : { gatewayId: this.options.gatewayId }),
       })))
       return
     }

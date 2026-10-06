@@ -49,6 +49,7 @@ describe('RpcBridge', () => {
   let dir: string
   let tokens: TokenStore
   let validToken: string
+  let eventKey: string
   let carrierCalls: { url: string, body: string }[]
   let carrier: FetchCarrier
   let helloCount: number
@@ -58,13 +59,16 @@ describe('RpcBridge', () => {
   let bridge: RpcBridge
 
   const PREFIX = 'svc.dsh.test.'
+  const GATEWAY_ID = 'd56a1098-8519-43a1-9dce-fb99863bf5bb'
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'dsh-mobile-bridge-'))
     tokens = new TokenStore(join(dir, 'tokens.json'))
     await tokens.load()
     const { code } = tokens.createPairingCode(120)
-    validToken = (await tokens.redeemPairingCode(code, 'test-phone', 90, 10))!.token
+    const paired = (await tokens.redeemPairingCode(code, 'test-phone', 90, 10))!
+    validToken = paired.token
+    eventKey = paired.eventKey
 
     carrierCalls = []
     carrier = {
@@ -86,6 +90,7 @@ describe('RpcBridge', () => {
     const nc = { subscribe: () => fakeSubscription([]) } as never
     bridge = new RpcBridge(nc, {
       instanceId: 'test',
+      gatewayId: GATEWAY_ID,
       instanceName: 'test-mac',
       carrier,
       tokens,
@@ -709,12 +714,33 @@ describe('RpcBridge', () => {
     expect(helloArgs?.deviceName).toBeUndefined()
   })
 
+  it('hello records the event key and installation id and returns the gateway identity', async () => {
+    const installationId = '0e4d8614-fef3-4e31-82ec-b442974c0956'
+    const msg = makeMsg(`${PREFIX}hello`, {
+      type: 'client-request', rpcId: 'r7d', method: 'hello',
+      payload: { deviceName: 'Pixel 8', eventKey, installationId },
+    }, validToken)
+    await drive(msg)
+
+    expect(replyJson(msg).result.value).toEqual({
+      ok: true,
+      gatewayId: GATEWAY_ID,
+      gatewayName: 'test-mac',
+    })
+    expect(tokens.hasLegacyActiveDevices()).toBe(false)
+    expect(tokens.list()[0]).toMatchObject({
+      name: 'test-phone',
+      installationId,
+      eventCapable: true,
+    })
+  })
+
   it('serves the plugin compatibility manifest after token auth', async () => {
     const msg = makeMsg(`${PREFIX}mobile.info`, { type: 'client-request', rpcId: 'r-info', method: 'mobile.info', payload: {} }, validToken)
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.34',
+      pluginVersion: '0.2.35',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
@@ -723,6 +749,7 @@ describe('RpcBridge', () => {
         'workspace-files', 'workspace-watch', 'workspace-stat', 'message-feedback', 'workspace-unarchive', 'goal-state', 'open-path',
       ],
       instanceName: 'test-mac',
+      gatewayId: GATEWAY_ID,
     })
     expect(carrierCalls).toHaveLength(0)
   })

@@ -46,6 +46,7 @@ describe('configValues', () => {
 /** Plain config: what a headless composition or a test hands over. */
 function plain(): PlainConfig {
   return {
+    enabled: true,
     natsUrl: 'nats://127.0.0.1:4222',
     hubWssUrl: '',
     hubUser: '',

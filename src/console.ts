@@ -4,12 +4,12 @@
  * can reach it). This is the onboarding wizard: server-info form, connection
  * status, pairing QR, and device management.
  *
- * The official settings card (src/client) embeds this same page, so both
- * surfaces share one backend and never diverge.
+ * The Plugins page's client half uses the same JSON routes for its compact
+ * tabs; this page remains the standalone full-screen workflow.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
-import type { MobileBridge, UpdateReport } from './index.js'
+import type { LocalNatsRuntimeStatus, MobileBridge, UpdateReport } from './index.js'
 import type { Config } from './config.js'
 import {
   checkHubCertificate,
@@ -50,6 +50,8 @@ export interface ConsoleBackend {
   startNats: () => Promise<{ ok: boolean, message: string }>
   /** Leaf config and executable the launch button will use, for the status panel. */
   localNats?: () => { config: LocalNatsResolution, server: LocalNatsResolution }
+  /** Live runtime state of the local NATS port, for the status panel. */
+  localNatsStatus?: () => Promise<LocalNatsRuntimeStatus>
   /** Check (and repair) how the profile mounts this plugin's row. */
   repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
@@ -205,13 +207,18 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
     webServer.register({
       kind: 'exact',
       path: '/mobile-bridge/api/status',
-      handler: (req, res) => {
+      handler: async (req, res) => {
         const rejected = consoleRequestRejection(req, { mutating: false })
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const bridge = backend.bridge()
         const status = bridge.status()
         const config = backend.currentConfig()
         const ca = readHubCa(config.hubCaCert)
+        // Port probe, so this is the one async read: it answers "is NATS up"
+        // rather than "does the config file exist".
+        const localNatsRuntime = backend.localNatsStatus === undefined
+          ? null
+          : await backend.localNatsStatus()
         // The password is deliberately absent here: this response is polled
         // every few seconds, and a secret that rides a poll is available to any
         // local process at any moment. It comes from `/api/reveal` instead, only
@@ -222,7 +229,9 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
           // a server-side function is testable without a browser.
           versionDrift: versionDrift(status.pluginVersion, status.installedVersion),
           localNats: backend.localNats?.() ?? null,
+          localNatsRuntime,
           config: {
+            enabled: config.enabled,
             hubWssUrl: config.hubWssUrl,
             hubUser: config.hubUser,
             hubPassConfigured: config.hubPass.length > 0,
@@ -265,6 +274,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         try {
           const body = await readJson(req)
           const patch: Partial<Config> = {}
+          if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
           // A bare host or IP is what people paste; store the WSS URL the QR needs.
           if (typeof body.hubWssUrl === 'string') patch.hubWssUrl = normalizeHubWssUrl(body.hubWssUrl)
           if (typeof body.hubUser === 'string') patch.hubUser = body.hubUser.trim()
@@ -384,7 +394,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         // no-responders 503. Unlike a credential typo this can heal on its own
         // (the Leaf reconnects), so warn instead of refusing to mint.
         try {
-          const pairing = backend.bridge().createPairingQr()
+          const pairing = await backend.bridge().createPairingQr()
           const text = JSON.stringify(pairing.payload)
           // A phone camera resolves this off a screen, so density is the whole
           // game: the 4-module quiet zone is the spec minimum (2 slows
@@ -483,162 +493,582 @@ const CONSOLE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>dsh-mobile 桥接配置</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px 32px; }
-  h1 { font-size: 20px; } h2 { font-size: 15px; margin-top: 28px; }
-  label { display: block; font-size: 13px; margin: 10px 0 4px; opacity: .8; }
-  input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
-  textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }
-  button { padding: 8px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
-  button.secondary { background: #8884; color: inherit; }
-  button:disabled { opacity: .5; cursor: default; }
-  .row { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
-  #status { font-size: 13px; padding: 6px 10px; border-radius: 6px; background: #8882; }
-  .health { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 7px 14px; padding: 14px; border: 1px solid #8883; border-radius: 8px; font-size: 12px; }
-  .health dt { opacity: .65; } .health dd { margin: 0; overflow-wrap: anywhere; }
-  #qr { margin-top: 16px; text-align: center; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4;
+    --surface: #fff;
+    --surface-soft: #f1f1ee;
+    --text: #18181b;
+    --muted: #6b6b73;
+    --line: #deded9;
+    --line-strong: #c8c8c1;
+    --accent: #1f6feb;
+    --accent-soft: #eaf2ff;
+    --success: #18794e;
+    --success-soft: #e9f6ef;
+    --warning: #8a5a00;
+    --warning-soft: #fff7df;
+    --danger: #b42318;
+    --danger-soft: #fff0ee;
+    --radius: 8px;
+    --shadow: 0 1px 2px #18181b0a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101113;
+      --surface: #17181b;
+      --surface-soft: #202126;
+      --text: #f4f4f5;
+      --muted: #a0a0a8;
+      --line: #2c2e33;
+      --line-strong: #3b3e46;
+      --accent: #7aabff;
+      --accent-soft: #162846;
+      --success: #58c58d;
+      --success-soft: #14291f;
+      --warning: #e5b95c;
+      --warning-soft: #2d2514;
+      --danger: #f58b84;
+      --danger-soft: #341b1a;
+      --shadow: 0 1px 2px #0005;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { min-height: 100%; background: var(--bg); }
+  body {
+    min-height: 100%;
+    margin: 0;
+    padding: 20px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  button, input, textarea { font: inherit; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  button {
+    min-height: 34px;
+    padding: 7px 12px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { filter: brightness(.96); }
+  button.secondary {
+    border-color: var(--line-strong);
+    background: transparent;
+    color: var(--text);
+  }
+  button.secondary:hover:not(:disabled) { background: var(--surface-soft); filter: none; }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  [hidden] { display: none !important; }
+  .page { width: min(1160px, 100%); margin: 0 auto; }
+  .topbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 2px 0 16px;
+  }
+  .brand h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: 0; }
+  .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .statusBar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .statusPill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 34px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    font-size: 12px;
+  }
+  .statusDot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--muted); }
+  .statusPill.connected { border-color: var(--success); color: var(--success); background: var(--success-soft); }
+  .statusPill.connected .statusDot { background: var(--success); }
+  .statusPill.connecting .statusDot, .statusPill.reconnecting .statusDot { background: var(--warning); }
+  .statusPill.disabled { border-color: var(--line-strong); color: var(--muted); background: var(--surface-soft); }
+  .statusPill.disabled .statusDot { background: var(--muted); }
+  .statusMeta { max-width: 360px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  #versionDrift {
+    display: none;
+    margin: 0 0 14px;
+    padding: 9px 11px;
+    border: 1px solid var(--warning);
+    border-radius: 6px;
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-size: 12px;
+    white-space: pre-line;
+  }
+  #versionDrift:not(:empty) { display: block; }
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+    grid-template-areas:
+      "connection pair"
+      "devices pair";
+    gap: 14px;
+    align-items: start;
+  }
+  .connectionPanel { grid-area: connection; }
+  .pairPanel { grid-area: pair; }
+  .panel {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .panelHeader {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px 0;
+  }
+  .panelHeader h2 { margin: 0; font-size: 15px; line-height: 1.3; }
+  .panelHeader p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+  .panelBody { padding: 14px 16px 16px; }
+  .formGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .span2 { grid-column: 1 / -1; }
+  .field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
+  .field input, .field textarea {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+  }
+  .field input::placeholder, .field textarea::placeholder { color: var(--muted); opacity: .75; }
+  .field textarea {
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+  .inputAction { display: flex; align-items: center; gap: 8px; }
+  .inputAction input { flex: 1; }
+  .inputAction button { flex: none; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+  .actions.tight { margin-top: 0; }
+  .message { margin: 8px 0 0; color: var(--muted); font-size: 12px; white-space: pre-line; }
+  .message:empty { display: none; }
+  .message.error { color: var(--danger); }
+  .message.ok { color: var(--success); }
+  .checkResult:not(:empty) {
+    padding: 9px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-soft);
+  }
+  .checkResult.error { border-color: var(--danger); background: var(--danger-soft); }
+  .checkResult.ok { border-color: var(--success); background: var(--success-soft); }
+  .disclosure {
+    margin-top: 14px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .disclosure > summary {
+    position: relative;
+    padding: 9px 34px 9px 11px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    list-style: none;
+  }
+  .disclosure > summary::-webkit-details-marker { display: none; }
+  .disclosure > summary::after {
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    width: 6px;
+    height: 6px;
+    margin-top: -4px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    content: "";
+    transform: rotate(45deg);
+  }
+  .disclosure[open] > summary::after { margin-top: -1px; transform: rotate(225deg); }
+  .disclosureBody { padding: 0 11px 12px; }
+  .disclosureBody > .formGrid { margin-top: 8px; }
+  .pairPanel .panelBody { display: flex; flex-direction: column; }
+  .pairPanel .actions { margin-top: 0; }
+  #pairHint { margin-top: 10px; }
+  #qr {
+    display: grid;
+    min-height: 232px;
+    margin-top: 12px;
+    padding: 12px;
+    place-items: center;
+    border: 1px dashed var(--line-strong);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+  #qr:not(:empty) { background: #fff; }
+  #qr:empty::before { content: "生成后在这里扫码"; color: var(--muted); font-size: 12px; }
   /* The SVG carries its own white background and quiet zone; sizing it up is
      what makes the camera lock on in well under a second. */
-  #qr svg { width: min(360px, 92vw); height: auto; background: #fff; border-radius: 8px; }
-  #qrExpiry { font-size: 13px; opacity: .8; margin: 8px 0 0; }
-  #qrFull { position: fixed; inset: 0; z-index: 50; background: #fff; color: #111;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  #qr svg { width: min(300px, 100%); height: auto; background: #fff; }
+  #qrExpiry { margin-top: 8px; text-align: center; }
+  #qrFull {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 24px;
+    background: var(--surface);
+    color: var(--text);
+  }
   #qrFull[hidden] { display: none; }
   #qrFull svg { width: min(84vmin, 92vw); height: auto; }
-  #qrFull .fullMeta { font-size: 14px; opacity: .75; text-align: center; }
+  #qrFull .fullMeta { color: var(--muted); font-size: 14px; text-align: center; }
   #qrFull .fullMeta b { font-size: 20px; letter-spacing: 2px; }
   #qrFull .fullActions { display: flex; gap: 10px; }
+  .devicesPanel { grid-area: devices; }
+  .devicesPanel .panelHeader { padding-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid #8882; }
-  .tabs { display: flex; gap: 6px; margin: 0 0 8px; }
-  .tab { padding: 4px 12px; border: 1px solid #8884; border-radius: 999px; background: transparent; color: inherit; font-size: 13px; cursor: pointer; }
-  .tab[aria-selected="true"] { border-color: #2563eb; color: #2563eb; background: #2563eb1a; }
-  .tab .count { opacity: .6; margin-left: 5px; font-variant-numeric: tabular-nums; }
+  td, th { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { color: var(--muted); font-size: 11px; font-weight: 600; }
+  .tabs { display: flex; gap: 18px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+  .tab {
+    min-height: 36px;
+    margin: 0;
+    padding: 8px 1px 7px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .tab:hover:not(:disabled) { background: transparent; color: var(--text); filter: none; }
+  .tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); }
+  .tab .count { margin-left: 5px; font-variant-numeric: tabular-nums; opacity: .72; }
   /* The device list is the only unbounded section here: cap it and scroll,
      with the header pinned so the columns stay labelled. */
-  .devicePane { max-height: 520px; overflow: auto; border: 1px solid #8883; border-radius: 8px; }
+  .devicePane { max-height: 420px; overflow: auto; }
   .devicePane table { border-collapse: separate; border-spacing: 0; }
-  .devicePane th { position: sticky; top: 0; background: Canvas; }
-  .devicePane td, .devicePane th { padding: 6px 10px; }
+  .devicePane th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
   .devicePane td:last-child, .devicePane th:last-child { text-align: right; }
-  .deviceState { opacity: .6; }
-  .error { color: #dc2626; font-size: 13px; } .ok { color: #16a34a; font-size: 13px; }
-  /* The version gap is the one line here that costs a restart to fix, so it sits
-     beside the running version instead of in a section of its own. */
-  #versionDrift { display: inline-block; margin: 0 0 0 10px; font-size: 12px; }
+  .deviceState { color: var(--muted); }
+  .advanced {
+    margin-top: 14px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .advanced > summary {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 13px 16px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    list-style: none;
+  }
+  .advanced > summary::-webkit-details-marker { display: none; }
+  .advanced > summary::after {
+    width: 7px;
+    height: 7px;
+    margin-top: -3px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    content: "";
+    transform: rotate(45deg);
+  }
+  .advanced[open] > summary::after { margin-top: 3px; transform: rotate(225deg); }
+  .advanced > summary span { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 400; text-align: right; }
+  .advancedBody { display: grid; gap: 18px; padding: 0 16px 18px; border-top: 1px solid var(--line); }
+  .advancedSection { padding-top: 16px; }
+  .advancedSection + .advancedSection { border-top: 1px solid var(--line); }
+  .advancedSection h3 { margin: 0 0 10px; font-size: 13px; }
+  .advancedGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+  .metaLine { margin: 0; font-size: 12px; }
+  .metaLine > span { color: var(--muted); }
+  .health {
+    display: grid;
+    grid-template-columns: minmax(112px, auto) minmax(0, 1fr);
+    gap: 7px 14px;
+    margin: 0;
+    font-size: 12px;
+  }
+  .health dt { color: var(--muted); }
+  .health dd { margin: 0; overflow-wrap: anywhere; }
+  .health .error { color: var(--danger); }
+  @media (max-width: 820px) {
+    body { padding: 14px; }
+    .topbar { flex-direction: column; }
+    .statusBar { justify-content: flex-start; }
+    .statusMeta { max-width: 100%; white-space: normal; }
+    .workspace {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-areas:
+        "connection"
+        "pair"
+        "devices";
+    }
+    .advancedGrid { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 560px) {
+    body { padding: 10px; }
+    .formGrid { grid-template-columns: minmax(0, 1fr); }
+    .span2 { grid-column: auto; }
+    .panelHeader, .panelBody { padding-right: 12px; padding-left: 12px; }
+    .tabs { padding: 0 12px; }
+    .advanced > summary span { display: none; }
+    .statusMeta { display: none; }
+    .actions button { flex: 1 1 auto; }
+  }
 </style>
 </head>
 <body>
-<h1>dsh-mobile 桥接配置</h1>
-<p id="statusLine">状态：<span id="status">加载中…</span></p>
-<p id="profileLine">安装形态：<span id="profileShape">检查中…</span>
-  <button id="repairBtn" class="secondary" type="button" style="margin-left:8px" hidden>修复安装形态</button>
-  <span id="repairMsg"></span></p>
-<p id="profileNotes" style="font-size:12px;opacity:.7;margin:2px 0 0;white-space:pre-line"></p>
-<div class="row">
-  <button id="startNatsBtn" class="secondary">启动本地 NATS</button>
-  <span id="natsMsg" style="white-space:pre-line"></span>
-</div>
-<p id="natsPathLine" style="font-size:12px;opacity:.7;margin:2px 0 0;white-space:pre-line"></p>
-<p id="natsHelpLine" style="font-size:12px;opacity:.7;margin:2px 0 0">
-  这个按钮只启动<b>已经装好</b>的本机 NATS；这台电脑还没有 nats-server 或还没有 leaf.conf 时，把
-  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md" target="_blank" rel="noreferrer">docs/04-ai-onboarding.md</a>
-  整页交给这台电脑上的 AI，让它照着装（装 nats-server → 写 leaf.conf → 取 CA → 自检 Hub 账号）；
-  自己动手就看
-  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
-  的「3. Leaf：dsh 电脑上的本机节点」。
-</p>
-<div class="row">
-  <input id="natsConfigPath" placeholder="leaf.conf 路径（留空 = 自动查找）" style="flex:1" autocomplete="off" spellcheck="false">
-  <button id="saveNatsPathBtn" class="secondary" type="button" style="white-space:nowrap">保存路径</button>
-  <span id="natsPathMsg"></span>
-</div>
-<div class="row">
-  <input id="natsServerPath" placeholder="nats-server 路径（留空 = 自动查找，含 PATH）" style="flex:1" autocomplete="off" spellcheck="false">
-</div>
-<dl class="health">
-  <dt>插件版本</dt><dd><span id="pluginVersion">—</span><span id="versionDrift"></span></dd>
-  <dt>mobileApi</dt><dd id="mobileApi">—</dd>
-  <dt>构建 ID</dt><dd id="buildId">—</dd>
-  <dt>实例 ID</dt><dd id="activeInstance">—</dd>
-  <dt>本机名称</dt><dd id="activeInstanceName">—</dd>
-  <dt>实际加载路径</dt><dd id="loadedFrom">—</dd>
-  <dt>桥启动时间</dt><dd id="startedAt">—</dd>
-  <dt>最近连接</dt><dd id="lastConnectedAt">—</dd>
-  <dt>最近重连</dt><dd id="lastReconnectAt">—</dd>
-  <dt>功能</dt><dd id="features">—</dd>
-  <dt>最近错误</dt><dd id="lastError">无</dd>
-</dl>
+<div class="page">
+  <header class="topbar">
+    <div class="brand">
+      <h1>dsh-mobile 桥接</h1>
+      <p>连接本机 NATS 与手机端</p>
+    </div>
+    <div class="statusBar">
+      <span class="statusPill" id="statusPill" aria-live="polite">
+        <span class="statusDot"></span><span id="status">加载中…</span>
+      </span>
+      <span class="statusMeta" id="statusMeta">正在读取实例信息</span>
+      <button id="runtimeToggle" class="secondary" type="button" aria-live="polite">停用移动桥</button>
+      <button id="hubCheckBtn" class="secondary" type="button">测试连接</button>
+    </div>
+  </header>
+  <p id="versionDrift" role="status"></p>
 
-<h2>插件更新</h2>
-<div class="row">
-  <button id="updateCheckBtn" class="secondary">刷新</button>
-  <button id="updateApplyBtn" hidden>更新</button>
-  <span id="updateMsg"></span>
-</div>
-<p id="updateHint" style="font-size:12px;opacity:.7;margin:6px 0 0;white-space:pre-line"></p>
+  <main class="workspace">
+    <section class="panel connectionPanel" aria-labelledby="connectionTitle">
+      <div class="panelHeader">
+        <div>
+          <h2 id="connectionTitle">连接 Hub</h2>
+          <p>保存后会立即检查本机、Hub 与实例链路。</p>
+        </div>
+      </div>
+      <div class="panelBody">
+        <div class="formGrid">
+          <div class="field span2">
+            <label for="hubWssUrl">Hub 地址</label>
+            <input id="hubWssUrl" placeholder="wss://203.0.113.10:8443" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="hubUser">账号</label>
+            <input id="hubUser" placeholder="Hub 的 C 端受限账号" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="hubPass">密码</label>
+            <div class="inputAction">
+              <input id="hubPass" type="password" placeholder="未配置" autocomplete="off" spellcheck="false">
+              <button id="hubPassToggle" class="secondary" type="button">显示</button>
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="saveBtn" type="button">保存并测试</button>
+          <span id="saveMsg" class="message" role="status"></span>
+        </div>
+        <p id="hubCheckMsg" class="message checkResult" role="status"></p>
 
-<h2>服务器信息（NATS Hub）</h2>
-<p style="font-size:12px;opacity:.7;margin:0 0 4px">配对二维码里带的就是这里的地址与账号凭证，手机靠它连 Hub，因此三项都必须先填写并保存，否则二维码扫了也连不上。地址可以只填主机或 IP，缺端口按 8443 补。</p>
-<label>Hub 地址（wss://…:8443）</label><input id="hubWssUrl" placeholder="wss://203.0.113.10:8443">
-<label>账号（Hub 的 C 端受限账号）</label><input id="hubUser" placeholder="你的 Hub 账号">
-<label>密码（必填；留空表示不修改）</label>
-<div style="display:flex;gap:8px;align-items:center">
-  <input id="hubPass" type="text" placeholder="未配置" autocomplete="off" spellcheck="false">
-  <button id="hubPassToggle" class="secondary" type="button" style="white-space:nowrap">隐藏</button>
-</div>
-<label>Hub CA 证书（ca.crt 内容；二维码会把它带给手机当信任锚。手边没有 ca.crt 就点下面的按钮自动取）</label>
-<textarea id="hubCaCert" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
-<div class="row">
-  <button id="fetchCaBtn" class="secondary" type="button">从 Hub 获取 CA</button>
-  <span id="fetchCaMsg" style="font-size:12px;white-space:pre-line"></span>
-</div>
-<p id="hubCaHint" style="font-size:12px;margin:4px 0 0;opacity:.75"></p>
-<p id="caOriginHint" style="font-size:12px;margin:4px 0 0;opacity:.6">
-  还不知道 ca.crt 该从哪来？两种情况：<b>Hub 是别人搭的</b>，向对方要一份（ca.crt 是公开材料，不含私钥）；
-  <b>Hub 是你自己搭的（或还没搭）</b>，就得先在服务器上生成自己的 CA——私钥 ca.key 留在管理机、绝不进服务器，
-  只有 ca.crt 填在这里。从零建 Hub 的完整步骤（生成 CA → 签发服务器证书 → 把 ca.crt 拼进 cert_file）见
-  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
-  的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」——这本仓库里也有同一份文件。
-</p>
-<label>实例 ID（字母/数字/短横线）</label><input id="instanceId" placeholder="home">
-<label>本机名称（手机上显示的名字；留空则显示实例 ID）</label><input id="instanceName" placeholder="例如：家里的 Mac mini">
-<div class="row">
-  <button id="saveBtn">保存并连接</button>
-  <button id="hubCheckBtn" class="secondary">测试 Hub 账号</button>
-  <span id="saveMsg"></span>
-</div>
-<p id="hubCheckMsg" style="font-size:12px;margin:6px 0 0;white-space:pre-line"></p>
+        <details class="disclosure">
+          <summary>实例与证书</summary>
+          <div class="disclosureBody">
+            <div class="formGrid">
+              <div class="field">
+                <label for="instanceId">实例 ID</label>
+                <input id="instanceId" placeholder="home" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field">
+                <label for="instanceName">本机名称</label>
+                <input id="instanceName" placeholder="例如：家里的 Mac mini" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field span2">
+                <label for="hubCaCert">Hub CA 证书</label>
+                <div class="actions tight">
+                  <button id="fetchCaBtn" class="secondary" type="button">从 Hub 获取 CA</button>
+                  <span id="fetchCaMsg" class="message" role="status"></span>
+                </div>
+                <p id="hubCaHint" class="message"></p>
+                <textarea id="hubCaCert" rows="4" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+                <details class="disclosure">
+                  <summary>ca.crt 从哪里来？</summary>
+                  <div class="disclosureBody">
+                    <p id="caOriginHint" class="message">
+                      还不知道 ca.crt 该从哪来？两种情况：<b>Hub 是别人搭的</b>，向对方要一份（ca.crt 是公开材料，不含私钥）；
+                      <b>Hub 是你自己搭的（或还没搭）</b>，就得先在服务器上生成自己的 CA——私钥 ca.key 留在管理机、绝不进服务器，
+                      只有 ca.crt 填在这里。从零建 Hub 的完整步骤（生成 CA → 签发服务器证书 → 把 ca.crt 拼进 cert_file）见
+                      <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
+                      的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」——这本仓库里也有同一份文件。
+                    </p>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
 
-<h2>配对新设备</h2>
-<div class="row">
-  <button id="pairBtn">生成配对二维码</button>
-  <button id="qrFullBtn" class="secondary" disabled>放大显示</button>
-  <span class="error" id="pairErr"></span>
+    <section class="panel pairPanel" aria-labelledby="pairTitle">
+      <div class="panelHeader">
+        <div>
+          <h2 id="pairTitle">配对新设备</h2>
+          <p>生成一次性二维码，让 App 扫码接入。</p>
+        </div>
+      </div>
+      <div class="panelBody">
+        <div class="actions">
+          <button id="pairBtn" type="button" disabled>生成配对二维码</button>
+          <button id="qrFullBtn" class="secondary" type="button" disabled>放大显示</button>
+        </div>
+        <p id="pairHint" class="message">正在检查连接状态…</p>
+        <div id="qr" aria-live="polite"></div>
+        <p id="qrExpiry" class="message"></p>
+        <p id="pairErr" class="message error" role="alert"></p>
+        <details class="disclosure">
+          <summary>配对说明</summary>
+          <div class="disclosureBody">
+            <p class="message">同一时间最多 3 个配对码有效（120 秒）；重新生成会让最早的码作废，卡住时直接再点一次即可。</p>
+          </div>
+        </details>
+      </div>
+    </section>
+    <section class="panel devicesPanel" aria-labelledby="devicesTitle">
+      <div class="panelHeader">
+        <div>
+          <h2 id="devicesTitle">已配对设备</h2>
+          <p>查看设备状态，吊销不再使用的访问令牌。</p>
+        </div>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" id="tabActive" role="tab" aria-selected="true" onclick="showDevices('active')">正在使用<span class="count" id="countActive">0</span></button>
+        <button class="tab" id="tabRevoked" role="tab" aria-selected="false" onclick="showDevices('revoked')">已吊销<span class="count" id="countRevoked">0</span></button>
+      </div>
+      <div class="devicePane">
+        <table><thead><tr><th>设备</th><th>配对时间</th><th>最近活动</th><th>到期</th><th></th></tr></thead><tbody id="devices"></tbody></table>
+      </div>
+    </section>
+  </main>
+
+  <details class="advanced">
+    <summary>高级设置与诊断 <span>本机 NATS、安装形态、更新和运行信息</span></summary>
+    <div class="advancedBody">
+      <section class="advancedSection">
+        <h3>本机 NATS</h3>
+        <div class="actions tight">
+          <button id="startNatsBtn" class="secondary" type="button">启动本地 NATS</button>
+          <span id="natsMsg" class="message" role="status"></span>
+        </div>
+        <p id="natsPathLine" class="message"></p>
+        <p id="natsHelpLine" class="message">
+          这个按钮只启动<b>已经装好</b>的本机 NATS；这台电脑还没有 nats-server 或还没有 leaf.conf 时，把
+          <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/04-ai-onboarding.md" target="_blank" rel="noreferrer">docs/04-ai-onboarding.md</a>
+          整页交给这台电脑上的 AI，让它照着装（装 nats-server → 写 leaf.conf → 取 CA → 自检 Hub 账号）；
+          自己动手就看
+          <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
+          的「3. Leaf：dsh 电脑上的本机节点」。
+        </p>
+        <details class="disclosure">
+          <summary>手动指定路径</summary>
+          <div class="disclosureBody">
+            <div class="formGrid">
+              <div class="field">
+                <label for="natsConfigPath">leaf.conf 路径</label>
+                <input id="natsConfigPath" placeholder="留空 = 自动查找" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field">
+                <label for="natsServerPath">nats-server 路径</label>
+                <input id="natsServerPath" placeholder="留空 = 自动查找，含 PATH" autocomplete="off" spellcheck="false">
+              </div>
+            </div>
+            <div class="actions">
+              <button id="saveNatsPathBtn" class="secondary" type="button">保存路径</button>
+              <span id="natsPathMsg" class="message" role="status"></span>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="advancedSection">
+        <h3>安装与更新</h3>
+        <div class="advancedGrid">
+          <div>
+            <p class="metaLine">安装形态：<span id="profileShape">检查中…</span></p>
+            <p id="profileNotes" class="message"></p>
+            <div class="actions">
+              <button id="repairBtn" class="secondary" type="button" hidden>修复安装形态</button>
+              <span id="repairMsg" class="message" role="status"></span>
+            </div>
+          </div>
+          <div>
+            <div class="actions tight">
+              <button id="updateCheckBtn" class="secondary" type="button">刷新</button>
+              <button id="updateApplyBtn" hidden>更新</button>
+              <span id="updateMsg" class="message" role="status"></span>
+            </div>
+            <p id="updateHint" class="message"></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="advancedSection">
+        <h3>运行诊断</h3>
+        <dl class="health">
+          <dt>插件版本</dt><dd><span id="pluginVersion">—</span></dd>
+          <dt>mobileApi</dt><dd id="mobileApi">—</dd>
+          <dt>构建 ID</dt><dd id="buildId">—</dd>
+          <dt>实例 ID</dt><dd id="activeInstance">—</dd>
+          <dt>本机名称</dt><dd id="activeInstanceName">—</dd>
+          <dt>网关 ID</dt><dd id="gatewayId">—</dd>
+          <dt>实际加载路径</dt><dd id="loadedFrom">—</dd>
+          <dt>桥启动时间</dt><dd id="startedAt">—</dd>
+          <dt>最近连接</dt><dd id="lastConnectedAt">—</dd>
+          <dt>最近重连</dt><dd id="lastReconnectAt">—</dd>
+          <dt>功能</dt><dd id="features">—</dd>
+          <dt>最近错误</dt><dd id="lastError">无</dd>
+        </dl>
+      </section>
+    </div>
+  </details>
 </div>
-<p id="pairHint" style="font-size:12px;opacity:.7">需先在上方配置 Hub 账号密码并连接本地 NATS，才能生成可用二维码</p>
-<div id="qr"></div>
-<p id="qrExpiry"></p>
-<p class="hintLine" style="font-size:12px;opacity:.7;margin:6px 0 0">同一时间最多 3 个配对码有效（120 秒）；重新生成会让最早的码作废，卡住时直接再点一次即可。</p>
 
 <div id="qrFull" hidden>
   <div id="qrFullQr"></div>
   <p class="fullMeta">配对码 <b id="qrFullCode">—</b><br><span id="qrFullExpiry"></span></p>
   <div class="fullActions">
-    <button id="qrFullClose" class="secondary">关闭放大</button>
+    <button id="qrFullClose" class="secondary" type="button">关闭放大</button>
   </div>
-</div>
-
-<h2>已配对设备</h2>
-<div class="tabs" role="tablist">
-  <button class="tab" id="tabActive" role="tab" aria-selected="true" onclick="showDevices('active')">正在使用<span class="count" id="countActive">0</span></button>
-  <button class="tab" id="tabRevoked" role="tab" aria-selected="false" onclick="showDevices('revoked')">已吊销<span class="count" id="countRevoked">0</span></button>
-</div>
-<div class="devicePane">
-  <table><thead><tr><th>设备</th><th>配对时间</th><th>到期</th><th></th></tr></thead><tbody id="devices"></tbody></table>
 </div>
 
 <script>
@@ -672,7 +1102,7 @@ for (const id of ['hubWssUrl', 'hubUser', 'hubCaCert', 'instanceId', 'instanceNa
 function renderHubCa(config) {
   prefill('hubCaCert', config.hubCaCert || '')
   const hint = $('hubCaHint')
-  hint.className = ''
+  hint.className = 'message'
   if (!config.hubCaCert) {
     hint.textContent = '未配置：二维码不带证书，App 里也没有内置任何 CA。'
       + '只有由公共 CA 签发证书的 Hub 能连上。自签证书的 Hub 请点上面的「从 Hub 获取 CA」自动取，'
@@ -681,7 +1111,7 @@ function renderHubCa(config) {
   }
   const summary = config.hubCaSummary
   if (!summary) {
-    hint.className = 'error'
+    hint.className = 'message error'
     hint.textContent = '无法解析：请粘贴 ca.crt 的完整 PEM（含 BEGIN/END CERTIFICATE 行）或它的 base64 内容。'
     return
   }
@@ -689,11 +1119,11 @@ function renderHubCa(config) {
   const configured = (config.hubCaFingerprint || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase()
   const actual = summary.fingerprint.replace(/[^0-9a-fA-F]/g, '').toUpperCase()
   if (configured && configured !== actual) {
-    hint.className = 'error'
+    hint.className = 'message error'
     // Double-escaped: this code lives inside the page's own template literal.
     hint.textContent += '\\n配置的指纹与证书不一致，手机扫码会拒绝这个 Hub。'
   } else if (!summary.isCa) {
-    hint.className = 'error'
+    hint.className = 'message error'
     hint.textContent += '\\n这不是一张 CA 证书（basicConstraints 不是 CA:TRUE），请确认粘的确实是 ca.crt。'
   }
 }
@@ -706,7 +1136,7 @@ $('hubPassToggle').onclick = async () => {
   if (reveal && field.value === '' && field.placeholder.indexOf('已配置') === 0) {
     const looked = await api('reveal', {})
     if (looked.error) {
-      $('saveMsg').className = 'error'
+      $('saveMsg').className = 'message error'
       $('saveMsg').textContent = looked.error
       return
     }
@@ -728,14 +1158,24 @@ async function api(path, body) {
 async function refreshStatus() {
   try {
     const s = await api('status')
-    $('status').textContent = { connected: '已连接', connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection
+    const enabled = s.enabled !== false
+    const connectionText = enabled
+      ? ({ connected: '已连接', connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection)
+      : '已停用'
+    $('status').textContent = connectionText
+    $('statusPill').className = 'statusPill ' + (enabled ? (s.connection || '') : 'disabled')
+    $('runtimeToggle').textContent = enabled ? '停用移动桥' : '启用移动桥'
+    $('statusMeta').textContent = [
+      s.instanceName || s.instanceId || '实例未命名',
+      s.config && s.config.hubWssUrl ? s.config.hubWssUrl : 'Hub 未配置',
+    ].join(' · ')
     $('pluginVersion').textContent = s.pluginVersion || '—'
-    $('versionDrift').className = s.versionDrift ? 'error' : ''
     $('versionDrift').textContent = s.versionDrift || ''
     $('mobileApi').textContent = String(s.mobileApi ?? '—')
     $('buildId').textContent = s.buildId || '—'
     $('activeInstance').textContent = s.instanceId || '—'
     $('activeInstanceName').textContent = s.instanceName || s.instanceId || '—'
+    $('gatewayId').textContent = s.gatewayId || '—'
     $('loadedFrom').textContent = s.loadedFrom || '—'
     $('startedAt').textContent = formatTime(s.startedAt)
     $('lastConnectedAt').textContent = formatTime(s.lastConnectedAt)
@@ -743,7 +1183,7 @@ async function refreshStatus() {
     $('features').textContent = Array.isArray(s.features) ? s.features.join(' · ') : '—'
     $('lastError').textContent = s.lastError || '无'
     renderProfile(s.profile)
-    renderLocalNats(s.localNats)
+    renderLocalNats(s.localNats, s.localNatsRuntime)
     // A check or an install in flight owns the panel until it answers, so the
     // poll must not repaint over "正在更新…" with the last stored report.
     if (!updateBusy) renderUpdate(s.update)
@@ -762,9 +1202,11 @@ async function refreshStatus() {
     // A QR minted without the Hub credential is dead on arrival, so the
     // credential gate comes before the connection gate.
     const hubReady = s.config.hubWssUrl.trim() !== '' && s.config.hubUser.trim() !== '' && s.config.hubPassConfigured
-    $('pairBtn').disabled = !hubReady || s.connection !== 'connected'
-    $('pairHint').style.color = hubReady ? '' : '#dc2626'
-    if (!hubReady) {
+    $('pairBtn').disabled = !enabled || !hubReady || s.connection !== 'connected'
+    $('pairHint').className = hubReady && enabled ? 'message' : 'message error'
+    if (!enabled) {
+      $('pairHint').textContent = '移动桥已停用，不会连接 NATS，也不会向手机发布事件。点右上角“启用移动桥”恢复。'
+    } else if (!hubReady) {
       $('pairHint').textContent = '二维码要带上 Hub 的账号凭证，手机没有它连不上 Hub：请先在上方填写 Hub 地址、账号、密码并保存'
     } else if (s.connection === 'connected') {
       $('pairHint').textContent = '本地 NATS 已连接，可以生成二维码'
@@ -773,10 +1215,36 @@ async function refreshStatus() {
     }
   } catch (error) {
     $('status').textContent = '状态读取失败'
+    $('statusPill').className = 'statusPill disconnected'
+    $('statusMeta').textContent = '连接状态不可用'
     $('lastError').textContent = String(error)
     $('pairBtn').disabled = true
-    $('pairHint').style.color = ''
+    $('pairHint').className = 'message'
     $('pairHint').textContent = '状态不可用，请先启动本地 NATS'
+  }
+}
+
+$('runtimeToggle').onclick = async () => {
+  const button = $('runtimeToggle')
+  const enable = button.textContent.indexOf('启用') === 0
+  button.disabled = true
+  $('saveMsg').className = 'message'
+  $('saveMsg').textContent = enable ? '正在启用…' : '正在停用…'
+  try {
+    const r = await api('config', { enabled: enable })
+    if (r.error) {
+      $('saveMsg').className = 'message error'
+      $('saveMsg').textContent = r.error
+    } else {
+      $('saveMsg').className = 'message ok'
+      $('saveMsg').textContent = enable ? '移动桥已启用' : '移动桥已停用'
+      await refreshStatus()
+    }
+  } catch (error) {
+    $('saveMsg').className = 'message error'
+    $('saveMsg').textContent = String(error)
+  } finally {
+    button.disabled = false
   }
 }
 
@@ -790,11 +1258,14 @@ function formatTime(value) {
  * machine that keeps the file elsewhere needs to see the path that was tried
  * before it can fix it — the failure alone names only one of them.
  */
-function renderLocalNats(localNats) {
+function renderLocalNats(localNats, runtime) {
   const config = localNats && localNats.config
   const server = localNats && localNats.server
+  const runtimeLine = runtime && typeof runtime.message === 'string'
+    ? (runtime.running ? '● ' : '○ ') + runtime.message
+    : ''
   if (!config || typeof config.path !== 'string') {
-    $('natsPathLine').textContent = ''
+    $('natsPathLine').textContent = runtimeLine
     return
   }
   const line = (label, part) => {
@@ -802,7 +1273,7 @@ function renderLocalNats(localNats) {
     const source = { env: '来自环境变量', config: '来自本页填写', 'default': '自动查找' }[part.source] || part.source
     return (part.exists ? '✓ ' : '✗ ') + label + '：' + part.path + '（' + source + '）'
   }
-  const lines = [line('配置文件', config), line('nats-server', server)].filter(text => text !== '')
+  const lines = [runtimeLine, line('配置文件', config), line('nats-server', server)].filter(text => text !== '')
   if (config.exists && server && server.exists) {
     lines.push('启动命令：' + server.path + ' -c ' + config.path)
   }
@@ -867,7 +1338,8 @@ function renderUpdate(u) {
   apply.hidden = !newer
   if (newer) apply.textContent = '更新到 ' + (u.latest || '最新版本')
   const text = u.message || u.reason || ''
-  $('updateMsg').className = u.phase === 'failed' ? 'error' : (u.phase === 'restart-required' ? 'ok' : '')
+  $('updateMsg').className = 'message'
+    + (u.phase === 'failed' ? ' error' : (u.phase === 'restart-required' ? ' ok' : ''))
   $('updateMsg').textContent = text
   // The reason explains a missing update button ("有新版本，但这个宿主没有插件
   // 管理器"); it is the same sentence as the message on a failed check, and
@@ -878,14 +1350,14 @@ function renderUpdate(u) {
 $('updateCheckBtn').onclick = async () => {
   updateBusy = true
   $('updateCheckBtn').disabled = true
-  $('updateMsg').className = ''; $('updateMsg').textContent = '正在获取最新版本…'
+  $('updateMsg').className = 'message'; $('updateMsg').textContent = '正在获取最新版本…'
   $('updateHint').textContent = ''
   try {
     const r = await api('update/check')
-    if (r.error) { $('updateApplyBtn').hidden = true; $('updateMsg').className = 'error'; $('updateMsg').textContent = r.error; return }
+    if (r.error) { $('updateApplyBtn').hidden = true; $('updateMsg').className = 'message error'; $('updateMsg').textContent = r.error; return }
     renderUpdate(r)
   } catch (error) {
-    $('updateMsg').className = 'error'; $('updateMsg').textContent = String(error)
+    $('updateMsg').className = 'message error'; $('updateMsg').textContent = String(error)
   } finally {
     updateBusy = false
     $('updateCheckBtn').disabled = false
@@ -896,14 +1368,14 @@ $('updateApplyBtn').onclick = async () => {
   updateBusy = true
   $('updateCheckBtn').disabled = true
   $('updateApplyBtn').disabled = true
-  $('updateMsg').className = ''; $('updateMsg').textContent = '正在更新…'
+  $('updateMsg').className = 'message'; $('updateMsg').textContent = '正在更新…'
   $('updateHint').textContent = ''
   try {
     const r = await api('update/apply', {})
-    if (r.error) { $('updateMsg').className = 'error'; $('updateMsg').textContent = r.error; return }
+    if (r.error) { $('updateMsg').className = 'message error'; $('updateMsg').textContent = r.error; return }
     renderUpdate(r)
   } catch (error) {
-    $('updateMsg').className = 'error'; $('updateMsg').textContent = String(error)
+    $('updateMsg').className = 'message error'; $('updateMsg').textContent = String(error)
   } finally {
     updateBusy = false
     $('updateCheckBtn').disabled = false
@@ -933,13 +1405,14 @@ function renderDevices() {
   const rows = deviceTab === 'active' ? inUse : revoked
   $('devices').innerHTML = rows.map(d =>
     '<tr><td>' + escapeText(d.name) + '</td>' + '<td>' + d.createdAt.slice(0, 10) + '</td>' +
+    '<td>' + (d.lastSeenAt ? formatTime(d.lastSeenAt) : '从未') + '</td>' +
     '<td>' + d.expiresAt.slice(0, 10) + '</td><td>' +
     (d.revoked
       // The record itself is the only thing left to act on, and it is already
       // dead: deleting it needs no confirmation dialog.
       ? '<span class="deviceState">已吊销</span> <button class="secondary" onclick="forgetDevice(\\'' + d.id + '\\')">删除记录</button>'
       : '<button class="secondary" onclick="revoke(\\'' + d.id + '\\')">吊销</button>') + '</td></tr>'
-  ).join('') || '<tr><td colspan="4" class="deviceState">' +
+  ).join('') || '<tr><td colspan="5" class="deviceState">' +
     (deviceTab === 'active' ? '暂无设备' : '没有已吊销的设备') + '</td></tr>'
 }
 
@@ -956,7 +1429,7 @@ window.revoke = async (id) => { await api('revoke', { deviceId: id }); refreshDe
 window.forgetDevice = async (id) => { await api('forget', { deviceId: id }); refreshDevices() }
 
 $('saveBtn').onclick = async () => {
-  $('saveMsg').className = ''; $('saveMsg').textContent = '保存中…'
+  $('saveMsg').className = 'message'; $('saveMsg').textContent = '保存中…'
   const r = await api('config', {
     hubWssUrl: $('hubWssUrl').value, hubUser: $('hubUser').value,
     hubPass: $('hubPass').value, hubCaCert: $('hubCaCert').value,
@@ -967,17 +1440,17 @@ $('saveBtn').onclick = async () => {
   if (r.ok) {
     // The stored values are what the fields should show again.
     editedFields.clear()
-    $('saveMsg').className = 'ok'; $('saveMsg').textContent = '已保存'
+    $('saveMsg').className = 'message ok'; $('saveMsg').textContent = '已保存'
     refreshStatus()
     // Verify right after saving: a wrong password is invisible until the
     // phone fails, and that is the whole reason this round was confusing.
     void checkHub()
   }
-  else { $('saveMsg').className = 'error'; $('saveMsg').textContent = r.error || '保存失败' }
+  else { $('saveMsg').className = 'message error'; $('saveMsg').textContent = r.error || '保存失败' }
 }
 
 async function checkHub() {
-  $('hubCheckMsg').className = ''; $('hubCheckMsg').textContent = '正在校验整条链路…'
+  $('hubCheckMsg').className = 'message checkResult'; $('hubCheckMsg').textContent = '正在校验整条链路…'
   const r = await api('hub-check', {})
   const ok = r.reason === 'ok'
   const mark = (step) => (step.ok ? '✓ ' : '✗ ')
@@ -989,7 +1462,8 @@ async function checkHub() {
   const certBroken = !!r.certificate && r.certificate.ok === false && r.certificate.reason !== 'unreachable'
   const allOk = ok && !certBroken
   const blocked = certBroken || (!ok && r.reason !== 'unreachable')
-  $('hubCheckMsg').className = allOk ? 'ok' : (blocked ? 'error' : '')
+  $('hubCheckMsg').className = 'message checkResult'
+    + (allOk ? ' ok' : (blocked ? ' error' : ''))
   // Double-escaped on purpose: this code lives inside the page's own template
   // literal, where a single newline escape would become a real line break and
   // break the generated script.
@@ -1007,44 +1481,44 @@ $('hubCheckBtn').onclick = () => { void checkHub() }
  * (empty) value back over what was just fetched; saving clears that flag.
  */
 $('fetchCaBtn').onclick = async () => {
-  $('fetchCaMsg').className = ''; $('fetchCaMsg').textContent = '正在从 Hub 取证书…'
+  $('fetchCaMsg').className = 'message'; $('fetchCaMsg').textContent = '正在从 Hub 取证书…'
   $('fetchCaBtn').disabled = true
   try {
     const r = await api('hub-ca/fetch', {})
     if (r.ok && r.ca) {
       $('hubCaCert').value = r.ca.pem
       editedFields.add('hubCaCert')
-      $('fetchCaMsg').className = 'ok'
-      $('fetchCaMsg').textContent = r.message + '\\n已填入上面的字段，点「保存并连接」生效。'
+      $('fetchCaMsg').className = 'message ok'
+      $('fetchCaMsg').textContent = r.message + '\\n已填入证书字段，点「保存并测试」生效。'
       renderHubCa({ hubCaCert: r.ca.pem, hubCaSummary: r.ca, hubCaFingerprint: '' })
     } else {
-      $('fetchCaMsg').className = 'error'
+      $('fetchCaMsg').className = 'message error'
       $('fetchCaMsg').textContent = r.message || r.error || '获取失败'
     }
   } catch (error) {
-    $('fetchCaMsg').className = 'error'; $('fetchCaMsg').textContent = String(error)
+    $('fetchCaMsg').className = 'message error'; $('fetchCaMsg').textContent = String(error)
   } finally {
     $('fetchCaBtn').disabled = false
   }
 }
 
 $('startNatsBtn').onclick = async () => {
-  $('natsMsg').className = ''; $('natsMsg').textContent = '启动中…'
+  $('natsMsg').className = 'message'; $('natsMsg').textContent = '启动中…'
   $('startNatsBtn').disabled = true
   try {
     const r = await api('nats/start', {})
-    $('natsMsg').className = r.ok ? 'ok' : 'error'
+    $('natsMsg').className = r.ok ? 'message ok' : 'message error'
     $('natsMsg').textContent = r.message || (r.ok ? '已启动' : '启动失败')
     refreshStatus()
   } catch (error) {
-    $('natsMsg').className = 'error'; $('natsMsg').textContent = String(error)
+    $('natsMsg').className = 'message error'; $('natsMsg').textContent = String(error)
   } finally {
     $('startNatsBtn').disabled = false
   }
 }
 
 $('saveNatsPathBtn').onclick = async () => {
-  $('natsPathMsg').className = ''; $('natsPathMsg').textContent = '保存中…'
+  $('natsPathMsg').className = 'message'; $('natsPathMsg').textContent = '保存中…'
   const r = await api('config', {
     natsConfigPath: $('natsConfigPath').value,
     natsServerPath: $('natsServerPath').value,
@@ -1052,23 +1526,23 @@ $('saveNatsPathBtn').onclick = async () => {
   if (r.ok) {
     editedFields.delete('natsConfigPath')
     editedFields.delete('natsServerPath')
-    $('natsPathMsg').className = 'ok'; $('natsPathMsg').textContent = '已保存'
+    $('natsPathMsg').className = 'message ok'; $('natsPathMsg').textContent = '已保存'
     refreshStatus()
   } else {
-    $('natsPathMsg').className = 'error'; $('natsPathMsg').textContent = r.error || '保存失败'
+    $('natsPathMsg').className = 'message error'; $('natsPathMsg').textContent = r.error || '保存失败'
   }
 }
 
 $('repairBtn').onclick = async () => {
-  $('repairMsg').className = ''; $('repairMsg').textContent = '处理中…'
+  $('repairMsg').className = 'message'; $('repairMsg').textContent = '处理中…'
   $('repairBtn').disabled = true
   try {
     const r = await api('migrate', {})
-    $('repairMsg').className = r.state === 'error' ? 'error' : 'ok'
+    $('repairMsg').className = r.state === 'error' ? 'message error' : 'message ok'
     $('repairMsg').textContent = r.state === 'error' ? '修复失败' : '已处理'
     await refreshStatus()
   } catch (error) {
-    $('repairMsg').className = 'error'; $('repairMsg').textContent = String(error)
+    $('repairMsg').className = 'message error'; $('repairMsg').textContent = String(error)
   } finally {
     $('repairBtn').disabled = false
   }
@@ -1084,7 +1558,7 @@ $('pairBtn').onclick = async () => {
   pairing = { code: r.payload.code, expiresAt: r.expiresAt }
   $('qrFullBtn').disabled = false
   if (typeof r.hubWarning === 'string') {
-    $('hubCheckMsg').className = ''; $('hubCheckMsg').textContent = '⚠ ' + r.hubWarning
+    $('hubCheckMsg').className = 'message checkResult'; $('hubCheckMsg').textContent = '⚠ ' + r.hubWarning
   }
   renderQrMeta()
 }
@@ -1099,7 +1573,7 @@ function renderQrMeta() {
     ? '配对码已过期，请重新生成二维码'
     : '剩余 ' + left + ' 秒 · 配对码 ' + pairing.code
   $('qrExpiry').textContent = text
-  $('qrExpiry').className = expired ? 'error' : ''
+  $('qrExpiry').className = expired ? 'message error' : 'message'
   $('qrFullCode').textContent = pairing.code
   $('qrFullExpiry').textContent = expired ? '已过期，请关闭后重新生成' : '剩余 ' + left + ' 秒'
   if (expired) {

@@ -5,8 +5,8 @@
  * node, and exposes the harness `/api` protocol on `svc.dsh.{instance}.>` /
  * `evt.dsh.{instance}.*` subjects behind a device-token gate and a method
  * whitelist. Configuration lives in the `mobile-bridge` settings namespace;
- * the loopback console (settings card iframe / standalone page) drives the
- * onboarding wizard. See docs/00-plugin-plan.md.
+ * the Plugins page's client half and the loopback console drive the onboarding
+ * wizard. See docs/00-plugin-plan.md.
  */
 import { homedir } from 'node:os'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -22,6 +22,7 @@ import { readHubCa, sameFingerprint } from './hub-ca.js'
 import { readInstalledVersion } from './installed-version.js'
 import { normalizeHubWssUrl } from './hub-check.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
+import { GatewayIdentityStore } from './identity.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
@@ -69,11 +70,31 @@ const PLUGIN_LOADED_FROM = fileURLToPath(import.meta.url)
 const PLUGIN_BUILD_ID = process.env.DSH_MOBILE_PLUGIN_BUILD_ID
   ?? `${PLUGIN_VERSION}-${Math.trunc(statSync(PLUGIN_LOADED_FROM).mtimeMs).toString(36)}`
 
+/** Where the machine-local NATS stands, as the console and plugin page show it. */
+export interface LocalNatsRuntimeStatus {
+  /** The configured client port is answering a TCP connect right now. */
+  running: boolean
+  /** True when this process spawned the server (vs. one started elsewhere). */
+  managed: boolean
+  /** `host:port` the bridge dials, for display. */
+  endpoint: string
+  /** Ready-to-show Chinese sentence describing the state. */
+  message: string
+}
+
 export interface PairingPayload {
+  /** Payload schema version. Older apps ignore this additive field. */
+  version: 1
+  /** QR expiry as Unix milliseconds, mirroring the pairing-code lifetime. */
+  expiresAt: number
   hub: string
   user: string
   pass: string
   instance: string
+  /** Stable identity of this plugin installation. */
+  gatewayId: string
+  /** Human-readable gateway name; mutable and not an identity credential. */
+  gatewayName: string
   caFp: string
   /**
    * The Hub's CA certificate as base64 DER, when one is configured. The App
@@ -92,7 +113,11 @@ export interface PairingPayload {
  * than become a scan that dies on the phone with nothing to read. Exported for
  * the tests: minting a code needs a live token store, this does not.
  */
-export function buildPairingPayload(config: Config, code: string): PairingPayload {
+export function buildPairingPayload(
+  config: Config,
+  code: string,
+  options: { gatewayId: string, expiresAt: number },
+): PairingPayload {
   const ca = readHubCa(config.hubCaCert)
   const configuredFingerprint = typeof config.hubCaFingerprint === 'string' ? config.hubCaFingerprint.trim() : ''
   if (ca !== null && configuredFingerprint !== '' && !sameFingerprint(configuredFingerprint, ca.fingerprint)) {
@@ -102,12 +127,16 @@ export function buildPairingPayload(config: Config, code: string): PairingPayloa
     )
   }
   return {
+    version: 1,
+    expiresAt: options.expiresAt,
     // Normalized here as well: a hand-edited profile patch may hold a bare host,
     // and the phone dials exactly what the QR carries.
     hub: normalizeHubWssUrl(config.hubWssUrl),
     user: config.hubUser,
     pass: config.hubPass,
     instance: config.instanceId,
+    gatewayId: options.gatewayId,
+    gatewayName: (config.instanceName ?? '').trim() === '' ? config.instanceId : config.instanceName.trim(),
     caFp: ca === null ? config.hubCaFingerprint : ca.fingerprint,
     ...(ca === null ? {} : { ca: ca.base64 }),
     code,
@@ -215,7 +244,8 @@ function hostVersion(): string {
  * never reach the running bridge.
  */
 export function sameConfig(left: Config, right: Config): boolean {
-  return left.natsUrl === right.natsUrl
+  return left.enabled === right.enabled
+    && left.natsUrl === right.natsUrl
     && left.hubWssUrl === right.hubWssUrl
     && left.hubUser === right.hubUser
     && left.hubPass === right.hubPass
@@ -283,6 +313,8 @@ export class MobileBridge extends Service {
     sessionId => this.agentRegistry?.get(sessionId),
   )
   private readonly tokens: TokenStore
+  private readonly identity: GatewayIdentityStore
+  private gatewayId: string | null = null
   /** A process started from the local console. NATS is a host service, so it
    * intentionally survives bridge restarts and is never killed by stop(). */
   private localNatsProcess: ChildProcess | null = null
@@ -300,6 +332,7 @@ export class MobileBridge extends Service {
     this.raw = entryConfig
     this.current = configValues(entryConfig)
     this.tokens = new TokenStore(join(dshHome(), 'mobile-bridge', 'tokens.json'))
+    this.identity = new GatewayIdentityStore(join(dshHome(), 'mobile-bridge', 'identity.json'))
 
     // Settings layering: the profile patch's user document over the composition
     // entry. Every field is schema-volatile, so the settings page's write commits
@@ -338,6 +371,7 @@ export class MobileBridge extends Service {
         updateConfig: patch => this.updateConfig(patch),
         startNats: () => this.startLocalNats(),
         localNats: () => this.localNatsInfo(),
+        localNatsStatus: () => this.localNatsStatus(),
         repairProfile: () => this.repairProfileShape(true),
         checkUpdate: () => this.checkUpdate(),
         applyUpdate: () => this.applyUpdate(),
@@ -456,9 +490,10 @@ export class MobileBridge extends Service {
     return configured === '' ? this.current.instanceId : configured
   }
 
-  // ---- service surface for the settings card / CLI ----
+  // ---- service surface for the Plugins page / CLI ----
 
   status(): {
+    enabled: boolean
     connection: ConnectionStatus
     devices: number
     pluginVersion: string
@@ -469,6 +504,7 @@ export class MobileBridge extends Service {
     loadedFrom: string
     instanceId: string
     instanceName: string
+    gatewayId: string | null
     startedAt: string | null
     uptimeMs: number
     lastConnectedAt: string | null
@@ -478,8 +514,9 @@ export class MobileBridge extends Service {
     update: UpdateReport
   } {
     return {
+      enabled: this.current.enabled,
       connection: this.connectionStatus,
-      devices: this.tokens.activeCount(),
+      devices: this.tokens.activeVisibleCount(),
       pluginVersion: PLUGIN_VERSION,
       // Read on every status call rather than cached at boot: the interesting
       // moment is precisely the one where an install lands under a running
@@ -491,6 +528,7 @@ export class MobileBridge extends Service {
       loadedFrom: PLUGIN_LOADED_FROM,
       instanceId: this.current.instanceId,
       instanceName: this.instanceName(),
+      gatewayId: this.gatewayId,
       startedAt: this.bridgeStartedAt,
       uptimeMs: this.bridgeStartedAt === null ? 0 : Math.max(0, Date.now() - Date.parse(this.bridgeStartedAt)),
       lastConnectedAt: this.lastConnectedAt,
@@ -501,8 +539,8 @@ export class MobileBridge extends Service {
     }
   }
 
-  listDevices(): Omit<DeviceEntry, 'tokenHash'>[] {
-    return this.tokens.list()
+  listDevices(): Omit<DeviceEntry, 'tokenHash' | 'eventKey'>[] {
+    return this.tokens.listDeduplicated()
   }
 
   /**
@@ -712,12 +750,12 @@ export class MobileBridge extends Service {
   }
 
   async revokeDevice(deviceId: string): Promise<boolean> {
-    return this.tokens.revoke(deviceId)
+    return this.tokens.revokeGroup(deviceId)
   }
 
-  /** Delete one revoked device's record; see {@link TokenStore.forget}. */
+  /** Delete every revoked record behind one history row; see {@link TokenStore.forgetGroup}. */
   async forgetDevice(deviceId: string): Promise<boolean> {
-    return this.tokens.forget(deviceId)
+    return this.tokens.forgetGroup(deviceId)
   }
 
   /**
@@ -731,6 +769,28 @@ export class MobileBridge extends Service {
       config: resolveLeafConfig(this.localNatsInput('config')),
       server: resolveNatsServer(this.localNatsInput('server')),
     }
+  }
+
+  /**
+   * Whether the machine-local NATS is actually answering on the port the
+   * bridge dials: the spawn call returning is not the same as the server
+   * being up, so the port probe is the source of truth. `managed` marks the
+   * child this process spawned, so a server started by hand or a service
+   * manager is reported as running but not managed.
+   */
+  async localNatsStatus(): Promise<LocalNatsRuntimeStatus> {
+    const endpoint = natsEndpoint(this.current.natsUrl)
+    const running = await probePort(endpoint.host, endpoint.port)
+    const managed = this.localNatsProcess !== null
+      && this.localNatsProcess.exitCode === null
+      && !this.localNatsProcess.killed
+    const address = `${endpoint.host}:${endpoint.port}`
+    const message = running
+      ? managed
+        ? `本机 NATS 正在运行（由本插件启动，${address}）`
+        : `本机 NATS 正在 ${address} 监听（不是本插件启动的进程）`
+      : '本机 NATS 未运行'
+    return { running, managed, endpoint: address, message }
   }
 
   /** The saved field and environment variable behind one of the two paths. */
@@ -835,12 +895,20 @@ export class MobileBridge extends Service {
    * Mint a pairing code and assemble the QR payload. Local-only by design:
    * reachable through the loopback console and this service, never via NATS.
    */
-  createPairingQr(): { code: string, expiresAt: number, payload: PairingPayload } {
+  async createPairingQr(): Promise<{ code: string, expiresAt: number, payload: PairingPayload }> {
+    if (!this.current.enabled) {
+      throw new Error('移动桥已停用；先启用后再生成配对二维码。')
+    }
+    const identity = await this.identity.load()
+    this.gatewayId = identity.gatewayId
     const { code, expiresAt } = this.tokens.createPairingCode(this.current.pairCodeTtlSec)
     return {
       code,
       expiresAt,
-      payload: buildPairingPayload(this.current, code),
+      payload: buildPairingPayload(this.current, code, {
+        gatewayId: identity.gatewayId,
+        expiresAt,
+      }),
     }
   }
 
@@ -854,9 +922,9 @@ export class MobileBridge extends Service {
 
   private async cycle(): Promise<void> {
     try {
-      if (this.wantRunning && this.nc === null) {
+      if (this.shouldRun() && this.nc === null) {
         await this.start()
-      } else if (!this.wantRunning) {
+      } else if (!this.shouldRun()) {
         await this.stop()
       }
     } catch (error) {
@@ -872,6 +940,7 @@ export class MobileBridge extends Service {
       if (!this.wantRunning) return
       try {
         await this.stop()
+        if (!this.shouldRun()) return
         await this.start()
       } catch (error) {
         this.connectionStatus = 'disconnected'
@@ -883,6 +952,9 @@ export class MobileBridge extends Service {
   }
 
   private async start(): Promise<void> {
+    if (!this.shouldRun()) return
+    const identity = await this.identity.load()
+    this.gatewayId = identity.gatewayId
     await this.tokens.load()
     this.connectionStatus = 'connecting'
     this.bridgeStartedAt = new Date().toISOString()
@@ -927,12 +999,15 @@ export class MobileBridge extends Service {
     this.eventBridge = new EventBridge(nc, eventAdapter, {
       instanceId: this.current.instanceId,
       coalesceMs: this.current.chunkCoalesceMs,
+      eventKeys: () => this.tokens.eventKeys(),
+      legacyShared: () => this.tokens.hasLegacyActiveDevices(),
     })
     this.eventBridge.start()
 
     this.rpcBridge = new RpcBridge(nc, {
       instanceId: this.current.instanceId,
       instanceName: this.instanceName(),
+      gatewayId: identity.gatewayId,
       carrier,
       gateway,
       tokens: this.tokens,
@@ -992,6 +1067,11 @@ export class MobileBridge extends Service {
       this.nc = null
     }
     this.connectionStatus = 'disconnected'
+    await this.tokens.flushSeen().catch(() => undefined)
+  }
+
+  private shouldRun(): boolean {
+    return this.wantRunning && this.current.enabled
   }
 
   private async trackStatus(nc: NatsConnection): Promise<void> {

@@ -5,17 +5,21 @@ import { missingHubCredentials, registerConsoleRoutes, versionDrift, type Consol
 import type { Config } from '../src/config.js'
 
 const baseConfig: Config = {
+  enabled: true,
   natsUrl: 'nats://127.0.0.1:4222',
   hubWssUrl: 'wss://hub.test:8443',
   hubUser: 'c-end-test',
   hubPass: 'secret-pass',
+  hubCaCert: '',
   hubCaFingerprint: '',
   instanceId: 'home',
+  instanceName: '',
   tokenTtlDays: 90,
   pairCodeTtlSec: 120,
   maxDevices: 10,
   chunkCoalesceMs: 0,
   natsConfigPath: '',
+  natsServerPath: '',
   autoMigrateProfile: true,
 }
 
@@ -183,6 +187,11 @@ describe('console config route', () => {
     expect(await save({ hubWssUrl: ' 203.0.113.10:9443 ' })).toMatchObject({ hubWssUrl: 'wss://203.0.113.10:9443' })
     expect(await save({ hubWssUrl: 'wss://hub.test:8443' })).toMatchObject({ hubWssUrl: 'wss://hub.test:8443' })
   })
+
+  it('accepts the runtime switch as a boolean config field', async () => {
+    expect(await save({ enabled: false })).toEqual({ enabled: false })
+    expect(await save({ enabled: 'false' })).toEqual({})
+  })
 })
 
 describe('console status route', () => {
@@ -236,6 +245,7 @@ describe('console status route', () => {
     await route(call.req, call.res)
     expect(configOf(call.json()).hubPass).toBeUndefined()
     expect(configOf(call.json()).hubPassConfigured).toBe(true)
+    expect(configOf(call.json()).enabled).toBe(true)
   })
 
   it('refuses a non-loopback caller outright, so the password cannot leak', async () => {
@@ -246,6 +256,32 @@ describe('console status route', () => {
       expect(call.status()).toBe(403)
       expect(JSON.stringify(call.json())).not.toContain('secret-pass')
     }
+  })
+
+  it('reports local NATS runtime state alongside the path readout', async () => {
+    const route = captureRoutes(baseConfig, undefined, {
+      localNatsStatus: () => Promise.resolve({
+        running: true,
+        managed: true,
+        endpoint: '127.0.0.1:4222',
+        message: '本机 NATS 正在运行（由本插件启动，127.0.0.1:4222）',
+      }),
+    }).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1')
+    await route(call.req, call.res)
+    expect(call.json().localNatsRuntime).toEqual({
+      running: true,
+      managed: true,
+      endpoint: '127.0.0.1:4222',
+      message: '本机 NATS 正在运行（由本插件启动，127.0.0.1:4222）',
+    })
+  })
+
+  it('leaves local NATS runtime null when the backend cannot probe', async () => {
+    const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1')
+    await route(call.req, call.res)
+    expect(call.json().localNatsRuntime).toBeNull()
   })
 })
 
@@ -376,16 +412,17 @@ describe('console page', () => {
     expect(String(call.json().message)).toContain('pnpm')
   })
 
-  it('shows the install shape and offers the repair beside the status line', async () => {
+  it('keeps the install shape and repair in the advanced section', async () => {
     const route = captureRoutes(baseConfig).get('/mobile-bridge')!
     const call = exchange('127.0.0.1', 'GET')
     await route(call.req, call.res)
     const html = call.body()
 
+    expect(html).toContain('<details class="advanced">')
     expect(html).toContain('id="profileShape"')
     expect(html).toContain('id="repairBtn"')
     // The button is hidden until a status poll says a write would help.
-    expect(html).toContain('id="repairBtn" class="secondary" type="button" style="margin-left:8px" hidden')
+    expect(html).toContain('id="repairBtn" class="secondary" type="button" hidden')
     expect(html).toContain("api('migrate', {})")
   })
 
@@ -450,8 +487,9 @@ describe('console page', () => {
     expect(html).toContain("showDevices('revoked')")
     expect(html).toContain('id="countActive"')
     expect(html).toContain('id="countRevoked"')
-    // The device list is the page's only unbounded section: it scrolls at 520px.
-    expect(html).toContain('.devicePane { max-height: 520px; overflow: auto;')
+    // The device list is the page's only unbounded section: it scrolls inside
+    // a fixed pane so a long token ledger cannot push maintenance out of reach.
+    expect(html).toContain('.devicePane { max-height: 420px; overflow: auto;')
     // A revoked row reports its state instead of offering the same action again.
     expect(html).toContain('没有已吊销的设备')
     // Deleting a revoked record is a one-click action: the row is already dead,

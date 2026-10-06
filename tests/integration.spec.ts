@@ -2,7 +2,7 @@
  * Integration test over a real nats-server child process: the plugin side
  * (RpcBridge + EventBridge) and a simulated app exchange over the wire.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,6 +17,9 @@ import { TokenStore } from '../src/tokens.js'
 const PORT = 14222 + Math.floor(Math.random() * 2000)
 const SERVER_URL = `nats://127.0.0.1:${PORT}`
 const INSTANCE = 'itest'
+const NATS_SERVER_BIN = process.env.NATS_SERVER_BIN ?? 'nats-server'
+const HAS_NATS = spawnSync(NATS_SERVER_BIN, ['-v'], { stdio: 'ignore' }).status === 0
+const integrationTest = HAS_NATS ? it : it.skip
 
 let server: ChildProcess
 let pluginNc: NatsConnection
@@ -38,8 +41,9 @@ async function* muxStream(signal: AbortSignal): AsyncIterable<StreamFrame> {
 }
 
 beforeAll(async () => {
+  if (!HAS_NATS) return
   const debug = process.env.NATS_TRACE === '1'
-  server = spawn('nats-server', ['-p', String(PORT), ...(debug ? ['-DV'] : [])], { stdio: debug ? ['ignore', 'inherit', 'inherit'] : 'ignore' })
+  server = spawn(NATS_SERVER_BIN, ['-p', String(PORT), ...(debug ? ['-DV'] : [])], { stdio: debug ? ['ignore', 'inherit', 'inherit'] : 'ignore' })
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('nats-server start timeout')), 20_000)
     const probe = setInterval(async () => {
@@ -92,11 +96,12 @@ beforeAll(async () => {
 }, 20000)
 
 afterAll(async () => {
+  if (!HAS_NATS) return
   await appNc?.drain()
   await pluginNc?.drain()
   await eventBridge?.stop()
   server?.kill()
-  await rm(dir, { recursive: true, force: true })
+  if (dir !== undefined) await rm(dir, { recursive: true, force: true })
 })
 
 /**
@@ -129,7 +134,7 @@ async function appRequest(method: string, payload: unknown, token?: string) {
 }
 
 describe('integration over real NATS', () => {
-  it('runs the full flow: pair, gated RPC, events, hello replay', async () => {
+integrationTest('runs the full flow: pair, gated RPC, events, hello replay', async () => {
     // 1. RPC without token is rejected
     const denied = await appRequest('session.list', {})
     expect(JSON.parse(denied.string()).result.error.message).toBe('mobile-unauthenticated')

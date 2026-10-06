@@ -4,6 +4,7 @@ import type { Config } from '../src/config.js'
 import { ALPHA_CA_BASE64, ALPHA_CA_FINGERPRINT, BETA_CA_FINGERPRINT, asPem } from './hub-ca-fixture.js'
 
 const config: Config = {
+  enabled: true,
   natsUrl: 'nats://127.0.0.1:4222',
   hubWssUrl: 'wss://hub.test:8443',
   hubUser: 'c-end-test',
@@ -11,10 +12,14 @@ const config: Config = {
   hubCaCert: '',
   hubCaFingerprint: '',
   instanceId: 'home-test',
+  instanceName: '',
   tokenTtlDays: 90,
   pairCodeTtlSec: 120,
   maxDevices: 10,
   chunkCoalesceMs: 0,
+  natsConfigPath: '',
+  natsServerPath: '',
+  autoMigrateProfile: true,
 }
 
 /** A connect stub that fails with a NATS-shaped error code. */

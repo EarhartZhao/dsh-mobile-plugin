@@ -38,7 +38,7 @@
 ```bash
 pnpm add @dsh-earhartzhao/dsh-mobile-plugin
 # 或钉住某个版本：
-pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.34
+pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.35
 ```
 
 registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 重装（`registrySpec` / `updateSpec`）。
@@ -46,7 +46,7 @@ registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`p
 ### 方式 B：Release 预构建 tarball
 
 ```bash
-pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.34/dsh-mobile-plugin-0.2.34.tgz
+pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.35/dsh-mobile-plugin-0.2.35.tgz
 ```
 
 打 tag 时 CI（`.github/workflows/release.yml`）会 `pnpm pack` 出带 `lib/` 的包，把 `dsh-mobile-plugin-<version>.tgz` 与版本无关的 `dsh-mobile-plugin.tgz` 一起挂到该 tag 的 Release。装它不需要任何 `allowBuilds`，`…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 标成 pre-release，不会顶掉它）。控制台的「检查更新」认这种装法：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`src/update.ts` 的 `releaseAssetSpec`）——不换 URL 就换不掉 pnpm 的 integrity，会拿回旧字节。代价是那台机器得够得着 GitHub（源码 tarball 走 codeload、资产走 releases，两个域名）。
@@ -218,6 +218,12 @@ node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.w
 ## 移动端兼容与版本记录
 
 `mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
+
+0.2.35 收拢移动桥的设备身份与运行可靠性，并重做配置页的信息层级。控制台改成「连接 Hub / 配对新设备 / 已配对设备」工作台，把本机 NATS、安装形态、更新和运行诊断收进折叠的高级区；右上角增加运行总开关，停用后不连接 NATS、不发布事件，但本地控制台仍可访问。配对二维码增加 `version` 与 `expiresAt`，并携带持久化的 `gatewayId`、`gatewayName`；同一 App 安装用 `installationId` 重新配对会轮换 token、复用原设备行，不再制造重复设备。设备最近活动时间进入设备表；token 台账的并发写盘改为串行、临时文件原子替换，避免连续吊销/重命名时覆盖。
+
+设备表按 `installationId`（旧记录没有该字段时回退到去空格、忽略大小写的设备名）去重，同一台手机只留一行，吊销与删除都作用于整组，避免同名历史散成多行。已吊销记录的「删除记录」一步删除，不再弹二次确认。两个「刷新」按钮在请求期间显示「刷新中」并禁用，完成后回报刷新时间。高级诊断新增本机 NATS 运行状态：按配置的客户端口做 TCP 探测，直接显示「正在运行 / 未运行」以及是本插件启动还是外部进程，不再只报告配置文件是否存在。
+
+事件下行在保留共享主题兼容期的同时，为每台设备签发随机 `eventKey`，新 App 订阅 `evt.dsh.{instance}.{eventKey}.mux|host`。只有设备在 `hello` 回显正确 key 后才视为迁移完成；只要还有一个旧设备在线，插件继续双发共享主题，全部迁移后自动停止共享发布，避免不同手机之间串看实时会话。身份文件损坏时会明确报错而不是静默换号；设备 token 与 Hub 凭据仍不进入状态接口。
 
 0.2.6 另接入消息反馈：`feedback.list|put|delete` → `messageFeedback/list|put|delete`。宿主把 Like/Dislike 作为 durable 事实写入会话日志（`feedback/message-put|delete` 事件），并返回业务结果而非 Remote 错误；插件只做参数搬运，`ifVersion` 原样透传，冲突重试由 App 按返回的 `current.version` 完成。
 

@@ -108,6 +108,26 @@ describe('EventBridge', () => {
     expect(envelope.payload.sessionId).toBe('s1')
   })
 
+  it('fans frames out to device-scoped subjects and drops the shared subject once migration is done', async () => {
+    const nc = fakeNc()
+    const bridge = new EventBridge(nc as never, fakeApi([
+      frame('f1', { type: 'session/event', sessionId: 's1', event: { type: 'turn/start' } }),
+    ]), {
+      instanceId: 'test',
+      coalesceMs: 0,
+      legacyShared: () => false,
+      eventKeys: () => ['key-a', 'key-b'],
+    })
+    bridge.start()
+    await new Promise(r => setTimeout(r, 20))
+    await bridge.stop()
+
+    expect(nc.published.map(item => item.subject)).toEqual([
+      'evt.dsh.test.key-a.mux',
+      'evt.dsh.test.key-b.mux',
+    ])
+  })
+
   it('tracks pending approvals and replays them, clearing on resolve', async () => {
     const nc = fakeNc()
     const bridge = new EventBridge(nc as never, fakeApi([

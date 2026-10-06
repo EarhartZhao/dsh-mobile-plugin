@@ -1,7 +1,7 @@
 {
   "name": "@dsh-earhartzhao/dsh-mobile-plugin",
-  "version": "0.2.34",
-  "description": "dsh-mobile bridge: NATS outbound bridge plugin for deepseek-harness (mobile client transport, pairing, device tokens)",
+  "version": "0.2.35",
+  "description": "手机连接：配对设备、管理访问权限并诊断 NATS 桥接。",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

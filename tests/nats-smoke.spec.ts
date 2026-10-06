@@ -1,5 +1,5 @@
 /** Minimal control: does nats request-reply work at all under vitest? */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect, headers, type NatsConnection } from 'nats'
@@ -9,25 +9,30 @@ import { TokenStore } from '../src/tokens.js'
 
 const PORT = 15500 + Math.floor(Math.random() * 500)
 const URL = `nats://127.0.0.1:${PORT}`
+const NATS_SERVER_BIN = process.env.NATS_SERVER_BIN ?? 'nats-server'
+const HAS_NATS = spawnSync(NATS_SERVER_BIN, ['-v'], { stdio: 'ignore' }).status === 0
+const smokeTest = HAS_NATS ? it : it.skip
 
 let server: ChildProcess
 let a: NatsConnection
 let b: NatsConnection
 
 beforeAll(async () => {
-  server = spawn('nats-server', ['-p', String(PORT)], { stdio: 'ignore' })
+  if (!HAS_NATS) return
+  server = spawn(NATS_SERVER_BIN, ['-p', String(PORT)], { stdio: 'ignore' })
   await new Promise(r => setTimeout(r, 1200))
   a = await connect({ servers: URL })
   b = await connect({ servers: URL })
 }, 15000)
 
 afterAll(async () => {
+  if (!HAS_NATS) return
   await b?.drain()
   await a?.drain()
   server?.kill()
 })
 
-it('echo works', async () => {
+smokeTest('echo works', async () => {
   const sub = a.subscribe('smoke.echo')
   void (async () => {
     for await (const msg of sub) msg.respond(new TextEncoder().encode('pong'))
@@ -37,7 +42,7 @@ it('echo works', async () => {
   expect(reply.string()).toBe('pong')
 })
 
-it('echo works when the request carries an (empty) headers object', async () => {
+smokeTest('echo works when the request carries an (empty) headers object', async () => {
   const sub = a.subscribe('smoke.echo2')
   void (async () => {
     for await (const msg of sub) msg.respond(new TextEncoder().encode('pong2'))
@@ -47,7 +52,7 @@ it('echo works when the request carries an (empty) headers object', async () => 
   expect(reply.string()).toBe('pong2')
 })
 
-it('echo works with an explicit per-request inbox', async () => {
+smokeTest('echo works with an explicit per-request inbox', async () => {
   const sub = a.subscribe('smoke.echo3')
   void (async () => {
     for await (const msg of sub) msg.respond(new TextEncoder().encode('pong3'))
@@ -65,7 +70,7 @@ it('echo works with an explicit per-request inbox', async () => {
   expect(reply.string()).toBe('pong3')
 })
 
-it('RpcBridge replies resolve on an explicit inbox', async () => {
+smokeTest('RpcBridge replies resolve on an explicit inbox', async () => {
   const tokens = new TokenStore(join(tmpdir(), `smoke-tokens-${crypto.randomUUID()}.json`))
   await tokens.load()
   const carrier = {
