@@ -143,8 +143,10 @@ openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
 # 手机拨的是 IP 就写 IP:<hub-host>，拨域名就写 DNS:<hub-host>，两者必须一致
 printf "subjectAltName=IP:<hub-host>" > san.ext
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -days 825 -extfile san.ext -out server.crt
+  -sha256 -days 825 -extfile san.ext -out server.crt
 ```
+
+`-sha256` 不是可有可无的：macOS 自带的 LibreSSL（`openssl version` 显示 LibreSSL 的都是）在 `x509 -req` 里默认拿 SHA-1 签名，iOS 会直接拒绝整条 SHA-1 链，客户端只留下一句 `CA signature digest algorithm too weak`，很难查出是签发环节的问题。`dsh-mobile/scripts/rotate-hub-tls.sh` 本来就带 `-sha256`，手工签发时照抄这里就行。
 
 ```bash
 # 上传（证书目录已按 2.1 建好，属主 nats）。ca.crt 是公开材料，只上传它的公开部分，

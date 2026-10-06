@@ -33,8 +33,10 @@ openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
 # 拨 IP 写 IP:<hub-host>，拨域名写 DNS:<hub-host>
 printf "subjectAltName=IP:<hub-host>" > san.ext
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -days 825 -extfile san.ext -out server.crt
+  -sha256 -days 825 -extfile san.ext -out server.crt
 ```
+
+`-sha256` 不能省：macOS 自带的 LibreSSL、以及一些老 OpenSSL 里，`x509 -req` 默认用 SHA-1 签名，而 iOS 会直接拒掉整条 SHA-1 链（"Signature hash algorithm is not permitted for this use"）——症状是手机连不上、Node 侧只报一句 `CA signature digest algorithm too weak`。`scripts/rotate-hub-tls.sh` 里早就带了 `-sha256`，这里跟着对齐。
 
 - `ca.key`：**离线保管**（密码管理器/加密盘），它是整个信任体系的根，绝不放服务器。
 - `server.crt` + `server.key`：放服务器 `/etc/nats/tls/`，权限 0600。服务器上那份 `server.crt` 是**叶子 + CA 两段**（`cat server.crt ca.crt >` 的目标文件），不是单张叶子——见下一节。
