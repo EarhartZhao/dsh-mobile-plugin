@@ -79,6 +79,12 @@ bundle 的 patch 层只在包名被列进 profile 的 `dsh.profile.bundles` 时�
 
 **旧写法由插件自动修正。** 如果 profile 是用 `insert:` 手工挂的这一行（早期文档和从 `$DSH_HOME/settings.yaml.imported` 搬迁都这么写），宿主的整包与行开关都管不了它：包名不在 `dsh.profile.bundles` 里，所以整包开关是关的；行开关只在整包启用时才渲染，于是也看不到；点卸载则直接报 `bundle-in-use`，因为这一行不是组合包提供的，关掉组合包它仍然在。插件加载时会把这种形态改回组合包形态，分两步、只改 profile 的两个文件、配置值一个不丢：① 把包名补进 `dsh.profile.bundles`（这一条到下**一次启动**才生效，本次不动正在运行的行）；② 重启后行已由组合包提供，再把 profile patch 里的 `insert` 改成按 id 的覆盖行。关掉配置项 `autoMigrateProfile` 可以让插件完全不碰 profile 文件，改由控制台页上的「修复安装形态」按钮手动触发。
 
+### 升级之后要重启 dsh
+
+换包在运行中的进程里**不会自动生效**：宿主始终用启动时加载的那份 JavaScript，插件管理器对 profile 里已存在的包一律返回 `restart-required`，而它的 HMR 明确忽略 `node_modules`（`packages/boot/hmr`）。插件页会显示一句「更改将在下次启动生效」，但如果你是在终端里 `pnpm add` 升的版本，那条路上没有任何提示——表现就是「版本号看着是新的，功能却没变」。
+
+所以升级后请重启 dsh：终端里起的按 Ctrl+C 再运行 `dsh web`；桌面版用菜单「重启应用与 Host」。控制台会在版本对不上时自己说明这件事（见 [0.2.31](#移动端兼容与版本记录)）：「插件版本」那行旁边出现红字「磁盘上已装 X，当前运行的是 Y——重启 dsh 后新版本才生效」。看到它就重启，重启后这行字会消失。
+
 ### 从裸包名迁移（0.2.26 及更早装过的话）
 
 0.2.26 之前包名是 `dsh-mobile-plugin`，0.2.27 起是 `@dsh-earhartzhao/dsh-mobile-plugin`（npm 组织只收 scoped 包）。这一步**重装不够**：profile 里那条覆盖行是**按 id 加包名断言**匹配的（宿主 `packages/boot/plugin-manager/README.md`：*Matching uses the entry id and any module-name assertion*），裸名的 `name: 'dsh-mobile-plugin'` 换了包就不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 会**静默失效**——而且插件自己修不了，失配的那一轮里插件根本没被加载。停掉 dsh 后跑一次迁移脚本即可：
@@ -268,3 +274,5 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 - 顺带修掉 `rotate-hub-tls.sh --apply` 里的两条死拷贝：它还在往 `apps/mobile/.../dsh_root_ca.crt` 写 CA，而 App 早已不打包任何 CA（信任只来自二维码），那两个路径都不存在，`set -e` 下会直接把轮换脚本打断。
 
 0.2.30 改正 0.2.29 那句补链命令的方向，移动端 wire 不变：0.2.29 让「从 Hub 获取 CA」在 Hub 只发叶子时给出 Hub 上要跑的命令，但那条命令是**新建 `fullchain.crt` 再改 `nats.conf` 的 `cert_file`**——新文件是 root 属主，而 nats-server 常以 `nats` 用户运行，证书读不到、websocket 监听会直接起不来（服务启动成功、只有那一段端口不通，报错也不指向权限）。现在改成 `cd /etc/nats/tls` 之后**就地重写 `server.crt`**（先 `cp -p` 存一份叶子）：属主、权限、SELinux 上下文都保持原样，`cert_file` 一直指着这个文件名，配置文件一个字都不用动。按钮文案与 [docs/03 §2.6](docs/03-nats-self-host.md) 给了同一套幂等命令；dsh-mobile 的 `scripts/setup-hub.sh` 本来就是就地拼、`rotate-hub-tls.sh` 的 runbook 同步改成这条。
+
+0.2.31 让控制台自己说出「该重启了」，移动端 wire 不变：升级插件在运行中的进程里**不可能自动生效**——宿主一直用启动时加载的那份 JavaScript，插件管理器对 profile 里已存在的包一律回 `restart-required`，HMR 又明确忽略 `node_modules`。于是升完包、功能没变、按钮没出现，而唯一的提示只有插件页那行小字（`pnpm add` 那条路一个字都不说）。现在控制台在每次轮询里比较**磁盘上装的版本**和**正在运行的版本**，不一致就在「插件版本」那行旁边用红字写明「磁盘上已装 X，当前运行的是 Y——重启 dsh 后新版本才生效」，并给出两种启动方式各自的重启动作。读不到清单（缺文件、安装写到一半、最近的那份 manifest 不是本包）时保持沉默，不误报。

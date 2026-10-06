@@ -355,6 +355,7 @@ nats-server -c scripts/local-hub-standin.conf
 | 手机报「无法连接公网 NATS」但账号密码都对 | Hub 地址写法 | 地址漏了端口：`wss://<hub-host>` 会被 URL 规范补成 443。插件 0.2.21 起自动补 8443，更早的版本要手写 `wss://<hub-host>:8443` |
 | 「测试 Hub 账号」的 `certificate` 段报证书不是公共 CA 签的 | 二维码不带 CA | 点「从 Hub 获取 CA」自动取（Hub 链里没带 CA 时它会给出 Hub 上的命令，见 2.6），或把 `ca.crt` 粘进 CA 字段；保存后再点「生成配对二维码」 |
 | 「测试 Hub 账号」报无法通过 `nats://<hub-host>:4222` | 4222 不通 | 放行该端口或忽略：手机走 8443，此检查失败不阻断发码 |
+| 升级插件后控制台「插件版本」旁出现红字「磁盘上已装 X，当前运行的是 Y」 | 换包没生效 | 换包不可能在运行中的进程里生效：宿主一直用启动时加载的那份 JavaScript（插件管理器对已存在的包一律回 `restart-required`，HMR 忽略 `node_modules`）。重启 dsh：终端里 Ctrl+C 再运行 `dsh web`，桌面版用菜单「重启应用与 Host」 |
 | `nats-server -t` 通过但服务起不来 | 权限 | 跑 nats 的用户要能读 `/etc/nats/tls/*`（属主与权限按 2.1、2.3 设置） |
 | 换了 Hub 地址或账号 | 迁移 | 更新插件配置并重新发码；设备 token 是应用层的、本身不受影响，但手机必须重新扫码，因为 NATS 凭证来自二维码 |
 

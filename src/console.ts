@@ -70,6 +70,28 @@ export interface ProfileRepairReport {
 }
 
 /**
+ * What to tell the owner when the version on disk is not the one running.
+ *
+ * Upgrading the package cannot take effect in the running process: the host
+ * keeps the JavaScript generation it booted with, and its plugin manager
+ * answers `restart-required` for any package the profile already depends on.
+ * The install itself reports that only on the Plugins page, and a `pnpm add`
+ * from a terminal reports nothing at all — so the console names the gap and
+ * the way out of it, instead of letting someone hunt for a button that the
+ * old generation does not have.
+ * @param running The version the loaded code declares.
+ * @param installed The version of the manifest on disk, or null when unknown.
+ * @returns One runnable sentence, or null when both versions agree.
+ */
+export function versionDrift(running: string, installed: string | null | undefined): string | null {
+  const onDisk = installed?.trim() ?? ''
+  const live = running.trim()
+  if (onDisk === '' || live === '' || onDisk === live) return null
+  return `磁盘上已装 ${onDisk}，当前运行的是 ${live}——重启 dsh 后新版本才生效：`
+    + '终端里起的按 Ctrl+C 再运行 dsh web；桌面版用菜单「重启应用与 Host」。'
+}
+
+/**
  * The QR carries the Hub account straight to the phone, so a missing
  * credential mints a terminal that can never connect — and the App reports it
  * as an opaque field error. Name every unset field up front instead; null when
@@ -187,6 +209,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         const rejected = consoleRequestRejection(req, { mutating: false })
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         const bridge = backend.bridge()
+        const status = bridge.status()
         const config = backend.currentConfig()
         const ca = readHubCa(config.hubCaCert)
         // The password is deliberately absent here: this response is polled
@@ -194,7 +217,10 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         // local process at any moment. It comes from `/api/reveal` instead, only
         // when the owner asks to see it.
         json(res, 200, {
-          ...bridge.status(),
+          ...status,
+          // Derived here, not in the page: the wording is the whole feature, and
+          // a server-side function is testable without a browser.
+          versionDrift: versionDrift(status.pluginVersion, status.installedVersion),
           localNats: backend.localNats?.() ?? null,
           config: {
             hubWssUrl: config.hubWssUrl,
@@ -500,6 +526,9 @@ const CONSOLE_HTML = `<!doctype html>
   .devicePane td:last-child, .devicePane th:last-child { text-align: right; }
   .deviceState { opacity: .6; }
   .error { color: #dc2626; font-size: 13px; } .ok { color: #16a34a; font-size: 13px; }
+  /* The version gap is the one line here that costs a restart to fix, so it sits
+     beside the running version instead of in a section of its own. */
+  #versionDrift { display: inline-block; margin: 0 0 0 10px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -523,7 +552,7 @@ const CONSOLE_HTML = `<!doctype html>
   <input id="natsServerPath" placeholder="nats-server 路径（留空 = 自动查找，含 PATH）" style="flex:1" autocomplete="off" spellcheck="false">
 </div>
 <dl class="health">
-  <dt>插件版本</dt><dd id="pluginVersion">—</dd>
+  <dt>插件版本</dt><dd><span id="pluginVersion">—</span><span id="versionDrift"></span></dd>
   <dt>mobileApi</dt><dd id="mobileApi">—</dd>
   <dt>构建 ID</dt><dd id="buildId">—</dd>
   <dt>实例 ID</dt><dd id="activeInstance">—</dd>
@@ -686,6 +715,8 @@ async function refreshStatus() {
     const s = await api('status')
     $('status').textContent = { connected: '已连接', connecting: '连接中', reconnecting: '重连中', disconnected: '未连接' }[s.connection] || s.connection
     $('pluginVersion').textContent = s.pluginVersion || '—'
+    $('versionDrift').className = s.versionDrift ? 'error' : ''
+    $('versionDrift').textContent = s.versionDrift || ''
     $('mobileApi').textContent = String(s.mobileApi ?? '—')
     $('buildId').textContent = s.buildId || '—'
     $('activeInstance').textContent = s.instanceId || '—'

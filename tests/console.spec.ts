@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import { describe, expect, it } from 'vitest'
-import { missingHubCredentials, registerConsoleRoutes, type ConsoleBackend, type WebRouter } from '../src/console.js'
+import { missingHubCredentials, registerConsoleRoutes, versionDrift, type ConsoleBackend, type WebRouter } from '../src/console.js'
 import type { Config } from '../src/config.js'
 
 const baseConfig: Config = {
@@ -146,6 +146,24 @@ describe('missingHubCredentials', () => {
   })
 })
 
+describe('versionDrift', () => {
+  it('names both versions when the disk is ahead of the running process', () => {
+    const line = versionDrift('0.2.28', '0.2.31')!
+    expect(line).toContain('0.2.31')
+    expect(line).toContain('0.2.28')
+  })
+
+  it('is silent when the process already runs what is on disk', () => {
+    expect(versionDrift('0.2.31', '0.2.31')).toBeNull()
+  })
+
+  it('is silent when the disk version is unknown, absent or blank', () => {
+    expect(versionDrift('0.2.31', null)).toBeNull()
+    expect(versionDrift('0.2.31', undefined)).toBeNull()
+    expect(versionDrift('0.2.31', '   ')).toBeNull()
+  })
+})
+
 describe('console config route', () => {
   const save = async (body: Record<string, unknown>) => {
     const writes: Array<Partial<Config>> = []
@@ -170,6 +188,47 @@ describe('console config route', () => {
 describe('console status route', () => {
   const configOf = (body: Record<string, unknown>): Record<string, unknown> =>
     body.config as Record<string, unknown>
+
+  /** A bridge whose reported versions the caller picks. */
+  const reporting = (versions: Record<string, unknown>): Partial<ConsoleBackend> => ({
+    bridge: () => ({
+      status: () => ({
+        connection: 'connected',
+        mobileApi: 2,
+        features: [],
+        profile: { state: 'ok', shape: { bundleListed: true, legacyInsert: false, overrideRow: true }, notes: [] },
+        ...versions,
+      }),
+    }),
+  }) as unknown as Partial<ConsoleBackend>
+
+  it('says when the installed version is not the running one, and how to close the gap', async () => {
+    // The upgrade landed on disk while the process kept its boot-time module
+    // generation: nothing else on any surface says a restart is outstanding.
+    const route = captureRoutes(baseConfig, undefined, reporting({ pluginVersion: '0.2.28', installedVersion: '0.2.31' })).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1')
+    await route(call.req, call.res)
+
+    const drift = call.json().versionDrift as string
+    expect(drift).toContain('0.2.31')
+    expect(drift).toContain('0.2.28')
+    expect(drift).toContain('重启 dsh')
+  })
+
+  it('stays quiet when the versions agree', async () => {
+    const route = captureRoutes(baseConfig, undefined, reporting({ pluginVersion: '0.2.31', installedVersion: '0.2.31' })).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1')
+    await route(call.req, call.res)
+    expect(call.json().versionDrift).toBeNull()
+  })
+
+  it('stays quiet when the disk version is unknown', async () => {
+    // A profile that cannot be read is not evidence of a stale process.
+    const route = captureRoutes(baseConfig, undefined, reporting({ pluginVersion: '0.2.31', installedVersion: null })).get('/mobile-bridge/api/status')!
+    const call = exchange('127.0.0.1')
+    await route(call.req, call.res)
+    expect(call.json().versionDrift).toBeNull()
+  })
 
   it('keeps the password out of the polled status response', async () => {
     const route = captureRoutes(baseConfig).get('/mobile-bridge/api/status')!
@@ -422,6 +481,18 @@ describe('console page', () => {
     // the empty-field hint has to point at the button rather than only at the
     // file an owner may not have on that machine.
     expect(html).toContain('从 Hub 获取 CA')
+  })
+
+  it('makes room for the version gap beside the running version', async () => {
+    // The warning is worthless if the poll has nowhere to put it, so the slot
+    // and the line that fills it are part of the page's contract.
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('id="versionDrift"')
+    expect(html).toContain("$('versionDrift').textContent = s.versionDrift || ''")
   })
 
   it('hands the certificate it fetched to the page, unmodified', async () => {

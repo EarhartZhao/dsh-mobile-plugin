@@ -19,6 +19,7 @@ import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { Config, configValues, type ConfigInput } from './config.js'
 import { readHubCa, sameFingerprint } from './hub-ca.js'
+import { readInstalledVersion } from './installed-version.js'
 import { normalizeHubWssUrl } from './hub-check.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
@@ -453,6 +454,7 @@ export class MobileBridge extends Service {
     connection: ConnectionStatus
     devices: number
     pluginVersion: string
+    installedVersion: string | null
     mobileApi: number
     features: readonly string[]
     buildId: string
@@ -471,6 +473,10 @@ export class MobileBridge extends Service {
       connection: this.connectionStatus,
       devices: this.tokens.activeCount(),
       pluginVersion: PLUGIN_VERSION,
+      // Read on every status call rather than cached at boot: the interesting
+      // moment is precisely the one where an install lands under a running
+      // process, and a cached answer could never see it.
+      installedVersion: readInstalledVersion(PLUGIN_LOADED_FROM, PLUGIN_PACKAGE_NAME),
       mobileApi: PLUGIN_MOBILE_API,
       features: PLUGIN_FEATURES,
       buildId: PLUGIN_BUILD_ID,
