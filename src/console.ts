@@ -589,6 +589,13 @@ const CONSOLE_HTML = `<!doctype html>
   <span id="fetchCaMsg" style="font-size:12px;white-space:pre-line"></span>
 </div>
 <p id="hubCaHint" style="font-size:12px;margin:4px 0 0;opacity:.75"></p>
+<p id="caOriginHint" style="font-size:12px;margin:4px 0 0;opacity:.6">
+  还不知道 ca.crt 该从哪来？两种情况：<b>Hub 是别人搭的</b>，向对方要一份（ca.crt 是公开材料，不含私钥）；
+  <b>Hub 是你自己搭的（或还没搭）</b>，就得先在服务器上生成自己的 CA——私钥 ca.key 留在管理机、绝不进服务器，
+  只有 ca.crt 填在这里。从零建 Hub 的完整步骤（生成 CA → 签发服务器证书 → 把 ca.crt 拼进 cert_file）见
+  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md" target="_blank" rel="noreferrer">docs/03-nats-self-host.md</a>
+  的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」——这本仓库里也有同一份文件。
+</p>
 <label>实例 ID（字母/数字/短横线）</label><input id="instanceId" placeholder="home">
 <label>本机名称（手机上显示的名字；留空则显示实例 ID）</label><input id="instanceName" placeholder="例如：家里的 Mac mini">
 <div class="row">
@@ -661,7 +668,7 @@ function renderHubCa(config) {
   if (!config.hubCaCert) {
     hint.textContent = '未配置：二维码不带证书，App 里也没有内置任何 CA。'
       + '只有由公共 CA 签发证书的 Hub 能连上。自签证书的 Hub 请点上面的「从 Hub 获取 CA」自动取，'
-      + '或手工粘贴 ca.crt 全文。'
+      + '或手工粘贴 ca.crt 全文（连 ca.crt 都还没有？看下面那一行）。'
     return
   }
   const summary = config.hubCaSummary

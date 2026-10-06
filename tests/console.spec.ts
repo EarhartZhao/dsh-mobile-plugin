@@ -495,6 +495,24 @@ describe('console page', () => {
     expect(html).toContain("$('versionDrift').textContent = s.versionDrift || ''")
   })
 
+  it('answers "where does ca.crt come from" for a brand-new owner', async () => {
+    // Every other hint here assumes a Hub and a ca.crt already exist. Someone
+    // standing up their own Hub needs to be told that the CA is theirs to
+    // create, that its private half never leaves the admin machine, and where
+    // the from-zero steps are.
+    const route = captureRoutes(baseConfig).get('/mobile-bridge')!
+    const call = exchange('127.0.0.1', 'GET')
+    await route(call.req, call.res)
+    const html = call.body()
+
+    expect(html).toContain('还不知道 ca.crt 该从哪来？')
+    expect(html).toContain('ca.key 留在管理机、绝不进服务器')
+    expect(html).toContain('docs/03-nats-self-host.md')
+    expect(html).toContain('href="https://github.com/EarhartZhao/dsh-mobile-plugin/blob/master/docs/03-nats-self-host.md"')
+    // The empty-field hint has to hand the reader over to that line.
+    expect(html).toContain('连 ca.crt 都还没有？看下面那一行')
+  })
+
   it('hands the certificate it fetched to the page, unmodified', async () => {
     const pem = '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n'
     const route = captureRoutes(baseConfig, undefined, {

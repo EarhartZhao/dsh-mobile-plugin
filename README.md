@@ -13,7 +13,7 @@
 
 ## 快速开始
 
-先备好三样东西：**能跑 `dsh web` 的这台电脑**、**Hub 地址 + C 端账号密码**（部署 NATS Hub 的人给）、**Hub 的 `ca.crt`**（Hub 用公共 CA 签发就跳过）。然后四步：
+先备好三样东西：**能跑 `dsh web` 的这台电脑**、**Hub 地址 + C 端账号密码**（部署 NATS Hub 的人给）、**Hub 的 `ca.crt`**（Hub 用公共 CA 签发就跳过；Hub 是你自己搭的，这份 ca.crt 就是你在服务器上生成的那张——见 [docs/03 §2.3 上 TLS：自签私有 CA](docs/03-nats-self-host.md)）。然后四步：
 
 1. **装。** 侧边栏 →「插件」，在安装框里填包名 `@dsh-earhartzhao/dsh-mobile-plugin`（也可以填 git 地址或本地路径，见[安装](#安装)），宿主先 inspect 再交给 pnpm 安装。
 2. **启用。** 装好后点「启用」——它把包名写进 profile 的 `dsh.profile.bundles`，bundle 自带的 `mobile-bridge` 那一行这才生效（没启用时 `/mobile-bridge` 直接 404）。
@@ -278,3 +278,5 @@ plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGat
 0.2.31 让控制台自己说出「该重启了」，移动端 wire 不变：升级插件在运行中的进程里**不可能自动生效**——宿主一直用启动时加载的那份 JavaScript，插件管理器对 profile 里已存在的包一律回 `restart-required`，HMR 又明确忽略 `node_modules`。于是升完包、功能没变、按钮没出现，而唯一的提示只有插件页那行小字（`pnpm add` 那条路一个字都不说）。现在控制台在每次轮询里比较**磁盘上装的版本**和**正在运行的版本**，不一致就在「插件版本」那行旁边用红字写明「磁盘上已装 X，当前运行的是 Y——重启 dsh 后新版本才生效」，并给出两种启动方式各自的重启动作。读不到清单（缺文件、安装写到一半、最近的那份 manifest 不是本包）时保持沉默，不误报。
 
 0.2.32 修掉 0.2.30 那条会毁证书的补链命令，移动端 wire 不变：0.2.30 把「从 Hub 获取 CA」在 Hub 只发叶子时给出的命令改成就地重写，方向是对的（新建文件是 root 属主，以 `nats` 用户运行的服务读不到），但写成了 `cat server.crt /root/dsh-mobile-setup/ca.crt > server.crt` ——**输出和输入是同一个文件**，shell 会在 `cat` 读到它之前先把它清空，跑完 `server.crt` 里只剩 CA、叶子没了，Hub 的 websocket 当场起不来。现在改成先 `cp -p server.crt server.leaf.crt` 再从那一份拼（与 [docs/03 §2.6](docs/03-nats-self-host.md) 完全一致），幂等、属主与权限不变，并在提示里点明「输出不能指向输入」。测试加了一条回归守卫：文案里任何 `cat … > x` 都不得把 `x` 同时当输入。
+
+0.2.33 补上「CA 从哪来」这一问，移动端 wire 不变：控制台原有的提示都默认 Hub 与 `ca.crt` 已经存在——CA 字段标签指向「从 Hub 获取 CA」，拼链命令默认你手里有那份 ca.crt，唯一提到自建流程的地方藏在「测试 Hub 账号」密码被拒的文案里，而页面本身一个链接都没有。于是站在零起点的人（Hub 还没搭，或搭了但没人给过 ca.crt）在界面上问不出答案。现在 CA 区下面常驻一行小字，把两种情况讲清楚：Hub 是别人搭的就向对方要（ca.crt 是公开材料，不含私钥）；Hub 是自己搭的就得先在服务器上生成自己的 CA，私钥 `ca.key` 留在管理机、绝不进服务器，只有 `ca.crt` 要填进这个字段——并给出 [docs/03](docs/03-nats-self-host.md) 的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」直达链接（GitHub 上的同一份文件）。
