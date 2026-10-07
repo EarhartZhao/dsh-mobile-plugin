@@ -120,6 +120,19 @@ const JOB_WATCH_LIMIT = 8
  */
 const SESSION_WATCH_LIMIT = 16
 
+/**
+ * Of those streams, how many may belong to Sessions the App only *listed*.
+ *
+ * `session.list` returns every Session on the machine, in activity order, and
+ * the App re-pulls it whenever its baseline goes stale — dozens of rows at a
+ * time. Treating those rows as equal interest to a Session the reader actually
+ * opened evicted that Session from the list on the very next refresh (it is row
+ * one, and the rows after it are always the oldest Sessions), which aborted the
+ * one live stream the phone was watching. List interest therefore stops at a
+ * fraction of the budget, and is what gets evicted first.
+ */
+const SESSION_LIST_WATCH_LIMIT = 8
+
 /** Ceiling for one stream's retry delay, so a wedged stream stays cheap. */
 const RETRY_DELAY_CAP_MS = 30_000
 
@@ -152,7 +165,15 @@ export class GatewayEventAdapter {
   private hostSink: ((frame: StreamFrame) => void) | undefined
   private muxLifetime: AbortSignal | undefined
   private hostLifetime: AbortSignal | undefined
-  private readonly wantedSessions = new Map<string, SessionAddress>()
+  /**
+   * Sessions the App opened, and Sessions its list merely mentioned.
+   *
+   * Both are followed, but only pinned interest survives a list refresh: the
+   * Session on screen is the one whose live stream the reader is watching, and
+   * it is always the first row of the next `session.list`.
+   */
+  private readonly pinnedSessions = new Map<string, SessionAddress>()
+  private readonly listedSessions = new Map<string, SessionAddress>()
   private readonly sessionWatchers = new Map<string, AbortController>()
   private readonly wantedFileWatches: { sessionId: string, path: string }[] = []
   private readonly fileWatchers = new Map<string, AbortController>()
@@ -174,26 +195,79 @@ export class GatewayEventAdapter {
     stream(request: { namespace: string, method: string, args: Record<string, unknown>, signal?: AbortSignal }): Promise<AsyncIterable<unknown>>
   }, private readonly carrier?: { fetch(request: Request): Promise<Response> }, private readonly onStreamError?: (name: GatewayStreamName, error: unknown) => void, private readonly onStreamRecovered?: (name: GatewayStreamName) => void, private readonly retryDelayMs = 1_000, private readonly toolViews?: { project: (sessionId: string, event: unknown) => unknown }) {}
 
-  /** Ensure live events for a Session continue after its history snapshot. */
+  /**
+   * Ensure live events for a Session continue after its history snapshot.
+   *
+   * Called for the Sessions the reader actually opens, so this is the interest
+   * that outranks whatever a list response mentions.
+   * @param address - the Session (or subagent conversation) just opened.
+   */
   watchSession(address: SessionAddress): void {
     const key = sessionAddressKey(address)
     const sessionId = sessionAddressId(address)
     if (sessionId.length === 0) return
     // Re-inserting moves the entry to the tail, so eviction follows attention:
     // the Session the App just opened survives, the least recently opened goes.
-    this.wantedSessions.delete(key)
-    this.wantedSessions.set(key, address)
-    while (this.wantedSessions.size > SESSION_WATCH_LIMIT) {
-      const oldest = this.wantedSessions.keys().next().value
-      if (oldest === undefined) break
-      this.wantedSessions.delete(oldest)
-      const controller = this.sessionWatchers.get(oldest)
-      if (controller !== undefined) {
-        this.sessionWatchers.delete(oldest)
-        controller.abort()
-      }
-    }
+    this.listedSessions.delete(key)
+    this.pinnedSessions.delete(key)
+    this.pinnedSessions.set(key, address)
+    this.pruneSessionWatchers()
     if (this.muxSink !== undefined && this.muxLifetime !== undefined) this.startSessionWatcher(address)
+  }
+
+  /**
+   * Register the top-level Sessions named by one `session.list` response.
+   *
+   * This is weak interest: the list is large, and it is re-pulled whenever the
+   * App's baseline goes stale, so it may only claim the budget's spare room and
+   * is the first thing evicted. Registering it instead of nothing keeps a
+   * Session that starts running on the desktop streaming to a phone that is
+   * still looking at the list.
+   * @param sessionIds - top-level Session ids, most recent first.
+   */
+  watchListed(sessionIds: readonly string[]): void {
+    this.listedSessions.clear()
+    for (const sessionId of sessionIds) {
+      if (sessionId.length === 0) continue
+      const key = sessionAddressKey({ kind: 'session', sessionId })
+      if (this.pinnedSessions.has(key) || this.listedSessions.has(key)) continue
+      this.listedSessions.set(key, { kind: 'session', sessionId })
+    }
+    this.pruneSessionWatchers()
+    if (this.muxSink === undefined || this.muxLifetime === undefined) return
+    for (const [key, address] of this.listedSessions) {
+      if (this.sessionWatchers.has(key)) continue
+      this.startSessionWatcher(address)
+    }
+  }
+
+  /** Drop followed Sessions until both budgets fit, list interest first. */
+  private pruneSessionWatchers(): void {
+    while (this.listedSessions.size > SESSION_LIST_WATCH_LIMIT) {
+      const oldest = this.listedSessions.keys().next().value
+      if (oldest === undefined) break
+      this.dropSessionWatcher(oldest, this.listedSessions)
+    }
+    while (this.pinnedSessions.size + this.listedSessions.size > SESSION_WATCH_LIMIT) {
+      const fromList = this.listedSessions.size > 0 ? this.listedSessions : this.pinnedSessions
+      const oldest = fromList.keys().next().value
+      if (oldest === undefined) break
+      this.dropSessionWatcher(oldest, fromList)
+    }
+  }
+
+  /** Release one followed Session's interest and abort its live stream. */
+  private dropSessionWatcher(key: string, from: Map<string, SessionAddress>): void {
+    from.delete(key)
+    const controller = this.sessionWatchers.get(key)
+    if (controller === undefined) return
+    this.sessionWatchers.delete(key)
+    controller.abort()
+  }
+
+  /** Every followed Session, strongest interest first. */
+  private followedSessions(): SessionAddress[] {
+    return [...this.pinnedSessions.values(), ...this.listedSessions.values()]
   }
 
   /**
@@ -405,7 +479,7 @@ export class GatewayEventAdapter {
     const combinedSignal = AbortSignal.any([signal, lifetime.signal])
     this.muxSink = frame => queue.push(frame)
     this.muxLifetime = combinedSignal
-    for (const address of this.wantedSessions.values()) this.startSessionWatcher(address)
+    for (const address of this.followedSessions()) this.startSessionWatcher(address)
     for (const sessionId of this.wantedJobSessions) this.startJobWatcher(sessionId)
     const pumps = Promise.allSettled([
       this.runPump('remote events', combinedSignal, lifetime, queue, () => this.pumpRemoteEvents(combinedSignal)),

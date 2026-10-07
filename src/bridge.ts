@@ -159,6 +159,13 @@ export interface BridgeOptions {
   /** Called when a Session address becomes relevant to the mobile client. */
   onSessionSeen?: (address: SessionAddress) => void
   /**
+   * Called with the top-level Sessions one `session.list` response named.
+   *
+   * Weaker than {@link onSessionSeen}: the list is long, it re-arrives whole,
+   * and it must never displace the Session the App is actually reading.
+   */
+  onSessionListed?: (sessionIds: readonly string[]) => void
+  /**
    * Projects one durable event into the `session/event` frame's `view` slot, so
    * the App renders a tool's declared card instead of raw text. Absent when the
    * host exposes no tool registry.
@@ -530,6 +537,21 @@ function addressKey(address: SessionAddress): string {
   return address.kind === 'session'
     ? `session:${String(address.sessionId ?? '')}`
     : `subagent:${String(address.parentSessionId ?? '')}:${String(address.childSessionId ?? '')}:${String(address.mode ?? '')}`
+}
+
+/**
+ * Whether one `session.list` row is a subagent conversation rather than a
+ * top-level Session.
+ *
+ * Both ride the same list, but a subagent is only addressable through its
+ * parent (`subagent.history`). Following one as `{ kind: 'session' }` is
+ * rejected by the Host — "subagent Sessions require their durable parent
+ * address" — so a list pass must not queue them as Session streams.
+ * @param row - one item of the list response.
+ * @returns whether the row names a subagent conversation.
+ */
+function isSubagentRow(row: Record<string, unknown>): boolean {
+  return row['origin'] === 'subagent' || typeof row['parentSessionId'] === 'string'
 }
 
 /** The Session a history read targets: the child for a subagent address. */
@@ -1075,11 +1097,10 @@ export class RpcBridge {
           if (call !== null) {
             const value = await this.invokeRemote(call, method, payload, id)
             if (method === 'session.list' && isRecord(value) && Array.isArray(value.items)) {
-              for (const item of value.items) {
-                if (isRecord(item) && typeof item.sessionId === 'string') {
-                  this.options.onSessionSeen?.({ kind: 'session', sessionId: item.sessionId })
-                }
-              }
+              this.options.onSessionListed?.(value.items.flatMap(item =>
+                isRecord(item) && typeof item.sessionId === 'string' && !isSubagentRow(item)
+                  ? [item.sessionId]
+                  : []))
             } else if (method === 'session.create' && isRecord(value) && typeof value.sessionId === 'string') {
               this.options.onSessionSeen?.({ kind: 'session', sessionId: value.sessionId })
             } else if (method === 'session.prompt' && isRecord(payload) && typeof payload.sessionId === 'string') {

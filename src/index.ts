@@ -1112,6 +1112,7 @@ export class MobileBridge extends Service {
       },
       onWorkspaceList: () => eventAdapter.workspaceSnapshot(),
       onSessionSeen: address => eventAdapter.watchSession(address),
+      onSessionListed: sessionIds => eventAdapter.watchListed(sessionIds),
       onFileWatch: (sessionId, path) => eventAdapter.watchFiles(sessionId, path),
       onFileUnwatch: (sessionId, path) => eventAdapter.unwatchFiles(sessionId, path),
       onSessionOpened: sessionId => eventAdapter.watchJobs(sessionId),

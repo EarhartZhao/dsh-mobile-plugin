@@ -258,6 +258,75 @@ describe('GatewayEventAdapter', () => {
     await primed.catch(() => undefined)
   })
 
+  it('keeps the Session the reader opened while its list keeps refreshing', async () => {
+    const controller = new AbortController()
+    const follows: { sessionId: string, signal: AbortSignal | undefined }[] = []
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async ({ namespace, method, args, signal }) => {
+        if (namespace === 'session' && method === 'follow') {
+          const request = args.request as { address?: { sessionId?: string } } | undefined
+          follows.push({ sessionId: String(request?.address?.sessionId ?? ''), signal })
+        }
+        return objectStream([], signal ?? controller.signal)
+      },
+    })
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const primed = iterator.next()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    adapter.watchSession({ kind: 'session', sessionId: 'opened' })
+    // Three list refreshes, each naming the opened Session first because it is
+    // the most recently active row — the shape that used to evict it.
+    for (let round = 0; round < 3; round += 1) {
+      adapter.watchListed([
+        'opened',
+        ...Array.from({ length: 30 }, (_, index) => `row-${String(round)}-${String(index)}`),
+      ])
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+
+    const opened = follows.filter(entry => entry.sessionId === 'opened')
+    expect(opened).toHaveLength(1)
+    expect(opened[0].signal?.aborted).toBe(false)
+
+    controller.abort()
+    await iterator.return?.(undefined)
+    await primed.catch(() => undefined)
+  })
+
+  it('spends only the spare budget on listed Sessions, newest rows first', async () => {
+    const controller = new AbortController()
+    const follows: { sessionId: string, signal: AbortSignal | undefined }[] = []
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async ({ namespace, method, args, signal }) => {
+        if (namespace === 'session' && method === 'follow') {
+          const request = args.request as { address?: { sessionId?: string } } | undefined
+          follows.push({ sessionId: String(request?.address?.sessionId ?? ''), signal })
+        }
+        return objectStream([], signal ?? controller.signal)
+      },
+    })
+
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const primed = iterator.next()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    adapter.watchListed(Array.from({ length: 30 }, (_, index) => `s${String(index).padStart(2, '0')}`))
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // The rows past the list budget are dropped before they ever open a stream,
+    // so one list response costs at most that many Host streams.
+    expect(follows.map(entry => entry.sessionId)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `s${String(index + 22).padStart(2, '0')}`),
+    )
+    expect(follows.every(entry => entry.signal?.aborted !== true)).toBe(true)
+
+    controller.abort()
+    await iterator.return?.(undefined)
+    await primed.catch(() => undefined)
+  })
+
   it('adapts answerable events and settles them through $events/result', async () => {
     const requests: Request[] = []
     const controller = new AbortController()
