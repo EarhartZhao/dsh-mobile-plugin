@@ -674,6 +674,50 @@ describe('GatewayEventAdapter', () => {
     await iterator.return?.()
   })
 
+  it('re-opens a Session live stream after the Host ends its follow', async () => {
+    const controller = new AbortController()
+    let follows = 0
+    const adapter = new GatewayEventAdapter({
+      wireStream: { open: async (_endpoint, _payload, signal) => objectStream([], signal) },
+      stream: async (request) => {
+        const signal = request.signal ?? controller.signal
+        if (request.namespace === 'session' && request.method === 'control') {
+          return (async function* (): AsyncIterable<unknown> {
+            await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+          })()
+        }
+        follows += 1
+        // The Host opens the follow, confirms it with a snapshot, and then drops
+        // the stream. The App cannot tell that outage from a turn still running:
+        // this Session's chunks, closing message and `turn/end` all ride this one
+        // stream, and nothing re-armed it before the next history read.
+        return follows === 1
+          ? (async function* (): AsyncIterable<unknown> { yield { type: 'snapshot', cursor: 4 } })()
+          : objectStream([
+              { type: 'snapshot', cursor: 9 },
+              { type: 'assistant-stream', frame: { type: 'start', attemptId: 'a1', turn: 1, step: 1 } },
+              {
+                type: 'assistant-stream',
+                frame: { type: 'chunk', attemptId: 'a1', index: 0, time: 5, chunk: { type: 'text-delta', index: 0, text: '收官' } },
+              },
+            ], signal)
+      },
+    }, undefined, undefined, undefined, 1)
+
+    adapter.watchSession({ kind: 'session', sessionId: 's-drop' })
+    const iterator = adapter.events.mux({ rpcId: 'mux' }, controller.signal)[Symbol.asyncIterator]()
+    const frames = await take(iterator, 3)
+
+    expect(frames[0]?.payload).toMatchObject({ type: 'session/subscribed', sessionId: 's-drop', lastSeq: 4 })
+    // The drop re-armed the follow on its own: the App is told again where the
+    // log stands, and the frames that follow carry the rest of the turn.
+    expect(frames[1]?.payload).toMatchObject({ type: 'session/subscribed', sessionId: 's-drop', lastSeq: 9 })
+    expect((frames[2]?.payload.event as Record<string, unknown>).type).toBe('assistant/chunk')
+    expect(follows).toBe(2)
+    controller.abort()
+    await iterator.return?.()
+  })
+
   it('replays compact assistant baseline and follows live assistant frames', async () => {
     const controller = new AbortController()
     const adapter = new GatewayEventAdapter({

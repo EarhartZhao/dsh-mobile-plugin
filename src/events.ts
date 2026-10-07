@@ -708,73 +708,108 @@ export class GatewayEventAdapter {
     this.sessionWatchers.set(key, controller)
     const signal = AbortSignal.any([this.muxLifetime, controller.signal])
     void (async () => {
+      // A Session's live stream is the only path for that Session's chunks, its
+      // closing message and its `turn/end`. A follow that ended — an error, a
+      // Host hiccup, a stream the Host itself retired — used to leave the App on
+      // a transcript that never learns how the turn ended until something
+      // re-opened the Session, so a finished turn kept reading as work in
+      // flight. Re-opening costs one snapshot, and the App dedupes the transient
+      // chunks that snapshot replays.
+      let streak = 0
       try {
-        const stream = await this.gateway.stream({
-          namespace: 'session', method: 'follow',
-          args: { request: { address, maxMessages: 1, assistantStream: true } },
-          signal,
-        })
-        const attempts = new Map<string, { turn: number; step: number }>()
-        for await (const item of stream) {
-          if (typeof item !== 'object' || item === null) continue
-          const record = item as Record<string, unknown>
-          if (record['type'] === 'snapshot') {
-            this.muxSink?.({
-              rpcId: randomUUID(),
-              payload: { type: 'session/subscribed', sessionId, lastSeq: Number(record['cursor'] ?? -1) },
-            })
-            const baseline = isRecord(record['assistantStream']) ? record['assistantStream'] : undefined
-            const active = baseline !== undefined && isRecord(baseline['activeAttempt'])
-              ? baseline['activeAttempt'] : undefined
-            if (active !== undefined) {
-              const attemptId = typeof active['attemptId'] === 'string' ? active['attemptId'] : ''
-              const turn = typeof active['turn'] === 'number' ? active['turn'] : -1
-              const step = typeof active['step'] === 'number' ? active['step'] : -1
-              if (attemptId !== '') {
-                attempts.set(attemptId, { turn, step })
-                const records = Array.isArray(active['stream']) ? active['stream'] : []
-                let streamIndex = 0
-                for (const record of records) {
-                  streamIndex = this.publishAssistantRecord(sessionId, attemptId, turn, step, record, streamIndex)
-                }
-              }
-            }
-          } else if (record['type'] === 'event' && typeof record['event'] === 'object' && record['event'] !== null) {
-            // The App's structured tool cards ride this slot; without it every
-            // card degrades to the raw result text.
-            const view = this.toolViews?.project(sessionId, record['event'])
-            this.muxSink?.({
-              rpcId: randomUUID(),
-              payload: {
-                type: 'session/event', sessionId, event: record['event'],
-                ...(view === undefined ? {} : { view }),
-              },
-            })
-          } else if (record['type'] === 'assistant-stream' && isRecord(record['frame'])) {
-            const frame = record['frame']
-            const attemptId = typeof frame['attemptId'] === 'string' ? frame['attemptId'] : ''
-            if (attemptId === '') continue
-            if (frame['type'] === 'start') {
-              const turn = typeof frame['turn'] === 'number' ? frame['turn'] : -1
-              const step = typeof frame['step'] === 'number' ? frame['step'] : -1
-              attempts.set(attemptId, { turn, step })
-            } else if (frame['type'] === 'chunk') {
-              const position = attempts.get(attemptId)
-              if (position !== undefined) this.publishAssistantChunk(sessionId, attemptId, Number(frame['index'] ?? 0), position.turn, position.step, frame['chunk'], frame['time'])
-            } else if (frame['type'] === 'end') {
-              const position = attempts.get(attemptId)
-              if (position !== undefined) this.publishAssistantEnd(sessionId, attemptId, Number(frame['index'] ?? 0), position.turn, position.step, frame['outcome'])
-              attempts.delete(attemptId)
-            }
+        while (!signal.aborted) {
+          try {
+            // Every attempt after a failure restarts from a snapshot, so the
+            // known attempts of the previous generation are gone with it.
+            const reached = await this.followSession(address, sessionId, signal)
+            if (signal.aborted) return
+            // A follow that ran and ended on its own still took the Session's
+            // live stream with it, so the backoff starts over from there.
+            if (reached) streak = 0
+          } catch {
+            if (signal.aborted) return
           }
+          streak += 1
+          await waitForRetry(signal, retryDelayFor(this.retryDelayMs, streak))
         }
-      } catch {
-        // A later history/list call can re-arm the watcher. The NATS bridge
-        // remains usable for bounded RPCs if one Session disappears.
       } finally {
         this.sessionWatchers.delete(key)
       }
     })()
+  }
+
+  /**
+   * One `session/follow` generation for one Session: republish its live frames
+   * until the Host's stream ends, for whatever reason.
+   * @param address - the Session (or subagent conversation) being followed.
+   * @param sessionId - its id, which every republished frame carries.
+   * @param signal - generation cancellation.
+   * @returns whether the Host confirmed the follow with a snapshot, which is
+   *   what tells a retry loop its attempt got through.
+   */
+  private async followSession(address: SessionAddress, sessionId: string, signal: AbortSignal): Promise<boolean> {
+    const stream = await this.gateway.stream({
+      namespace: 'session', method: 'follow',
+      args: { request: { address, maxMessages: 1, assistantStream: true } },
+      signal,
+    })
+    const attempts = new Map<string, { turn: number; step: number }>()
+    let reached = false
+    for await (const item of stream) {
+      if (typeof item !== 'object' || item === null) continue
+      const record = item as Record<string, unknown>
+      if (record['type'] === 'snapshot') {
+        reached = true
+        this.muxSink?.({
+          rpcId: randomUUID(),
+          payload: { type: 'session/subscribed', sessionId, lastSeq: Number(record['cursor'] ?? -1) },
+        })
+        const baseline = isRecord(record['assistantStream']) ? record['assistantStream'] : undefined
+        const active = baseline !== undefined && isRecord(baseline['activeAttempt'])
+          ? baseline['activeAttempt'] : undefined
+        if (active !== undefined) {
+          const attemptId = typeof active['attemptId'] === 'string' ? active['attemptId'] : ''
+          const turn = typeof active['turn'] === 'number' ? active['turn'] : -1
+          const step = typeof active['step'] === 'number' ? active['step'] : -1
+          if (attemptId !== '') {
+            attempts.set(attemptId, { turn, step })
+            const records = Array.isArray(active['stream']) ? active['stream'] : []
+            let streamIndex = 0
+            for (const record of records) {
+              streamIndex = this.publishAssistantRecord(sessionId, attemptId, turn, step, record, streamIndex)
+            }
+          }
+        }
+      } else if (record['type'] === 'event' && typeof record['event'] === 'object' && record['event'] !== null) {
+        // The App's structured tool cards ride this slot; without it every
+        // card degrades to the raw result text.
+        const view = this.toolViews?.project(sessionId, record['event'])
+        this.muxSink?.({
+          rpcId: randomUUID(),
+          payload: {
+            type: 'session/event', sessionId, event: record['event'],
+            ...(view === undefined ? {} : { view }),
+          },
+        })
+      } else if (record['type'] === 'assistant-stream' && isRecord(record['frame'])) {
+        const frame = record['frame']
+        const attemptId = typeof frame['attemptId'] === 'string' ? frame['attemptId'] : ''
+        if (attemptId === '') continue
+        if (frame['type'] === 'start') {
+          const turn = typeof frame['turn'] === 'number' ? frame['turn'] : -1
+          const step = typeof frame['step'] === 'number' ? frame['step'] : -1
+          attempts.set(attemptId, { turn, step })
+        } else if (frame['type'] === 'chunk') {
+          const position = attempts.get(attemptId)
+          if (position !== undefined) this.publishAssistantChunk(sessionId, attemptId, Number(frame['index'] ?? 0), position.turn, position.step, frame['chunk'], frame['time'])
+        } else if (frame['type'] === 'end') {
+          const position = attempts.get(attemptId)
+          if (position !== undefined) this.publishAssistantEnd(sessionId, attemptId, Number(frame['index'] ?? 0), position.turn, position.step, frame['outcome'])
+          attempts.delete(attemptId)
+        }
+      }
+    }
+    return reached
   }
 
   private startFileWatcher(sessionId: string, watchTarget: string): void {
