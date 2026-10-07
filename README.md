@@ -38,7 +38,7 @@
 ```bash
 pnpm add @dsh-earhartzhao/dsh-mobile-plugin
 # 或钉住某个版本：
-pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.36
+pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.37
 ```
 
 registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 重装（`registrySpec` / `updateSpec`）。
@@ -46,7 +46,7 @@ registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`p
 ### 方式 B：Release 预构建 tarball
 
 ```bash
-pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.36/dsh-mobile-plugin-0.2.36.tgz
+pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.37/dsh-mobile-plugin-0.2.37.tgz
 ```
 
 打 tag 时 CI（`.github/workflows/release.yml`）会 `pnpm pack` 出带 `lib/` 的包，把 `dsh-mobile-plugin-<version>.tgz` 与版本无关的 `dsh-mobile-plugin.tgz` 一起挂到该 tag 的 Release。装它不需要任何 `allowBuilds`，`…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 标成 pre-release，不会顶掉它）。控制台的「检查更新」认这种装法：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`src/update.ts` 的 `releaseAssetSpec`）——不换 URL 就换不掉 pnpm 的 integrity，会拿回旧字节。代价是那台机器得够得着 GitHub（源码 tarball 走 codeload、资产走 releases，两个域名）。
@@ -240,6 +240,8 @@ node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.w
 ## 移动端兼容与版本记录
 
 `mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
+
+0.2.37 修掉「手机上只显示一坨 zod 报错」这一类问题，移动端 wire 不变：宿主自己的失败码是带命名空间的（`session/agent-busy`、`gateway/lookup-not-found` …），App 解析失败用的是**冻结**的那套封闭联合（`agent-busy`、`internal` …）。只要有一个码不在那套里，整条响应就解析失败，App 拿到的是 zod 的问题清单，宿主那句真正的说明反而丢了——用户在子智能体会话里点开「命令」看到的就是这个。现在桥在转发前先把宿主的失败投影回冻结词汇：**有对应关系的保住身份与原文**（含 details 字段，缺字段就降级），没有对应关系的落到 `internal` 并把原码写在消息开头（例如 `workspace-file/not-found: no entry at "x"`），所以 App 一定解析得出来、也一定看得见原因。同一套词汇表加了守卫用例，typo 或漏改会在测试里挂掉。
 
 0.2.36 解决「内容多的会话在手机上打不开、也看不出在加载」：`instanceId` 留空时改为**为这次安装自动生成**一个 8 位 ID（4 位毫秒时间戳 + 4 位随机，`[0-9a-z]`），存在 `$DSH_HOME/mobile-bridge/instances.json` 里按 profile 分键，升级、重装、重启都不变；控制台与插件页只读展示它，本机名称照旧可改——0.2.34 及更早的默认值是字面量 `home`，等于让每台没改过这个字段的机器共用一套 subject，同一个 Hub 上会互相抢答、事件互相串（见[实例 ID 怎么来的](#实例-id-怎么来的)）。同一次发布也修掉长会话读不出来：`session.history` / `subagent.history` 的回包按连接的 `max_payload`（Hub 是 1 MiB）裁剪，超出时丢掉**最旧**的记录并把 `hasMore` 置为真，App 从收到的第一条继续往前翻（页落地后自己续拉，顶部有进度与「暂停」），而不是整条读失败；连单条记录都放不下时把这条的长字符串截短再发，只有连截短都超限才回 `mobile-history-too-large`，由 App 显示「加载失败 + 重试」，不再留一个看起来是空的会话。
 

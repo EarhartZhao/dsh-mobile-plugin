@@ -2,7 +2,14 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { RpcBridge, TOKEN_HEADER, type FetchCarrier, type GatewayCarrier } from '../src/bridge.js'
+import {
+  MOBILE_ERROR_CODES,
+  MOBILE_ERROR_FIELDS,
+  RpcBridge,
+  TOKEN_HEADER,
+  type FetchCarrier,
+  type GatewayCarrier,
+} from '../src/bridge.js'
 import { TokenStore } from '../src/tokens.js'
 
 interface FakeMsg {
@@ -542,7 +549,118 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.ok).toBe(false)
-    expect(reply.result.error.code).toBe('workspace-file/not-found')
+    // `workspace-file/not-found` has no frozen equivalent, so it collapses to
+    // the vocabulary's catch-all instead of failing the App's parse outright.
+    expect(reply.result.error).toEqual({
+      code: 'internal',
+      message: 'workspace-file/not-found: Error: no entry at "gone.png"',
+      details: {},
+    })
+  })
+
+  it('keeps a Host failure the frozen vocabulary names, details and all', async () => {
+    useGateway({
+      invoke: async () => {
+        throw Object.assign(new Error('session "child-1" is owned by subagent routing'), {
+          code: 'session/agent-busy',
+        })
+      },
+      failure: error => ({
+        code: (error as { code?: string }).code ?? 'gateway/internal',
+        message: (error as Error).message,
+        details: { reason: 'use subagent delivery for this child session' },
+      }),
+    })
+    const msg = makeMsg(`${PREFIX}command.list`, {
+      type: 'client-request', rpcId: 'cmds-child', method: 'command.list', payload: { sessionId: 'child-1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.error).toEqual({
+      code: 'agent-busy',
+      message: 'session "child-1" is owned by subagent routing',
+      details: { reason: 'use subagent delivery for this child session' },
+    })
+  })
+
+  it('collapses an unmapped Host failure and still names the original code', async () => {
+    useGateway({
+      invoke: async () => {
+        throw Object.assign(new Error('lookup provider "agent" did not resolve the requested identity'), {
+          code: 'gateway/lookup-not-found',
+        })
+      },
+      failure: error => ({
+        code: (error as { code?: string }).code ?? 'gateway/internal',
+        message: (error as Error).message,
+        details: { endpoint: 'commands/list', field: 'agentId' },
+      }),
+    })
+    const msg = makeMsg(`${PREFIX}command.list`, {
+      type: 'client-request', rpcId: 'cmds-unknown', method: 'command.list', payload: { sessionId: 's1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.error).toEqual({
+      code: 'internal',
+      message: 'gateway/lookup-not-found: lookup provider "agent" did not resolve the requested identity',
+      details: {},
+    })
+  })
+
+  it('falls back when a mapped code arrives without the details the App requires', async () => {
+    // `session/agent-busy` maps to `agent-busy`, whose frozen schema requires a
+    // string `reason`; a Host that omitted it must not produce a code the App
+    // then rejects as a whole.
+    useGateway({
+      invoke: async () => {
+        throw Object.assign(new Error('busy'), { code: 'session/agent-busy' })
+      },
+      failure: error => ({
+        code: (error as { code?: string }).code ?? 'gateway/internal',
+        message: (error as Error).message,
+        details: {},
+      }),
+    })
+    const msg = makeMsg(`${PREFIX}command.list`, {
+      type: 'client-request', rpcId: 'cmds-no-reason', method: 'command.list', payload: { sessionId: 's1' },
+    }, validToken)
+    await drive(msg)
+    expect(replyJson(msg).result.error).toEqual({
+      code: 'internal',
+      message: 'session/agent-busy: busy',
+      details: {},
+    })
+  })
+
+  /**
+   * The frozen vocabulary as the App's `rpcErrorSchema` declares it
+   * (`dsh-mobile/packages/protocol/src/vendor/api/rpc.schema.ts`). Copied, not
+   * imported: the App is a separate repository and the two ship
+   * independently — `dsh-mobile/scripts/verify-plugin-contract.mjs` is what
+   * checks this list against the real schema when both checkouts are present.
+   */
+  const FROZEN_MOBILE_CODES = [
+    'bad-request', 'cancelled', 'session-not-found', 'model-unavailable',
+    'session-conflict', 'invalid-time-zone', 'workspace-attach-failed',
+    'workspace-not-found', 'workspace-invalid-path', 'workspace-name-conflict',
+    'workspace-move-invalid', 'directory-unreadable', 'directory-exists',
+    'directory-create-failed', 'directory-picker-unavailable',
+    'agent-preset-read-only', 'agent-preset-locked', 'agent-preset-conflict',
+    'agent-preset-not-found', 'agent-preset-invalid', 'agent-busy',
+    'attachment-error', 'queue-item-not-found', 'steer-unavailable',
+    'command-error', 'unknown-command', 'settings-rejected', 'settings-conflict',
+    'credential-rejected', 'model-discovery-failed', 'title-invalid',
+    'fork-unavailable', 'subagent-parent-unavailable', 'subagent-not-found',
+    'subagent-catalog-diagnostic', 'subagent-not-resumable',
+    'subagent-unauthorized', 'subagent-delivery-unavailable', 'internal',
+  ]
+
+  it('maps every Host code it names onto a code the App can parse', () => {
+    const frozen = new Set(FROZEN_MOBILE_CODES)
+    expect(FROZEN_MOBILE_CODES).toHaveLength(39)
+    expect(Object.keys(MOBILE_ERROR_FIELDS).sort()).toEqual([...FROZEN_MOBILE_CODES].sort())
+    for (const [host, code] of Object.entries(MOBILE_ERROR_CODES)) {
+      expect(frozen.has(code), `${host} -> ${code}`).toBe(true)
+    }
   })
 
   it('arms the workspace file watch through the bridge hook', async () => {
@@ -818,7 +936,7 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.36',
+      pluginVersion: '0.2.37',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',

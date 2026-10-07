@@ -108,7 +108,7 @@ allowBuilds:
 不想让使用方加这条就换预构建产物。现在走的是 Release 资产：打 tag 时 `.github/workflows/release.yml` 先跑一遍验证（typecheck / test / build），再 `pnpm pack`——`prepare` 在这里跑，`lib/` 进包——把 `dsh-mobile-plugin-<version>.tgz` 与版本无关的 `dsh-mobile-plugin.tgz` 一起挂到该 tag 的 Release：
 
 ```bash
-pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.36/dsh-mobile-plugin-0.2.36.tgz
+pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.37/dsh-mobile-plugin-0.2.37.tgz
 ```
 
 Release 资产是个普通远端 tarball，不经 git 托管路径，`prepare` 不会被调用，`allowBuilds` 也不再需要——代价是安装源从源码树变成资产，且这台机器要能访问 GitHub Release（源码 tarball 走的是 codeload，两者域名不同）。控制台的更新按钮认这种 spec：`releaseAssetSpec` 把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`dsh-mobile-plugin-0.2.24.tgz` → `dsh-mobile-plugin-0.2.25.tgz`），换 URL 也就换掉了 pnpm 的 integrity，不会拿回旧字节。带 `-rc` 的 tag 发布时标成 pre-release，`releases/latest` 因此不会指向预发布版。

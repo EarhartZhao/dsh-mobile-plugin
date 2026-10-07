@@ -94,7 +94,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.36'
+export const PLUGIN_VERSION = '0.2.37'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -574,6 +574,146 @@ function serverFailure(
   error: { code: string, message: string, details: object },
 ): string {
   return JSON.stringify({ type: 'server-response', rpcId, result: { ok: false, error } })
+}
+
+/**
+ * Details fields the frozen mobile vocabulary requires, per code.
+ *
+ * The App parses a failure with a closed discriminated union, and the current
+ * Host speaks a namespaced vocabulary (`session/agent-busy`,
+ * `gateway/lookup-not-found`, ...) that union never contained. One unlisted
+ * code fails the whole parse, and the App then shows the zod issue dump
+ * instead of the Host's own message — the reader loses both the reason and any
+ * chance to act on it. So every Host failure this bridge forwards is projected
+ * onto the frozen vocabulary first.
+ */
+export const MOBILE_ERROR_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  'bad-request': ['issues'],
+  'cancelled': [],
+  'session-not-found': ['sessionId'],
+  'model-unavailable': ['provider', 'model'],
+  'session-conflict': ['sessionId', 'requestedCwd'],
+  'invalid-time-zone': ['value'],
+  'workspace-attach-failed': ['sessionId', 'workspaceId'],
+  'workspace-not-found': ['workspaceId'],
+  'workspace-invalid-path': ['path'],
+  'workspace-name-conflict': ['name'],
+  'workspace-move-invalid': ['workspaceId', 'sessionId'],
+  'directory-unreadable': ['path'],
+  'directory-exists': ['path'],
+  'directory-create-failed': ['path'],
+  'directory-picker-unavailable': ['capability'],
+  'agent-preset-read-only': ['agentPreset', 'reason'],
+  'agent-preset-locked': ['sessionId', 'agentPreset'],
+  'agent-preset-conflict': ['sessionId', 'requestedPreset'],
+  'agent-preset-not-found': ['agentPreset', 'available'],
+  'agent-preset-invalid': ['agentPreset', 'reason'],
+  'agent-busy': ['reason'],
+  'attachment-error': ['reason'],
+  'queue-item-not-found': ['itemId'],
+  'steer-unavailable': ['itemId'],
+  'command-error': [],
+  'unknown-command': [],
+  'settings-rejected': ['ns'],
+  'settings-conflict': ['ns', 'expected', 'actual'],
+  'credential-rejected': ['ref'],
+  'model-discovery-failed': ['settingsNs'],
+  'title-invalid': ['sessionId'],
+  'fork-unavailable': ['sessionId'],
+  'subagent-parent-unavailable': ['parentSessionId'],
+  'subagent-not-found': ['parentSessionId', 'childSessionId'],
+  'subagent-catalog-diagnostic': ['parentSessionId', 'childSessionId', 'reason'],
+  'subagent-not-resumable': ['childSessionId'],
+  'subagent-unauthorized': ['childSessionId'],
+  'subagent-delivery-unavailable': ['childSessionId'],
+  'internal': [],
+}
+
+/**
+ * Current Host failure codes the frozen vocabulary spells differently. A code
+ * absent from this table has no frozen equivalent and collapses to `internal`.
+ */
+export const MOBILE_ERROR_CODES: Readonly<Record<string, string>> = {
+  'gateway/bad-request': 'bad-request',
+  'gateway/cancelled': 'cancelled',
+  'gateway/internal': 'internal',
+  'session/not-found': 'session-not-found',
+  'session/model-unavailable': 'model-unavailable',
+  'session/conflict': 'session-conflict',
+  'session/invalid-time-zone': 'invalid-time-zone',
+  'session/workspace-attach-failed': 'workspace-attach-failed',
+  'session/agent-busy': 'agent-busy',
+  'session/attachment-invalid': 'attachment-error',
+  'session/queue-item-not-found': 'queue-item-not-found',
+  'session/steer-unavailable': 'steer-unavailable',
+  'session/title-invalid': 'title-invalid',
+  'session/fork-unavailable': 'fork-unavailable',
+  'subagent/invalid-time-zone': 'invalid-time-zone',
+  'subagent/parent-unavailable': 'subagent-parent-unavailable',
+  'subagent/not-found': 'subagent-not-found',
+  'subagent/catalog-diagnostic': 'subagent-catalog-diagnostic',
+  'subagent/not-resumable': 'subagent-not-resumable',
+  'subagent/unauthorized': 'subagent-unauthorized',
+  'subagent/attachment-invalid': 'attachment-error',
+  'subagent/delivery-unavailable': 'subagent-delivery-unavailable',
+  'agent-preset/read-only': 'agent-preset-read-only',
+  'agent-preset/locked': 'agent-preset-locked',
+  'agent-preset/conflict': 'agent-preset-conflict',
+  'agent-preset/not-found': 'agent-preset-not-found',
+  'agent-preset/invalid': 'agent-preset-invalid',
+  'workspace/not-found': 'workspace-not-found',
+  'workspace/invalid-path': 'workspace-invalid-path',
+  'workspace/name-conflict': 'workspace-name-conflict',
+  'workspace/move-invalid': 'workspace-move-invalid',
+  'directory-picker/unavailable': 'directory-picker-unavailable',
+  'directory-picker/unreadable': 'directory-unreadable',
+  'directory-picker/exists': 'directory-exists',
+  'directory-picker/create-failed': 'directory-create-failed',
+  'settings/rejected': 'settings-rejected',
+  'settings/conflict': 'settings-conflict',
+  'credential/rejected': 'credential-rejected',
+  'llm/model-discovery-rejected': 'model-discovery-failed',
+}
+
+/** Details fields the frozen schema types as an array, so a scalar never passes. */
+const MOBILE_ERROR_ARRAY_FIELDS = new Set(['issues', 'available'])
+
+/**
+ * The frozen vocabulary's catch-all, carrying the Host's own code so the
+ * message stays searchable — the App shows one string, and a collapsed code
+ * with no trace is a support ticket with nothing in it.
+ */
+function internalFailure(
+  code: string,
+  message: string,
+): { code: string, message: string, details: Record<string, unknown> } {
+  const detail = message.trim() === '' ? code : `${code}: ${message}`
+  return { code: 'internal', message: detail, details: {} }
+}
+
+/**
+ * One Host failure projected onto the frozen mobile vocabulary.
+ * @param failure - the Host's own `{ code, message, details }`.
+ * @returns a failure the App's closed union always accepts.
+ */
+export function mobileFailure(
+  failure: { code: string, message: string, details: object },
+): { code: string, message: string, details: Record<string, unknown> } {
+  const code = MOBILE_ERROR_CODES[failure.code]
+  if (code === undefined) return internalFailure(failure.code, failure.message)
+  const fields = MOBILE_ERROR_FIELDS[code]
+  if (fields === undefined) return internalFailure(failure.code, failure.message)
+  const source = isRecord(failure.details) ? failure.details : {}
+  const details: Record<string, unknown> = {}
+  for (const field of fields) {
+    const value = source[field]
+    if (value === undefined || value === null) return internalFailure(failure.code, failure.message)
+    if (MOBILE_ERROR_ARRAY_FIELDS.has(field) && !Array.isArray(value)) {
+      return internalFailure(failure.code, failure.message)
+    }
+    details[field] = value
+  }
+  return { code, message: failure.message, details }
 }
 
 function expandChunkEvent(event: Record<string, unknown>): Record<string, unknown>[] {
@@ -1125,7 +1265,9 @@ export class RpcBridge {
           }
         }
       } catch (error: unknown) {
-        msg.respond(new TextEncoder().encode(serverFailure(id, this.options.gateway.wireStream.failure(error))))
+        // The Host's namespaced failure vocabulary is not the App's frozen one:
+        // projecting it here is what keeps the reason readable on the phone.
+        msg.respond(new TextEncoder().encode(serverFailure(id, mobileFailure(this.options.gateway.wireStream.failure(error)))))
         return
       }
     }
