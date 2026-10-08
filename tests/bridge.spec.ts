@@ -936,13 +936,14 @@ describe('RpcBridge', () => {
     await drive(msg)
     const reply = replyJson(msg)
     expect(reply.result.value).toEqual({
-      pluginVersion: '0.2.37',
+      pluginVersion: '0.2.38',
       mobileApi: 2,
       features: [
         'plus-menu', 'command-directory', 'multi-image', 'durable-attachment-order',
         'plugin-inventory', 'health-check', 'typert-remote-v2', 'session-history-pages',
         'session-control', 'workspace-follow', 'remote-event-results', 'reference-candidates', 'file-uploads',
         'workspace-files', 'workspace-watch', 'workspace-stat', 'message-feedback', 'workspace-unarchive', 'goal-state', 'open-path',
+        'permission-presets',
       ],
       instanceName: 'test-mac',
       gatewayId: GATEWAY_ID,

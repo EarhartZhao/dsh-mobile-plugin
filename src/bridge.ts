@@ -83,6 +83,7 @@ const ALLOWED_METHODS = new Set([
   'agentPreset.list',
   'agentPreset.select',
   'agentPreset.read',
+  'permissionPreset.catalog',
   'respond',
 ])
 
@@ -94,7 +95,7 @@ export const MOBILE_HEALTH_METHOD = 'mobile.health'
 export const MOBILE_INVENTORY_METHOD = 'mobile.inventory'
 
 /** Compatibility manifest consumed by App 0.1.x. */
-export const PLUGIN_VERSION = '0.2.37'
+export const PLUGIN_VERSION = '0.2.38'
 export const PLUGIN_MOBILE_API = 2
 export const PLUGIN_FEATURES = [
   'plus-menu',
@@ -117,6 +118,7 @@ export const PLUGIN_FEATURES = [
   'workspace-unarchive',
   'goal-state',
   'open-path',
+  'permission-presets',
 ] as const
 
 export const TOKEN_HEADER = 'x-dsh-token'
@@ -225,6 +227,10 @@ export function remoteCall(method: string, payload: unknown, rpcId: string): Rem
   }
   if (method === 'session.models') return { namespace: 'session', method: 'modelCatalog', args: {} }
   if (method === 'agentPreset.list') return { namespace: 'agentPresets', method: 'list', args: {} }
+  // The `permissions` Session projection carries only the current value, so the
+  // popup's option names and descriptions come from this process catalog — the
+  // same split the Web client makes.
+  if (method === 'permissionPreset.catalog') return { namespace: 'permissionPresets', method: 'catalog', args: {} }
   if (method === 'agentPreset.read') return { namespace: 'agentPresets', method: 'read', args: request }
   if (method === 'agentPreset.select') {
     return {
