@@ -250,6 +250,8 @@ node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.w
 
 `mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
 
+0.2.42 把 0.2.41 的修复补到插件面板上，移动端 wire 不变：0.2.41 让「从 Hub 获取 CA」和「测试连接」把表单里**当前**的值一起发上来，但只改了独立控制台（`/mobile-bridge` 那一页），dsh 插件页里的那份面板仍在裸调这两个接口——于是新机器上最典型的一幕又出现了：地址明明填在框里，点「从 Hub 获取 CA」却回一句「「Hub 地址」还没有填」，而第一次保存又必须要这张证书。现在面板跟独立控制台发同一个形状的 `{ hubWssUrl, hubUser, hubPass }`（`src/client/index.tsx` 的 `hubFormValues`），两条路彻底一致。
+
 0.2.41 修掉新机器第一次配置时卡在「从 Hub 获取 CA」，移动端 wire 不变：这个按钮（和右上角「测试连接」）过去读的是**已保存**的配置，所以在一台还没保存过任何东西的机器上，地址只活在表单里，服务器读到空串，回一句「无法把「」当作 Hub 地址」；而这一步本身是个死循环——没有 CA，「保存并测试」必然报「证书不是公共 CA 签的」，取 CA 又要先保存过。现在两个只读按钮把表单里**当前**的值一起发上来，路由优先用它们，空字段仍回落到已存的值（没点「显示」的密码框发的就是空串，不能因此清掉已存的密码）；写入路径不变，保存写的仍是你点保存的那份。文案上把「一格没填」与「填了但解析不了」分开，前者不再把空字符串引成「」；[docs/03](docs/03-nats-self-host.md) 与 [docs/04](docs/04-ai-onboarding.md) 同步写明按钮拨的就是此刻填的地址、不必先保存，并修掉文档里写作「保存并连接」而控制台实际叫「保存并测试」的漂移。
 
 0.2.39 修掉「App 列表一直挂『待处理』、进去还得再选一次，dsh 端却正常」：宿主结掉一个审批/提问时，只把 `cancel` 发给**其他**投递目标——做答的那个客户端会先被移出投递集合，于是手机答完卡以后桥自己也收不到 `question/resolved`／`approval/resolved`。卡片在手机上被乐观地删掉，桥的重放集合却一直留着它，App 每次重连 `hello` 都会把这张已结的卡复活，列表的「待处理」于是永远清不掉。现在桥在自己拿到 `$events/result` 成功回包时补发那条 resolution，App 的 store 与桥的重放集合一起收敛；另外 `$events` 换代（宿主重连、桥重建）时整个重放集合作废——宿主会把仍然挂着的请求重新投递给新注册，所以有效卡片不会漏，只是不再复活已经结掉的。

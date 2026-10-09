@@ -654,11 +654,28 @@ function MobileBridgePanel(): ReactNode {
     return result
   }, [refreshStatus])
 
+  /**
+   * The Hub fields as this panel shows them, for the read-only buttons.
+   *
+   * They dial what the owner just typed rather than what the profile has
+   * stored: on a new install the address lives only in the form until the first
+   * save, and the first save needs the certificate the fetch brings back — so
+   * posting nothing dead-ends the first run with 「Hub 地址」还没有填 while the
+   * box on screen is full. Empty fields still fall back to the stored config in
+   * the route, which is what keeps an unrevealed password box from clearing a
+   * saved password. Same shape the standalone console posts (src/console.ts).
+   */
+  const hubFormValues = useCallback((): Record<string, unknown> => form === null ? {} : ({
+    hubWssUrl: form.hubWssUrl,
+    hubUser: form.hubUser,
+    hubPass: form.hubPass,
+  }), [form])
+
   const runHubCheck = useCallback(async () => {
     setCheckingHub(true)
     setConnectionNotice({ tone: 'idle', text: '正在检查本机 NATS、Hub 和当前实例…' })
     try {
-      const result = await api<HubCheckResult>('hub-check')
+      const result = await api<HubCheckResult>('hub-check', hubFormValues())
       setHubCheck(result)
       const certBroken = result.certificate !== undefined
         && !result.certificate.ok
@@ -673,7 +690,7 @@ function MobileBridgePanel(): ReactNode {
     } finally {
       setCheckingHub(false)
     }
-  }, [])
+  }, [hubFormValues])
 
   /**
    * The header's 刷新. Unlike the background poll it speaks: the button locks
@@ -1080,7 +1097,10 @@ function MobileBridgePanel(): ReactNode {
                         size="sm"
                         icon={<IconLinkOutlineRegular size={14} />}
                         onClick={() => {
-                          void api<{ ok?: boolean, ca?: { pem: string }, message?: string, error?: string }>('hub-ca/fetch')
+                          void api<{ ok?: boolean, ca?: { pem: string }, message?: string, error?: string }>(
+                            'hub-ca/fetch',
+                            hubFormValues(),
+                          )
                             .then((result) => {
                               if (result.ok && result.ca !== undefined) {
                                 setForm(current => current === null
