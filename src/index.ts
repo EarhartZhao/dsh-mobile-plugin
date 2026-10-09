@@ -1072,6 +1072,11 @@ export class MobileBridge extends Service {
       eventKeys: () => this.tokens.eventKeys(),
       legacyShared: () => this.tokens.hasLegacyActiveDevices(),
     })
+    // The Host re-delivers every still-pending request to a new `$events`
+    // generation, so the replay set must not outlive the generation that owns
+    // it: a card kept from a dead one is unanswerable and would be replayed to
+    // the App after every reconnect.
+    eventAdapter.onRemoteEventsReset = () => this.eventBridge?.resetPending()
     this.eventBridge.start()
 
     this.rpcBridge = new RpcBridge(nc, {

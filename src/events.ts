@@ -166,6 +166,16 @@ export class GatewayEventAdapter {
   private muxLifetime: AbortSignal | undefined
   private hostLifetime: AbortSignal | undefined
   /**
+   * Hook the bridge uses to drop its replay set when the `$events` generation
+   * is replaced.
+   *
+   * Every answerable request belongs to one Host client registration, and the
+   * Host re-delivers its still-pending ones to a fresh registration — so a
+   * replay entry from a dead generation would resurrect a card the Host no
+   * longer holds.
+   */
+  onRemoteEventsReset: (() => void) | undefined
+  /**
    * Sessions the App opened, and Sessions its list merely mentioned.
    *
    * Both are followed, but only pinned interest survives a list refresh: the
@@ -395,7 +405,15 @@ export class GatewayEventAdapter {
     }
   }
 
-  /** Settle one answerable Remote Event delivered by the current `$events` generation. */
+  /**
+   * Settle one answerable Remote Event delivered by the current `$events` generation.
+   *
+   * The Host notifies every *other* delivery target when a request is settled,
+   * but never the client whose answer did the settling — that client is dropped
+   * from the delivery set first. The bridge therefore publishes the resolution
+   * itself: without it the phone keeps a card whose live event is gone, and the
+   * replay on the next `hello` resurrects it after every App restart.
+   */
   async respond(eventId: string, result: unknown): Promise<boolean> {
     const pending = this.pendingEvents.get(eventId)
     const clientId = this.eventClientId
@@ -419,6 +437,7 @@ export class GatewayEventAdapter {
       const error = isRecord(message.result.error) ? message.result.error.message : undefined
       throw new Error(typeof error === 'string' ? error : 'remote event result was rejected')
     }
+    this.publishResolved(pending.event, pending.agentId, eventId, result)
     return true
   }
 
@@ -438,16 +457,36 @@ export class GatewayEventAdapter {
     const value = isRecord(result) && isRecord(result['value']) ? result['value'] : undefined
     const sessionId = typeof value?.['sessionId'] === 'string' ? value['sessionId'] : undefined
     if (sessionId === undefined) return
-    const approvalId = value?.['approvalId']
-    if (typeof approvalId === 'string') {
+    // An approval answer names its own id; a question answer and a cancellation
+    // carry only the request the App is answering.
+    const event = typeof value?.['approvalId'] === 'string' ? 'approval/request' : 'question/request'
+    this.publishResolved(event, sessionId, eventId, result)
+  }
+
+  /**
+   * Publish the resolution frame the App retires a card on.
+   *
+   * Both the stale answer above and an answer the Host accepted end here: the
+   * phone's store deletes by this frame, and the bridge's replay set prunes the
+   * same id while forwarding it, so one publication keeps both in step.
+   * @param event - the `$events` request kind the resolved id belongs to.
+   * @param sessionId - Session the card was shown for.
+   * @param eventId - the request identity the App answered.
+   * @param result - the App's client-response result, which carries the answer.
+   */
+  private publishResolved(event: string, sessionId: string, eventId: string, result: unknown): void {
+    const value = isRecord(result) && isRecord(result['value']) ? result['value'] : undefined
+    if (event === 'approval/request') {
       // Publish what the owner actually tapped when the App's vocabulary can
       // spell it: the App validates this frame, and 「cancelled」 for an answer
       // that said 「允许一次」 would mislabel the decision on any surface that
       // reads the outcome.
+      const named = value?.['approvalId']
       this.muxSink?.({
         rpcId: randomUUID(),
         payload: {
-          type: 'approval/resolved', sessionId, approvalId,
+          type: 'approval/resolved', sessionId,
+          approvalId: typeof named === 'string' ? named : eventId,
           outcome: approvalOutcome(value?.['outcome']),
         },
       })
@@ -577,6 +616,10 @@ export class GatewayEventAdapter {
     if (item.type === 'ready') {
       if (typeof item.clientId === 'string') this.eventClientId = item.clientId
       this.markStreamRecovered('remote events')
+      // The Host re-delivers every still-pending request to this fresh
+      // registration right after `ready`, so the replay set is rebuilt from the
+      // deliverable requests instead of outliving the generation that owned it.
+      this.onRemoteEventsReset?.()
       return
     }
     if (item.type === 'emit') {
@@ -1273,6 +1316,20 @@ export class EventBridge {
   /** Re-publish still-pending answerable frames (app reconnect hook). */
   replayPending(): void {
     for (const json of this.pending.values()) this.publish('mux', json)
+  }
+
+  /**
+   * Drop the replay set when its `$events` generation is replaced.
+   *
+   * A request lives in exactly one Host client registration, and that
+   * registration re-delivers its still-pending requests as soon as the next
+   * generation opens. Keeping entries across the boundary would replay cards
+   * the Host already settled — the phone would answer them, the Host would
+   * ignore the answer, and the card would come back on every reconnect.
+   */
+  resetPending(): void {
+    this.pending.clear()
+    this.approvalIds.clear()
   }
 
   private subject(stream: 'mux' | 'host', eventKey?: string): string {

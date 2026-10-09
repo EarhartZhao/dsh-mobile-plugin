@@ -41,6 +41,15 @@ async function* objectStream(values: unknown[], signal: AbortSignal): AsyncItera
   await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
 }
 
+/** A `$events` generation that ends the way a replaced Host registration does. */
+async function* failingStream(values: unknown[], signal: AbortSignal): AsyncIterable<unknown> {
+  for (const value of values) {
+    if (signal.aborted) return
+    yield value
+  }
+  throw new Error('remote events generation ended')
+}
+
 async function take(
   iterator: AsyncIterator<StreamFrame>,
   count: number,
@@ -158,6 +167,137 @@ describe('EventBridge', () => {
     bridge.replayPending()
     expect(nc.published).toHaveLength(0)
     await bridge.stop()
+  })
+
+  it('drops replay entries whose `$events` generation the Host replaced', async () => {
+    const controller = new AbortController()
+    let generation = 0
+    const adapter = new GatewayEventAdapter({
+      wireStream: {
+        open: async (_endpoint, _payload, signal) => {
+          generation += 1
+          return generation === 1
+            ? failingStream([
+              { type: 'ready', clientId: 'client-1', host: { home: '/home/test' } },
+              {
+                type: 'waterfall', event: 'approval/request', eventId: 'event-1', agentId: 'session-1',
+                request: { toolName: 'bash' },
+              },
+            ], signal)
+            // A registration only ever receives the requests still pending on
+            // the Host, so the settled `event-1` is not delivered again.
+            : objectStream([{ type: 'ready', clientId: 'client-2', host: { home: '/home/test' } }], signal)
+        },
+      },
+      stream: async ({ signal = controller.signal }) => objectStream([], signal),
+    }, undefined, undefined, undefined, 5)
+    const nc = fakeNc()
+    const bridge = new EventBridge(nc as never, adapter, { instanceId: 'test', coalesceMs: 0 })
+    adapter.onRemoteEventsReset = () => bridge.resetPending()
+    bridge.start()
+    await new Promise(r => setTimeout(r, 120))
+
+    nc.published.length = 0
+    bridge.replayPending()
+    expect(nc.published).toHaveLength(0)
+    await bridge.stop()
+    controller.abort()
+  })
+
+  it('settles an answered card for the App and stops replaying it', async () => {
+    const controller = new AbortController()
+    const settled: unknown[] = []
+    const adapter = new GatewayEventAdapter({
+      wireStream: {
+        open: async (_endpoint, _payload, signal) => objectStream([
+          { type: 'ready', clientId: 'client-1', host: { home: '/home/test' } },
+          {
+            type: 'waterfall', event: 'approval/request', eventId: 'event-8', agentId: 'session-1',
+            request: { toolName: 'bash' },
+          },
+          {
+            type: 'waterfall', event: 'user-questions/request', eventId: 'event-9', agentId: 'session-1',
+            request: { questions: [{ id: 'q1', question: '继续吗' }] },
+          },
+        ], signal),
+      },
+      stream: async ({ signal = controller.signal }) => objectStream([], signal),
+    }, {
+      fetch: async (request) => {
+        settled.push(await request.clone().json())
+        return new Response(JSON.stringify({
+          type: 'server-response', rpcId: 'r1', result: { ok: true, value: undefined },
+        }), { headers: { 'content-type': 'application/json' } })
+      },
+    })
+    const nc = fakeNc()
+    const bridge = new EventBridge(nc as never, adapter, { instanceId: 'test', coalesceMs: 0 })
+    adapter.onRemoteEventsReset = () => bridge.resetPending()
+    bridge.start()
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(nc.published.map(item => JSON.parse(item.body).method))
+      .toEqual(['approval/requested', 'question/requested'])
+
+    await expect(adapter.respond('event-8', {
+      ok: true, value: { sessionId: 'session-1', approvalId: 'event-8', outcome: 'allowed-once' },
+    })).resolves.toBe(true)
+    await expect(adapter.respond('event-9', {
+      ok: true, value: { sessionId: 'session-1', answer: { answers: [{ id: 'q1', selected: ['好'] }] } },
+    })).resolves.toBe(true)
+    expect(settled).toHaveLength(2)
+
+    // The Host never re-notifies the client whose answer settled the request,
+    // so the bridge publishes the resolution itself — and prunes the id with it.
+    expect(nc.published.map(item => JSON.parse(item.body).payload)).toContainEqual(
+      { type: 'approval/resolved', sessionId: 'session-1', approvalId: 'event-8', outcome: 'allowed-once' },
+    )
+    expect(nc.published.map(item => JSON.parse(item.body).payload)).toContainEqual(
+      { type: 'question/resolved', sessionId: 'session-1', questionRpcId: 'event-9', outcome: 'answered' },
+    )
+
+    nc.published.length = 0
+    bridge.replayPending()
+    expect(nc.published).toHaveLength(0)
+    await bridge.stop()
+    controller.abort()
+  })
+
+  it('keeps the requests a fresh `$events` generation re-delivers', async () => {
+    const controller = new AbortController()
+    let generation = 0
+    const redelivered = {
+      type: 'waterfall', event: 'approval/request', eventId: 'event-1', agentId: 'session-1',
+      request: { toolName: 'bash' },
+    }
+    const adapter = new GatewayEventAdapter({
+      wireStream: {
+        open: async (_endpoint, _payload, signal) => {
+          generation += 1
+          return generation === 1
+            ? failingStream([
+              { type: 'ready', clientId: 'client-1', host: { home: '/home/test' } },
+              redelivered,
+            ], signal)
+            : objectStream([
+              { type: 'ready', clientId: 'client-2', host: { home: '/home/test' } },
+              redelivered,
+            ], signal)
+        },
+      },
+      stream: async ({ signal = controller.signal }) => objectStream([], signal),
+    }, undefined, undefined, undefined, 5)
+    const nc = fakeNc()
+    const bridge = new EventBridge(nc as never, adapter, { instanceId: 'test', coalesceMs: 0 })
+    adapter.onRemoteEventsReset = () => bridge.resetPending()
+    bridge.start()
+    await new Promise(r => setTimeout(r, 120))
+
+    nc.published.length = 0
+    bridge.replayPending()
+    expect(nc.published.map(item => JSON.parse(item.body).rpcId)).toEqual(['event-1'])
+    await bridge.stop()
+    controller.abort()
   })
 
   it('coalesces projection frames to latest-per-key within the window', async () => {
