@@ -43,6 +43,15 @@ pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.41
 
 registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 重装（`registrySpec` / `updateSpec`）。
 
+pnpm 11 默认开着 `minimumReleaseAge`（24 小时）这道发布年龄门禁：**当天刚发的版本它不给你装**，裸包名 `pnpm add @dsh-earhartzhao/dsh-mobile-plugin` 会静默落到 24 小时窗口外的那个旧版本——「重装了一遍，版本号却没变」多半是撞在这里，不是装错了源。两个办法：把**整包名**加进 profile 的 `pnpm-workspace.yaml` 白名单，或者显式点名版本。白名单必须写包名，写成 `@包名@版本` 对裸包名与范围解析都不生效：
+
+```yaml
+minimumReleaseAgeExclude:
+  - '@dsh-earhartzhao/dsh-mobile-plugin'
+```
+
+已经装着旧版想升上来，光改白名单也不够：lockfile 里钉着的那条旧解析不会自己重算，得 `pnpm add @dsh-earhartzhao/dsh-mobile-plugin@latest`（或钉死版本号）逼它重新解析一次。
+
 ### 方式 B：Release 预构建 tarball
 
 ```bash

@@ -184,6 +184,7 @@ launchctl load -w ~/Library/LaunchAgents/com.dshmobile.nats-leaf.plist
 | 手机卡在 TLS 握手 / 报「无法连接公网 NATS」 | 二维码里的 CA | 重新点「从 Hub 获取 CA」或粘 `ca.crt`，保存后**重新发码**（旧二维码里的证书不会自动更新） |
 | 手机报 `Authorization Violation` | 手机 → Hub | 同上：二维码里的 C 端凭证与 Hub 不一致，改完要重发码 |
 | 升级插件后功能没变 | 换包没生效 | 重启 dsh；控制台「插件版本」旁边的红字会写明「磁盘上已装 X，当前运行的是 Y」 |
+| 重装插件后版本号还是旧的 | npm 装法撞上 pnpm 的发布年龄门禁 | pnpm 11 默认 `minimumReleaseAge`（24 小时）：当天新发的版本会被跳过，裸包名会落到窗口外的旧版本。把整包名 `'@dsh-earhartzhao/dsh-mobile-plugin'` 写进 profile 的 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude`，并用 `pnpm add <包名>@latest` 或钉死版本号重装；只改白名单不重算 lockfile 不会换版本。详见 [README](../README.md) 的「方式 A」 |
 
 ## 7. 给 AI 的硬约束
 
