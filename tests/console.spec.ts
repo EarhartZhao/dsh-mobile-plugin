@@ -1,7 +1,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import { describe, expect, it } from 'vitest'
-import { missingHubCredentials, registerConsoleRoutes, versionDrift, type ConsoleBackend, type WebRouter } from '../src/console.js'
+import {
+  missingHubCredentials,
+  registerConsoleRoutes,
+  storeNote,
+  versionDrift,
+  type ConsoleBackend,
+  type WebRouter,
+} from '../src/console.js'
 import type { Config } from '../src/config.js'
 
 const baseConfig: Config = {
@@ -165,6 +172,34 @@ describe('versionDrift', () => {
     expect(versionDrift('0.2.31', null)).toBeNull()
     expect(versionDrift('0.2.31', undefined)).toBeNull()
     expect(versionDrift('0.2.31', '   ')).toBeNull()
+  })
+})
+
+describe('storeNote', () => {
+  const base = { storeDir: '/Users/me/.dsh/mobile-bridge/installs/desktop-1a2b3c4d', storeOwnerFile: '/Users/me/.dsh/mobile-bridge/owner' }
+
+  it('is silent for the install that owns the machine files', () => {
+    expect(storeNote({ ...base, storeOwnership: 'mine', storeOwnerKey: 'home-mac' })).toBeNull()
+  })
+
+  it('names the other install and the directory this one uses instead', () => {
+    const line = storeNote({ ...base, storeOwnership: 'other', storeOwnerKey: 'home-mac' })!
+    expect(line).toContain('home-mac')
+    expect(line).toContain(base.storeDir)
+    // The consequence the owner actually hits: two scan codes, two device lists.
+    expect(line).toContain('互不相通')
+  })
+
+  it('says which file to delete when the marker cannot be read', () => {
+    const line = storeNote({ ...base, storeOwnership: 'invalid', storeOwnerKey: null })!
+    expect(line).toContain(base.storeOwnerFile)
+    expect(line).toContain(base.storeDir)
+  })
+
+  it('reports a claim that could not be written at all', () => {
+    const line = storeNote({ ...base, storeOwnership: 'unclaimed', storeOwnerKey: null })!
+    expect(line).toContain(base.storeOwnerFile)
+    expect(line).toContain(base.storeDir)
   })
 })
 

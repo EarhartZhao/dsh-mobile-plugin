@@ -295,6 +295,12 @@ leafnodes {
 
 安装形态（行由组合包提供、profile patch 只留按 id 的覆盖）与旧 `insert:` 写法的自动迁移，见 [README](../README.md) 的「安装」与 [00-plugin-plan](00-plugin-plan.md) 的「安装形态与自动迁移」。
 
+**设备数据（网关 ID 与已配对设备）按安装分开**：同一个 `$DSH_HOME` 下可能有多个 dsh（终端里的 `web` 与桌面客户端），
+而 `identity.json` / `tokens.json` 是机器级路径，0.2.40 之前两个安装会互相认对方的设备、对外报同一个 `gatewayId`。
+现在第一个启动的安装写 `mobile-bridge/owner` 接管这一对文件（网关 ID 与已配对设备原样保留，**手机不用重扫**），
+其余安装各用 `$DSH_HOME/mobile-bridge/installs/<实例 ID 或安装路径>/`，网关 ID、设备表、配对码互不相通，手机要分别扫码。
+控制台「运行信息 → 设备数据」显示当前用哪一份；`owner` 解析不了时不会被覆盖，而是退回独立目录并提示删除该文件后重启。
+
 控制台的「启动本地 NATS」按钮先按上面的 `natsUrl` 探测端口：已在监听就直接复用它（手工起的 Leaf、服务管理器起的、上一次 dsh 起的都算，这种情况不需要配置文件），
 否则解析出可执行文件与 Leaf 配置再启动 `nats-server -c <config>`。两条路径的优先级都是
 `NATS_CONFIG_PATH`/`NATS_SERVER_PATH` 环境变量 → 控制台对应字段 → 自动查找：

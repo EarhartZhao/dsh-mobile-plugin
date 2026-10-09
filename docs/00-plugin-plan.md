@@ -172,7 +172,9 @@ config:
 - NATS 连接（本机 Leaf）+ 自动重连 + 状态日志。
 - RPC 桥（token 门 + 白名单）+ 事件流桥。
 - 配对：PC 本机经 web UI 设置卡 / CLI 领配对码（二维码内容 `{ natsWss, instance, code }`），手机经 `svc.dsh.{instance}.pair` 核销换长期 token。
-- token 存储：`$DSH_HOME/mobile-bridge/tokens.json`（哈希存储，明文只在签发时出现一次）。
+- token 存储：`$DSH_HOME/mobile-bridge/tokens.json`（哈希存储，明文只在签发时出现一次）。0.2.40 起这份文件属于
+  **一个安装**（先启动的那个，见 `mobile-bridge/owner`），同机的其他安装各用 `mobile-bridge/installs/<key>/tokens.json`，
+  见 [README](../README.md) 的「同一台机器上跑两个 dsh」。
 
 ### v1.1
 

@@ -10,6 +10,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import QRCode from 'qrcode'
 import type { LocalNatsRuntimeStatus, MobileBridge, UpdateReport } from './index.js'
+import type { StoreOwnership } from './install-store.js'
 import type { Config } from './config.js'
 import {
   checkHubCertificate,
@@ -113,6 +114,43 @@ export function missingHubCredentials(config: Config): string | null {
   ].filter((name): name is string => name !== null)
   if (missing.length === 0) return null
   return `未配置 ${missing.join('、')}：二维码要带上 Hub 的账号凭证，手机没有它连不上 Hub。请先在上方填写并保存。`
+}
+
+/**
+ * What to say when this dsh is not the install holding the machine's original
+ * device files.
+ *
+ * Two dsh under one `$DSH_HOME` (the usual pair: a `web` profile and the
+ * desktop app) each keep their own gateway identity and their own device list,
+ * because the phone pairs with one install, not with the machine. Nothing is
+ * broken when that happens — but "this page shows no devices, and the code I
+ * just generated does not work" is otherwise a mystery, so name the split, the
+ * directory in use, and the one file that hands the old data over.
+ *
+ * The wording lives here rather than in the page so it can be tested without a
+ * browser, like {@link versionDrift}.
+ * @param status The bridge's own store fields, as `/api/status` reports them.
+ * @returns One sentence when a second install is involved, else null.
+ */
+export function storeNote(status: {
+  storeDir: string
+  storeOwnership: StoreOwnership
+  storeOwnerKey: string | null
+  storeOwnerFile: string
+}): string | null {
+  switch (status.storeOwnership) {
+    case 'mine':
+      return null
+    case 'other':
+      return `这台机器上另有一个 dsh 安装（${status.storeOwnerKey ?? '未知'}）持有原来的手机桥数据，本安装用独立目录 `
+        + `${status.storeDir}：两边的已配对设备、配对码与网关 ID 互不相通，手机要分别扫码。`
+    case 'unclaimed':
+      return `没能写下 ${status.storeOwnerFile}，本安装暂用独立目录 ${status.storeDir}；`
+        + '若这台机器本该有另一份手机桥数据，检查该目录的写入权限后重启。'
+    case 'invalid':
+      return `${status.storeOwnerFile} 无法解析，本安装用独立目录 ${status.storeDir}；`
+        + '要接管原来的身份与设备，删除该文件后重启 dsh。'
+  }
 }
 
 /**
@@ -244,6 +282,9 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
           // Derived here, not in the page: the wording is the whole feature, and
           // a server-side function is testable without a browser.
           versionDrift: versionDrift(status.pluginVersion, status.installedVersion),
+          // Same reason as the drift line: the sentence is the feature, and a
+          // function here is testable without a browser.
+          storeNote: storeNote(status),
           localNats: backend.localNats?.() ?? null,
           localNatsRuntime,
           config: {
@@ -1188,6 +1229,7 @@ const CONSOLE_HTML = `<!doctype html>
           <dt>实例 ID</dt><dd id="activeInstance">—</dd>
           <dt>本机名称</dt><dd id="activeInstanceName">—</dd>
           <dt>网关 ID</dt><dd id="gatewayId">—</dd>
+          <dt>设备数据</dt><dd id="storeDir">—</dd>
           <dt>实际加载路径</dt><dd id="loadedFrom">—</dd>
           <dt>桥启动时间</dt><dd id="startedAt">—</dd>
           <dt>最近连接</dt><dd id="lastConnectedAt">—</dd>
@@ -1195,6 +1237,7 @@ const CONSOLE_HTML = `<!doctype html>
           <dt>功能</dt><dd id="features">—</dd>
           <dt>最近错误</dt><dd id="lastError">无</dd>
         </dl>
+        <p id="storeNote" class="message"></p>
       </section>
     </div>
   </details>
@@ -1316,6 +1359,8 @@ async function refreshStatus() {
       + (s.instanceIdSource === 'auto' ? '（本次安装自动生成）' : '')
     $('activeInstanceName').textContent = s.instanceName || s.instanceId || '—'
     $('gatewayId').textContent = s.gatewayId || '—'
+    $('storeDir').textContent = s.storeDir || '—'
+    $('storeNote').textContent = s.storeNote || ''
     $('loadedFrom').textContent = s.loadedFrom || '—'
     $('startedAt').textContent = formatTime(s.startedAt)
     $('lastConnectedAt').textContent = formatTime(s.lastConnectedAt)

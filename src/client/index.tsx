@@ -22,6 +22,7 @@ import {
 import {
   Button,
   IconCheckOutlineRegular,
+  IconInfoOutlineRegular,
   IconLinkOutlineRegular,
   IconPlusOutlineRegular,
   IconRefreshOutlineRegular,
@@ -95,6 +96,10 @@ interface BridgeStatus {
   instanceIdSource: 'configured' | 'auto' | null
   instanceName: string
   gatewayId: string | null
+  /** Directory holding this install's gateway identity and paired devices. */
+  storeDir: string
+  /** Wording for a second install on this machine, derived server-side. */
+  storeNote: string | null
   startedAt: string | null
   uptimeMs: number
   lastConnectedAt: string | null
@@ -1393,6 +1398,8 @@ function MobileBridgePanel(): ReactNode {
                     </dd>
                     <dt>网关 ID</dt>
                     <dd>{status?.gatewayId ?? '—'}</dd>
+                    <dt>设备数据</dt>
+                    <dd>{status?.storeDir ?? '—'}</dd>
                     <dt>最近连接</dt>
                     <dd>{formatTime(status?.lastConnectedAt)}</dd>
                     <dt>最近重连</dt>
@@ -1404,6 +1411,14 @@ function MobileBridgePanel(): ReactNode {
                     <dt>最近错误</dt>
                     <dd>{status?.lastError ?? '无'}</dd>
                   </dl>
+                  {status?.storeNote === null || status?.storeNote === undefined
+                    ? null
+                    : (
+                      <div className="dsh-mobile-callout" data-tone="info">
+                        <IconInfoOutlineRegular size={15} />
+                        <p className="dsh-mobile-notice">{status.storeNote}</p>
+                      </div>
+                    )}
                   <a className="dsh-mobile-link" href="/mobile-bridge" target="_blank" rel="noreferrer">
                     打开独立控制台
                   </a>
