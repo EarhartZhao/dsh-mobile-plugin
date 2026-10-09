@@ -38,7 +38,7 @@
 ```bash
 pnpm add @dsh-earhartzhao/dsh-mobile-plugin
 # 或钉住某个版本：
-pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.37
+pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.41
 ```
 
 registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 重装（`registrySpec` / `updateSpec`）。
@@ -46,7 +46,7 @@ registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`p
 ### 方式 B：Release 预构建 tarball
 
 ```bash
-pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.37/dsh-mobile-plugin-0.2.37.tgz
+pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.41/dsh-mobile-plugin-0.2.41.tgz
 ```
 
 打 tag 时 CI（`.github/workflows/release.yml`）会 `pnpm pack` 出带 `lib/` 的包，把 `dsh-mobile-plugin-<version>.tgz` 与版本无关的 `dsh-mobile-plugin.tgz` 一起挂到该 tag 的 Release。装它不需要任何 `allowBuilds`，`…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 标成 pre-release，不会顶掉它）。控制台的「检查更新」认这种装法：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`src/update.ts` 的 `releaseAssetSpec`）——不换 URL 就换不掉 pnpm 的 integrity，会拿回旧字节。代价是那台机器得够得着 GitHub（源码 tarball 走 codeload、资产走 releases，两个域名）。

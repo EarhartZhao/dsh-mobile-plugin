@@ -5,7 +5,7 @@
 # and pnpm >= 10 refuses dependency build scripts until the profile's
 # `pnpm-workspace.yaml` lists the exact commit under `allowBuilds`. The tarball
 # built here already contains `lib/`, so installing it needs no approval at all:
-#   pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.34/dsh-mobile-plugin-0.2.34.tgz
+#   pnpm add https://github.com/<owner>/<repo>/releases/download/v0.2.41/dsh-mobile-plugin-0.2.41.tgz
 #
 # Both names are attached — `dsh-mobile-plugin-<version>.tgz` and the
 # version-free `dsh-mobile-plugin.tgz` — because the plugin's update button
