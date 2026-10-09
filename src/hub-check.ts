@@ -204,12 +204,21 @@ function withHubPort(url: string): string {
 }
 
 /**
- * One wording for every unparseable address. It names the value that failed,
- * shows a form that works, and says the bare-address shorthand is allowed —
- * the old text only said the host name could not be parsed, which sent an
- * owner with a perfectly good Hub looking for a DNS problem that was not there.
+ * One wording for every address that cannot be dialled. It names the value that
+ * failed, shows a form that works, and says the bare-address shorthand is
+ * allowed — the old text only said the host name could not be parsed, which
+ * sent an owner with a perfectly good Hub looking for a DNS problem that was
+ * not there.
+ *
+ * An empty field is the same complaint with nothing to quote: 「」 reads like a
+ * parsing failure, and it is what a brand-new install answered with before the
+ * address had been typed in.
  */
 function unparseableHubAddress(hubWssUrl: string): string {
+  if (hubWssUrl.trim() === '') {
+    return '「Hub 地址」还没有填：要写成 wss://主机:8443（例如 wss://203.0.113.10:8443），'
+      + '只填主机或 IP 也可以（缺端口按 8443 补）。'
+  }
   return `无法把「${hubWssUrl}」当作 Hub 地址：要写成 wss://主机:8443（例如 wss://203.0.113.10:8443），`
     + '只填主机或 IP 也可以（缺端口按 8443 补）。'
 }

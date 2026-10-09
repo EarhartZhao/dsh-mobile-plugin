@@ -153,6 +153,23 @@ describe('fetchHubCertificate', () => {
     expect(result.message).toContain('Hub 地址')
   })
 
+  it('names the empty field as empty instead of quoting nothing', async () => {
+    // The state a brand-new install is in when the button is pressed before the
+    // address is typed. 「」 quoted the field back at the owner and read like a
+    // parsing failure, so the wording has to say which field and what to put in
+    // it.
+    const result = await fetchHubCertificate({ ...config, hubWssUrl: '   ' }, {
+      tlsConnectImpl: tlsStub({ chain: null }),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('bad-address')
+    expect(result.ca).toBeNull()
+    expect(result.message).toContain('Hub 地址')
+    expect(result.message).toContain('wss://')
+    expect(result.message).not.toContain('「」')
+  })
+
   it('keeps a blocked port a report, not an exception', async () => {
     const result = await fetchHubCertificate(config, {
       tlsConnectImpl: tlsStub({

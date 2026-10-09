@@ -18,6 +18,7 @@ import {
   normalizeHubWssUrl,
   type HubCaFetchResult,
   type HubCheckResult,
+  type HubCertificateResult,
 } from './hub-check.js'
 import { readHubCa } from './hub-ca.js'
 import type { LocalNatsResolution } from './nats-launch.js'
@@ -56,6 +57,8 @@ export interface ConsoleBackend {
   repairProfile: () => Promise<ProfileRepairReport>
   /** Overridable so route tests stay off the network. */
   checkHub?: (config: Config) => Promise<HubCheckResult>
+  /** The certificate step of that check; overridable for the same reason. */
+  checkHubCertificate?: (config: Config) => Promise<HubCertificateResult>
   /**
    * Namespace in effect. An empty `instanceId` means "auto", and the generated
    * value lives in the plugin's own store, so the page cannot derive it: every
@@ -201,6 +204,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
     localConnected: backend.bridge().status().connection === 'connected',
   }))
   const fetchHubCa = backend.fetchHubCa ?? ((config: Config) => fetchHubCertificate(config))
+  const checkCertificate = backend.checkHubCertificate ?? ((config: Config) => checkHubCertificate(config))
 
   /**
    * Config as the wire sees it. The saved `instanceId` may be empty — that is
@@ -210,6 +214,34 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
   const effective = (config: Config): Config => {
     const resolved = backend.instanceId?.() ?? ''
     return resolved === '' || resolved === config.instanceId ? config : { ...config, instanceId: resolved }
+  }
+
+  /**
+   * Config for a read-only check: what the page shows, not only what it saved.
+   *
+   * The two read-only buttons are the steps that come before the first save.
+   * On a new machine nothing is stored yet, and the address is the one value
+   * that has to be typed before anything else can work: 保存并测试 cannot pass
+   * without the certificate 「从 Hub 获取 CA」 brings back, so a fetch that
+   * dialled the stored address left a fresh install reading
+   * 「无法把「」当作 Hub 地址」with no way forward. Posted values win; an empty
+   * field keeps the stored one, which is also what an unrevealed password
+   * field posts. Nothing is written here — the fields the owner saves stay the
+   * fields the owner saves.
+   */
+  const checkedConfig = async (req: IncomingMessage): Promise<Config> => {
+    const saved = effective(backend.currentConfig())
+    let body: Record<string, unknown>
+    try {
+      body = await readJson(req)
+    } catch {
+      return saved
+    }
+    const patch: Partial<Config> = {}
+    if (typeof body.hubWssUrl === 'string' && body.hubWssUrl.trim() !== '') patch.hubWssUrl = normalizeHubWssUrl(body.hubWssUrl)
+    if (typeof body.hubUser === 'string' && body.hubUser.trim() !== '') patch.hubUser = body.hubUser.trim()
+    if (typeof body.hubPass === 'string' && body.hubPass !== '') patch.hubPass = body.hubPass
+    return { ...saved, ...patch }
   }
   const disposers = [
     webServer.register({
@@ -437,12 +469,12 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
       handler: async (req, res) => {
         const rejected = consoleRequestRejection(req, { mutating: false })
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
-        const config = effective(backend.currentConfig())
+        const config = await checkedConfig(req)
         const result = await checkHub(config)
         // The certificate is the one link the phone cannot report on: a wrong
         // one is an opaque handshake failure there, so it rides along here as
         // a step the owner can read.
-        const certificate = await checkHubCertificate(config)
+        const certificate = await checkCertificate(config)
         json(res, 200, {
           ...result,
           certificate,
@@ -460,7 +492,7 @@ export function registerConsoleRoutes(webServer: WebRouter, backend: ConsoleBack
         const rejected = consoleRequestRejection(req, { mutating: false })
         if (rejected !== null) return json(res, rejected.status, { error: rejected.error })
         try {
-          json(res, 200, await fetchHubCa(backend.currentConfig()))
+          json(res, 200, await fetchHubCa(await checkedConfig(req)))
         } catch (error) {
           json(res, 400, { error: String(error) })
         }
@@ -1628,9 +1660,22 @@ $('saveBtn').onclick = async () => {
   else { $('saveMsg').className = 'message error'; $('saveMsg').textContent = r.error || '保存失败' }
 }
 
+/**
+ * The Hub fields as the page shows them.
+ *
+ * The read-only checks dial what the owner just typed rather than what the
+ * profile has stored: on a new machine the address lives only in the form
+ * until the first save, and the first save needs the certificate the fetch
+ * brings back. An unrevealed password field posts an empty string, which the
+ * route reads as "keep the stored one".
+ */
+function hubFormValues() {
+  return { hubWssUrl: $('hubWssUrl').value, hubUser: $('hubUser').value, hubPass: $('hubPass').value }
+}
+
 async function checkHub() {
   $('hubCheckMsg').className = 'message checkResult'; $('hubCheckMsg').textContent = '正在校验整条链路…'
-  const r = await api('hub-check', {})
+  const r = await api('hub-check', hubFormValues())
   const ok = r.reason === 'ok'
   const mark = (step) => (step.ok ? '✓ ' : '✗ ')
   const lines = (r.steps || []).map(step => mark(step) + step.message)
@@ -1663,7 +1708,7 @@ $('fetchCaBtn').onclick = async () => {
   $('fetchCaMsg').className = 'message'; $('fetchCaMsg').textContent = '正在从 Hub 取证书…'
   $('fetchCaBtn').disabled = true
   try {
-    const r = await api('hub-ca/fetch', {})
+    const r = await api('hub-ca/fetch', hubFormValues())
     if (r.ok && r.ca) {
       $('hubCaCert').value = r.ca.pem
       editedFields.add('hubCaCert')

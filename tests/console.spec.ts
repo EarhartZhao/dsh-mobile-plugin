@@ -514,7 +514,10 @@ describe('console page', () => {
     const html = call.body()
 
     expect(html).toContain('id="fetchCaBtn"')
-    expect(html).toContain("api('hub-ca/fetch', {})")
+    // The fetch posts the field the owner is looking at: on a new machine the
+    // address exists only in the form until the first save, and the first save
+    // needs the certificate this brings back.
+    expect(html).toContain("api('hub-ca/fetch', hubFormValues())")
     // Pasting ca.crt on every machine is the step this exists to remove, so
     // the empty-field hint has to point at the button rather than only at the
     // file an owner may not have on that machine.
@@ -674,6 +677,64 @@ describe('console page', () => {
 
     expect(call.status()).toBe(200)
     expect(call.json()).toMatchObject({ ok: true, ca: { pem, fingerprint: 'AB:CD' } })
+  })
+
+  it('fetches the CA from the address the page shows, not only the saved one', async () => {
+    // A brand-new install has nothing stored: the stored address is empty and
+    // the only one that exists is the one in the form. Reading the saved config
+    // alone answered 「无法把「」当作 Hub 地址」to an owner looking at a filled
+    // field, with 保存并测试 unable to pass until the certificate arrived.
+    const seen: string[] = []
+    const route = captureRoutes({ ...baseConfig, hubWssUrl: '' }, undefined, {
+      fetchHubCa: (config: Config) => {
+        seen.push(config.hubWssUrl)
+        return Promise.resolve({ ok: false, reason: 'unreachable' as const, ca: null, message: 'stub' })
+      },
+    }).get('/mobile-bridge/api/hub-ca/fetch')!
+    const call = exchange('127.0.0.1', 'POST', undefined, JSON.stringify({ hubWssUrl: '203.0.113.10' }))
+    await route(call.req, call.res)
+
+    // Bare host or IP is what people paste, so the route normalizes it the way
+    // saving does.
+    expect(seen).toEqual(['wss://203.0.113.10:8443'])
+  })
+
+  it('keeps the stored address when the field is left blank', async () => {
+    const seen: string[] = []
+    const route = captureRoutes(baseConfig, undefined, {
+      fetchHubCa: (config: Config) => {
+        seen.push(config.hubWssUrl)
+        return Promise.resolve({ ok: false, reason: 'unreachable' as const, ca: null, message: 'stub' })
+      },
+    }).get('/mobile-bridge/api/hub-ca/fetch')!
+    const call = exchange('127.0.0.1', 'POST', undefined, JSON.stringify({ hubWssUrl: '  ' }))
+    await route(call.req, call.res)
+
+    expect(seen).toEqual([baseConfig.hubWssUrl])
+  })
+
+  it('checks the connection against the fields the page shows', async () => {
+    const seen: Config[] = []
+    const route = captureRoutes(
+      { ...baseConfig, hubWssUrl: '', hubUser: '' },
+      (config: Config) => {
+        seen.push(config)
+        return Promise.resolve({ ok: true, reason: 'ok', message: 'stubbed', steps: [] })
+      },
+      { checkHubCertificate: () => Promise.resolve({ ok: true, reason: 'ok' as const, fingerprint: null, message: 'stubbed' }) },
+    ).get('/mobile-bridge/api/hub-check')!
+    // The password field posts empty until the owner reveals it, which must not
+    // erase the stored one.
+    const call = exchange('127.0.0.1', 'POST', undefined, JSON.stringify({
+      hubWssUrl: 'hub-typed.test',
+      hubUser: 'c-end-typed',
+      hubPass: '',
+    }))
+    await route(call.req, call.res)
+
+    expect(seen[0]!.hubWssUrl).toBe('wss://hub-typed.test:8443')
+    expect(seen[0]!.hubUser).toBe('c-end-typed')
+    expect(seen[0]!.hubPass).toBe(baseConfig.hubPass)
   })
 })
 
