@@ -190,25 +190,6 @@ AI，让它照着做完」写的，控制台第 2 步那一区和开箱清单的
 
 改了实例 ID 会让**已配对的手机需要重新扫码**（二维码里的 `instance` 变了，手机还在打旧命名空间）。
 
-### 同一台机器上跑两个 dsh（客户端 + web）
-
-一台电脑上跑两个 dsh 是常规用法——终端里的 `dsh web` 一份、桌面客户端一份——它们**共享 `$DSH_HOME`**，
-profile 目录各自独立（`profiles/web`、`profiles/desktop`）。共用的只有配置之外的东西：会话、凭据、附件、日志，
-以及手机桥的**设备数据**。设备数据按安装分开，因为手机是跟**一个安装**配对，不是跟这台机器配对：
-
-- **先到者接管旧数据**：0.2.40 之前只有一份 `$DSH_HOME/mobile-bridge/identity.json` 和 `tokens.json`。
-  升级后第一个启动的安装写一个 `mobile-bridge/owner` 标记，继续用这两个文件；它的网关 ID、
-  已配对设备、配对码全都原样保留，**手机上不用重扫**。
-- **其余安装各自独立**：第二个安装看到 `owner` 里是别人的键，就改用
-  `$DSH_HOME/mobile-bridge/installs/<实例 ID 或安装路径>/`，自己生成一个网关 ID、设备表从空开始。
-  两个安装的已配对设备、配对码、网关 ID 互不相通，**手机要分别扫码**；控制台「运行信息」里的
-  「设备数据」显示当前用的是哪一份，并在这种情况下给出说明。
-- **换谁服务手机**：删掉 `$DSH_HOME/mobile-bridge/owner` 再重启，那个安装就读回原来的 `identity.json` / `tokens.json`
-  （另一份安装下次启动会自动退到自己的独立目录）。同一时刻只让一个安装启动，避免两边都以为自己是接管者。
-
-键取自 `instanceId`（写死的命名空间，也就是手机拨的那个名字），留空时才用安装路径；所以**改实例 ID 或换安装形态**
-会让这个安装换用另一份设备数据，和「手机要重新扫码」是同一件事。
-
 ### 插件自述与诊断（App 侧）
 
 plugin 0.2 起提供可选的 `mobile.inventory`（需要设备 token），桥接宿主 `pluginInventory.list()`；App 在 `features` 含 `plugin-inventory` 时会在设置页显示只读插件清单。宿主未挂载清单服务时，设置页显示“当前桥未提供插件清单”，不影响连接和其它功能。
@@ -259,15 +240,6 @@ node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.w
 ## 移动端兼容与版本记录
 
 `mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
-
-0.2.40 把手机桥的设备数据按安装分开：两个 dsh 在同一台机器上共享 `$DSH_HOME`（终端里的 `web` 一份 + 桌面客户端一份），
-而 `identity.json` 与 `tokens.json` 一直是机器级的，于是**在一个安装上配好手机，另一个安装也认这台设备**，
-两者还对外报同一个网关 ID。现在第一个启动的安装写 `mobile-bridge/owner` 接管原有那一对文件（网关 ID 与已配对设备
-原样保留，**手机不用重扫**），其余安装用自己的
-`mobile-bridge/installs/<实例 ID 或安装路径>/{identity.json,tokens.json}`：网关 ID、设备表、配对码各自独立，
-要连哪个安装就扫哪个安装的码。控制台的「运行信息」新增「设备数据」一行显示当前用哪份，并在被别的安装占着时说明；
-`owner` 无法解析时不会被覆盖，而是退回独立目录并提示删掉该文件后重启。见
-[同一台机器上跑两个 dsh](#同一台机器上跑两个-dsh客户端--web)。
 
 0.2.39 修掉「App 列表一直挂『待处理』、进去还得再选一次，dsh 端却正常」：宿主结掉一个审批/提问时，只把 `cancel` 发给**其他**投递目标——做答的那个客户端会先被移出投递集合，于是手机答完卡以后桥自己也收不到 `question/resolved`／`approval/resolved`。卡片在手机上被乐观地删掉，桥的重放集合却一直留着它，App 每次重连 `hello` 都会把这张已结的卡复活，列表的「待处理」于是永远清不掉。现在桥在自己拿到 `$events/result` 成功回包时补发那条 resolution，App 的 store 与桥的重放集合一起收敛；另外 `$events` 换代（宿主重连、桥重建）时整个重放集合作废——宿主会把仍然挂着的请求重新投递给新注册，所以有效卡片不会漏，只是不再复活已经结掉的。
 

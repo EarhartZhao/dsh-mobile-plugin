@@ -1,6 +1,6 @@
 {
   "name": "@dsh-earhartzhao/dsh-mobile-plugin",
-  "version": "0.2.40",
+  "version": "0.2.39",
   "description": "手机连接：配对设备、管理访问权限并诊断 NATS 桥接。",
   "type": "module",
   "main": "lib/index.js",

@@ -24,12 +24,6 @@ import { normalizeHubWssUrl } from './hub-check.js'
 import { TokenStore, type DeviceEntry } from './tokens.js'
 import { GatewayIdentityStore } from './identity.js'
 import { InstanceIdStore, INSTANCES_FILE, installKey, type InstanceIdSource } from './instance-id.js'
-import {
-  bridgeStoreKey,
-  resolveBridgeStore,
-  type BridgeStoreLayout,
-  type StoreOwnership,
-} from './install-store.js'
 import { PLUGIN_FEATURES, PLUGIN_MOBILE_API, PLUGIN_VERSION, RpcBridge } from './bridge.js'
 import { EventBridge, GatewayEventAdapter } from './events.js'
 import { ToolViews, type ToolRegistryLike } from './tool-views.js'
@@ -74,11 +68,6 @@ export const PLUGIN_ROW_ID = 'mobile-bridge'
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
 
 const PLUGIN_LOADED_FROM = fileURLToPath(import.meta.url)
-/**
- * Stable key for this loaded copy, see src/instance-id.ts. Computed once: the
- * namespace store and the device store have to agree on it.
- */
-const INSTALL_KEY = installKey(PLUGIN_LOADED_FROM)
 const PLUGIN_BUILD_ID = process.env.DSH_MOBILE_PLUGIN_BUILD_ID
   ?? `${PLUGIN_VERSION}-${Math.trunc(statSync(PLUGIN_LOADED_FROM).mtimeMs).toString(36)}`
 
@@ -329,12 +318,6 @@ export class MobileBridge extends Service {
   /** Generated instance ids, one per install key (see src/instance-id.ts). */
   private readonly instanceIds: InstanceIdStore
   /**
-   * Where this install's identity and device tokens live. Two dsh under one
-   * `$DSH_HOME` used to share one pair of files, which made a phone paired with
-   * one of them authorized on the other; see src/install-store.ts.
-   */
-  private readonly store: BridgeStoreLayout
-  /**
    * The namespace this install answers on and where it came from. `null` until
    * the store has been read; the configured value is the fallback surface.
    */
@@ -358,12 +341,8 @@ export class MobileBridge extends Service {
     super(ctx, 'mobileBridge')
     this.raw = entryConfig
     this.current = configValues(entryConfig)
-    // Resolved once, here: the identity store and the token store must be
-    // pointed at the same answer, and the claim on the pre-split files has to
-    // be settled before either of them reads.
-    this.store = resolveBridgeStore(dshHome(), bridgeStoreKey(this.current.instanceId, INSTALL_KEY))
-    this.tokens = new TokenStore(this.store.tokensPath)
-    this.identity = new GatewayIdentityStore(this.store.identityPath)
+    this.tokens = new TokenStore(join(dshHome(), 'mobile-bridge', 'tokens.json'))
+    this.identity = new GatewayIdentityStore(join(dshHome(), 'mobile-bridge', 'identity.json'))
     this.instanceIds = new InstanceIdStore(join(dshHome(), INSTANCES_FILE))
 
     // Settings layering: the profile patch's user document over the composition
@@ -520,12 +499,13 @@ export class MobileBridge extends Service {
       this.instance = { id: configured, source: 'configured' }
       return
     }
-    const { id, created } = await this.instanceIds.load(INSTALL_KEY)
+    const key = installKey(PLUGIN_LOADED_FROM)
+    const { id, created } = await this.instanceIds.load(key)
     this.instance = { id, source: 'auto' }
     if (created) {
       console.info('[mobile-bridge] 已为本安装生成实例 ID', {
         instanceId: id,
-        installKey: INSTALL_KEY,
+        installKey: key,
         file: join(dshHome(), INSTANCES_FILE),
       })
     }
@@ -589,16 +569,6 @@ export class MobileBridge extends Service {
     instanceIdSource: InstanceIdSource | null
     instanceName: string
     gatewayId: string | null
-    /** Directory holding this install's identity and device tokens. */
-    storeDir: string
-    /** The key that directory is named after; see src/install-store.ts. */
-    storeKey: string
-    /** Which install the pre-split machine-level files belong to. */
-    storeOwnership: StoreOwnership
-    /** Key recorded as the owner of those files, when one is readable. */
-    storeOwnerKey: string | null
-    /** Path of the marker naming that owner. */
-    storeOwnerFile: string
     startedAt: string | null
     uptimeMs: number
     lastConnectedAt: string | null
@@ -624,11 +594,6 @@ export class MobileBridge extends Service {
       instanceIdSource: this.instanceIdSource,
       instanceName: this.instanceName(),
       gatewayId: this.gatewayId,
-      storeDir: this.store.dir,
-      storeKey: this.store.key,
-      storeOwnership: this.store.ownership,
-      storeOwnerKey: this.store.ownerKey,
-      storeOwnerFile: this.store.ownerFile,
       startedAt: this.bridgeStartedAt,
       uptimeMs: this.bridgeStartedAt === null ? 0 : Math.max(0, Date.now() - Date.parse(this.bridgeStartedAt)),
       lastConnectedAt: this.lastConnectedAt,
@@ -1084,11 +1049,6 @@ export class MobileBridge extends Service {
       buildId: PLUGIN_BUILD_ID,
       loadedFrom: PLUGIN_LOADED_FROM,
       instanceId: this.effectiveInstanceId,
-      // Which of the machine's installs this one is: two dsh under one
-      // `$DSH_HOME` keep separate identities and device lists, so the log has
-      // to say which pair of files served this connection.
-      storeDir: this.store.dir,
-      storeOwnership: this.store.ownership,
       features: PLUGIN_FEATURES,
     })
     void this.trackStatus(nc)

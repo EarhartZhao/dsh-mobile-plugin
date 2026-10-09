@@ -85,10 +85,6 @@ evt.dsh.{instance}.{eventKey}.host
 
 ## token 存储
 
-设备数据按**安装**分开（同一个 `$DSH_HOME` 下可能有两个 dsh：终端里的 `web` 与桌面客户端）。0.2.40 之前只有下面
-这一份机器级文件，两个安装会互相认对方的设备；现在第一个启动的安装写 `mobile-bridge/owner` 接管它，其余安装各用
-`mobile-bridge/installs/<实例 ID 或安装路径>/`。路径由 `src/install-store.ts` 决定，控制台「设备数据」一行显示当前用哪份。
-
 ```json
 // $DSH_HOME/mobile-bridge/tokens.json
 {
