@@ -402,7 +402,8 @@ const PANEL_CSS = `
   margin: 0;
   padding: 0;
   min-height: calc(var(--dsh-mobile-device-row-height) * 3 + 1px);
-  max-height: calc(var(--dsh-mobile-device-row-height) * 6 + 1px);
+  /* The paired-device panel keeps its own scroll area at 520px. */
+  max-height: 520px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
