@@ -19,6 +19,11 @@ declare module '@deepseek-ai/dsh-client-connection' {
   /** Shape exposed as `ctx.connection`. */
   export interface HostConnectionHandle {
     createSharedFetchHandler(channel: '/api'): ConnectionFetchHandler
+    /**
+     * One in-process Peer owned by this service's Context. Added in dsh 0.2.1;
+     * absent on older hosts, which also do not require a Peer on Remote calls.
+     */
+    createPeer?(options: { readonly principal: { readonly kind: 'owner' } }): unknown
   }
 }
 

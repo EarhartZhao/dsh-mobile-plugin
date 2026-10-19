@@ -17,6 +17,7 @@ import { connect, type NatsConnection } from 'nats'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
+import { createHostPeer, withHostPeer, type HostPeer } from './host-peer.js'
 import { Config, configValues, type ConfigInput } from './config.js'
 import { readHubCa, sameFingerprint } from './hub-ca.js'
 import { readInstalledVersion } from './installed-version.js'
@@ -294,6 +295,8 @@ export class MobileBridge extends Service {
   private nc: NatsConnection | null = null
   private rpcBridge: RpcBridge | null = null
   private eventBridge: EventBridge | null = null
+  /** The owner Peer every Gateway call names (dsh 0.2.1+). */
+  private hostPeer: HostPeer | null = null
   private connectionStatus: ConnectionStatus = 'disconnected'
   private reconnectWatchdog: ReturnType<typeof setTimeout> | null = null
   private bridgeStartedAt: string | null = null
@@ -1055,7 +1058,14 @@ export class MobileBridge extends Service {
 
     // Both services are guaranteed by static inject.
     const connection = this.ctx.get('connection') as unknown as HostConnectionHandle
-    const gateway = this.ctx.get('typertGateway') as unknown as TypertGateway
+    // dsh 0.2.1 made `peer` mandatory on every in-process Remote call; older
+    // hosts ignore the field, so one Gateway view serves both.
+    await this.hostPeer?.dispose()
+    this.hostPeer = createHostPeer(connection, this.ctx)
+    const gateway = withHostPeer(
+      this.ctx.get('typertGateway') as unknown as TypertGateway,
+      this.hostPeer,
+    )
     const sharedHandler = connection.createSharedFetchHandler('/api')
     const carrier = { fetch: (request: Request) => sharedHandler.fetch(request) }
     const eventAdapter = new GatewayEventAdapter(
