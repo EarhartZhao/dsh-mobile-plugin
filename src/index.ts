@@ -17,7 +17,7 @@ import { connect, type NatsConnection } from 'nats'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
-import { createHostPeer, withHostPeer, type HostPeer } from './host-peer.js'
+import { createHostPeer, withHostPeer, withHostPeerFetch, type HostPeer } from './host-peer.js'
 import { Config, configValues, type ConfigInput } from './config.js'
 import { readHubCa, sameFingerprint } from './hub-ca.js'
 import { readInstalledVersion } from './installed-version.js'
@@ -1067,7 +1067,7 @@ export class MobileBridge extends Service {
       this.hostPeer,
     )
     const sharedHandler = connection.createSharedFetchHandler('/api')
-    const carrier = { fetch: (request: Request) => sharedHandler.fetch(request) }
+    const carrier = withHostPeerFetch(sharedHandler, this.hostPeer)
     const eventAdapter = new GatewayEventAdapter(
       gateway,
       carrier,

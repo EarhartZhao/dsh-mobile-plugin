@@ -13,7 +13,11 @@
 declare module '@deepseek-ai/dsh-client-connection' {
   /** Transport-independent Fetch handler dispatched after auth. */
   export interface ConnectionFetchHandler {
-    fetch(request: Request): Promise<Response>
+    /**
+     * dsh 0.2.1 requires the admitted Peer as the second argument; older hosts
+     * declare and accept only the request.
+     */
+    fetch(request: Request, peer?: unknown): Promise<Response>
   }
 
   /** Shape exposed as `ctx.connection`. */

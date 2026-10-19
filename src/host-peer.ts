@@ -80,6 +80,32 @@ export function withHostPeer<T extends object>(gateway: T, peer: HostPeer): T {
 }
 
 /**
+ * The shared connection fetch handler dispatches as an admitted Peer:
+ * `fetch(request, peer)`. dsh 0.2.1 reads that Peer's signal before it hands a
+ * client-request to the Gateway, so a one-argument call made every answerable
+ * Remote Event fail — an approval answer returned
+ * `Cannot read properties of undefined (reading 'signal')` and the phone kept
+ * its card. Older hosts ignore the extra argument.
+ * @param handler - the Host's shared fetch handler.
+ * @param peer - Peer every dispatch speaks for.
+ * @returns the handler view that names `peer` on each `fetch`.
+ */
+export function withHostPeerFetch<T extends object>(handler: T, peer: HostPeer): T {
+  return new Proxy(handler, {
+    get(target, property) {
+      const value = Reflect.get(target, property)
+      if (property === 'fetch' && typeof value === 'function') {
+        return (request: Request) => (value as (
+          request: Request,
+          peer: HostPeer,
+        ) => Promise<Response>).call(target, request, peer)
+      }
+      return value
+    },
+  })
+}
+
+/**
  * The carrier face needs the same Peer. The wrapper keeps the five declared
  * parameters `openEventStream` reads to pick its call shape; a three-argument
  * caller (hosts before 0.1.7) puts its signal in the third slot and is passed

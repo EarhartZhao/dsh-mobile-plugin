@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { withHostPeer, type HostPeer } from '../src/host-peer.js'
+import { withHostPeer, withHostPeerFetch, type HostPeer } from '../src/host-peer.js'
 
 /** The structural Peer the wrapper only reads. */
 const peer: HostPeer = {
@@ -42,5 +42,20 @@ describe('withHostPeer', () => {
 
     // `openEventStream` reads this arity to pick a call shape.
     expect(gateway.wireStream.open).toHaveLength(5)
+  })
+})
+
+describe('withHostPeerFetch', () => {
+  it('dispatches every shared-fetch request as the owner Peer', async () => {
+    // The approval answer is a client-request through this handler, not a
+    // Gateway invocation; without the Peer dsh 0.2.1 fails it with
+    // `Cannot read properties of undefined (reading 'signal')`.
+    const fetch = vi.fn().mockResolvedValue(new Response('ok'))
+    const bound = withHostPeerFetch({ fetch }, peer)
+
+    await bound.fetch(new Request('http://mobile.internal/api/$events/result', { method: 'POST' }))
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0]?.[1]).toBe(peer)
   })
 })
