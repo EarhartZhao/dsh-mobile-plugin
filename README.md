@@ -41,7 +41,7 @@ pnpm add @dsh-earhartzhao/dsh-mobile-plugin
 pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.41
 ```
 
-registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 重装（`registrySpec` / `updateSpec`）。
+registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 装（`registrySpec` / `updateSpec`）。更新会优先直接安装；只有 dsh 0.2.1 的 HMR 以 `already-installed` 拒绝 registry 包时，才在后台自动完成宿主要求的替换，用户仍然只点一次。
 
 pnpm 11 默认开着 `minimumReleaseAge`（24 小时）这道发布年龄门禁：**当天刚发的版本它不给你装**，裸包名 `pnpm add @dsh-earhartzhao/dsh-mobile-plugin` 会静默落到 24 小时窗口外的那个旧版本——「重装了一遍，版本号却没变」多半是撞在这里，不是装错了源。两个办法：把**整包名**加进 profile 的 `pnpm-workspace.yaml` 白名单，或者显式点名版本。白名单必须写包名，写成 `@包名@版本` 对裸包名与范围解析都不生效：
 
@@ -249,6 +249,8 @@ node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.w
 ## 移动端兼容与版本记录
 
 `mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
+
+0.2.45 修好 dsh 0.2.1 带 HMR 时的插件更新：宿主不允许对已安装的 registry 包直接调用 `installBundle`，会返回 `already-installed`。现在更新按钮先按正常路径直接安装；只有宿主明确拒绝时才在后台自动完成替换，用户仍然只点一次“更新”，不需要手动卸载。移动端 wire 不变。
 
 0.2.42 把 0.2.41 的修复补到插件面板上，移动端 wire 不变：0.2.41 让「从 Hub 获取 CA」和「测试连接」把表单里**当前**的值一起发上来，但只改了独立控制台（`/mobile-bridge` 那一页），dsh 插件页里的那份面板仍在裸调这两个接口——于是新机器上最典型的一幕又出现了：地址明明填在框里，点「从 Hub 获取 CA」却回一句「「Hub 地址」还没有填」，而第一次保存又必须要这张证书。现在面板跟独立控制台发同一个形状的 `{ hubWssUrl, hubUser, hubPass }`（`src/client/index.tsx` 的 `hubFormValues`），两条路彻底一致。
 

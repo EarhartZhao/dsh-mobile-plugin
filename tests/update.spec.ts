@@ -8,10 +8,100 @@ import {
   latestTag,
   parseUpdateSource,
   releaseAssetSpec,
+  replaceInstalledBundle,
   registrySpec,
   updateSpec,
   versionParts,
 } from '../src/update.js'
+
+describe('replaceInstalledBundle', () => {
+  it('installs the replacement directly when the Host accepts it', async () => {
+    const calls: string[] = []
+    const manager = {
+      removeBundle: async (name: string) => {
+        calls.push(`remove:${name}`)
+        return { application: 'applied' as const }
+      },
+      installBundle: async (spec: string, options?: { enabled?: boolean, requestId?: string }) => {
+        calls.push(`install:${spec}:${options?.enabled}:${options?.requestId}`)
+        return { application: 'applied' as const }
+      },
+    }
+
+    const outcome = await replaceInstalledBundle(manager, '@scope/plugin', '@scope/plugin@2.0.0', 'update-1')
+
+    expect(calls).toEqual(['install:@scope/plugin@2.0.0:true:update-1'])
+    expect(outcome).toEqual({ result: { application: 'applied' }, removed: false })
+  })
+
+  it('falls back to remove then install only when the Host reports already-installed', async () => {
+    const calls: string[] = []
+    let installs = 0
+    const manager = {
+      removeBundle: async (name: string) => {
+        calls.push(`remove:${name}`)
+        return { application: 'applied' as const }
+      },
+      installBundle: async (spec: string) => {
+        calls.push(`install:${spec}`)
+        installs += 1
+        return installs === 1
+          ? { application: 'failed' as const, error: { code: 'already-installed' } }
+          : { application: 'applied' as const }
+      },
+    }
+
+    const outcome = await replaceInstalledBundle(manager, '@scope/plugin', '@scope/plugin@2.0.0', 'update-2')
+
+    expect(calls).toEqual([
+      'install:@scope/plugin@2.0.0',
+      'remove:@scope/plugin',
+      'install:@scope/plugin@2.0.0',
+    ])
+    expect(outcome).toEqual({ result: { application: 'applied' }, removed: true })
+  })
+
+  it('does not remove when the direct install fails for another reason', async () => {
+    const calls: string[] = []
+    const manager = {
+      removeBundle: async () => {
+        calls.push('remove')
+        return { application: 'applied' as const }
+      },
+      installBundle: async () => {
+        calls.push('install')
+        return { application: 'failed' as const, error: { code: 'operation-error' } }
+      },
+    }
+
+    const outcome = await replaceInstalledBundle(manager, '@scope/plugin', '@scope/plugin@2.0.0', 'update-3')
+
+    expect(calls).toEqual(['install'])
+    expect(outcome).toEqual({ result: { application: 'failed', error: { code: 'operation-error' } }, removed: false })
+  })
+
+  it('returns the removal failure without trying the install again', async () => {
+    const calls: string[] = []
+    let installs = 0
+    const manager = {
+      removeBundle: async () => {
+        calls.push('remove')
+        return { application: 'failed' as const, error: { code: 'not-removable' } }
+      },
+      installBundle: async () => {
+        calls.push('install')
+        installs += 1
+        return { application: 'failed' as const, error: { code: 'already-installed' } }
+      },
+    }
+
+    const outcome = await replaceInstalledBundle(manager, '@scope/plugin', '@scope/plugin@2.0.0', 'update-4')
+
+    expect(calls).toEqual(['install', 'remove'])
+    expect(installs).toBe(1)
+    expect(outcome).toEqual({ result: { application: 'failed', error: { code: 'not-removable' } }, removed: false })
+  })
+})
 
 describe('parseUpdateSource', () => {
   it('reads the repository out of every GitHub spec shape', () => {

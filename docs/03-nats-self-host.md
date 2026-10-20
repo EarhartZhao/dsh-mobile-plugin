@@ -312,7 +312,7 @@ Windows 的 `C:\nats-server\nats-server.exe`，最后是 `PATH` 上的 `nats-ser
 控制台「插件更新」一栏只管这件事：**刷新**去 GitHub 查本仓库最新的版本 tag，比当前运行的版本新时，旁边才会多出一个
 **更新到 `<版本>`** 按钮。没有新版就只留刷新按钮，不摆一个点了只会说「已是最新」的按钮。
 
-更新走宿主自己的插件管理器（插件页装插件用的同一条 pnpm 路径），把 profile 的 `package.json` 里这条依赖原样装回去——
+更新走宿主自己的插件管理器（插件页装插件用的同一条 pnpm 路径），会优先直接安装新版本。dsh 0.2.1 起，带 HMR 的 profile 对 registry 包会拒绝这种直接覆盖并返回 `already-installed`；只有这时按钮才在后台自动完成宿主要求的替换，用户仍然只点一次「更新到 `<版本>`」，不需要手动卸载。安装时把 profile 的 `package.json` 里这条依赖原样装回去——
 所以从哪装的就从哪更新：fork、`github:owner/repo`、`git+https://…` 都认；从 Release 资产装的（`…/releases/download/<tag>/…tgz`）会把 URL 里的 tag 换成最新版本再装，文件名里嵌的旧版本号一并替换；从 registry 装的（包名或 `包名@版本`）改问 npm 的 `dist-tags.latest`，按 `包名@最新版` 装。装完**当前进程仍跑旧代码**，页面会提示
 「重启 dsh 后生效」，重启才真正换版本。本地路径安装（`link:` / `file:` / 绝对路径）不在这里更新，请到源码目录
 `git pull` 后重启。

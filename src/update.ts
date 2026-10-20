@@ -3,9 +3,9 @@
  *
  * The console can only *ask* for an update. Installing is the host's job — the
  * same pnpm path the Plugins page uses (`pluginManager.installBundle`) — so
- * this module holds just the two things that have to be right before that
- * call: which repository the profile's dependency actually names, and whether
- * a tag on it is newer than what is running.
+ * this module holds just the things that have to be right before that call:
+ * which repository the profile's dependency actually names, whether a tag on
+ * it is newer than what is running, and how an installed bundle is replaced.
  *
  * Repository identity comes from the installed spec, not from a constant, so a
  * fork (or a pinned tag) updates from its own source. Tags stay the version
@@ -44,6 +44,64 @@ export interface UpdateSource {
    * {@link fetchLatestRegistryVersion} is what answers "which version is newest".
    */
   readonly registry: string | null
+}
+
+/** The host plugin-manager calls one in-place update makes, in order. */
+export interface BundleUpdateManager {
+  removeBundle?(name: string): Promise<BundleUpdateResult>
+  installBundle(spec: string, options?: {
+    enabled?: boolean
+    requestId?: string
+  }): Promise<BundleUpdateResult>
+}
+
+/** The fields of a host plugin-manager result the update path reads. */
+export interface BundleUpdateResult {
+  application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  error?: { code?: string, diagnostic?: string }
+  packageResult?: { exitCode?: number, output?: string }
+}
+
+/** One replacement attempt and whether the Host required the remove fallback. */
+export interface BundleUpdateOutcome {
+  result: BundleUpdateResult
+  removed: boolean
+}
+
+/**
+ * Replace an installed bundle through the host's plugin manager.
+ *
+ * A normal upgrade installs the new spec directly, which lets HMR replace the
+ * running plugin. dsh 0.2.1 with HMR refuses a registry spec (or the exact git
+ * or tarball spec already saved) with `already-installed`; only then does this
+ * fall back to removing the installed package and installing the replacement.
+ * That fallback is an implementation detail of the one Update action; callers
+ * never ask the user to uninstall first.
+ * @param manager - Host plugin manager.
+ * @param packageName - Installed package to remove.
+ * @param spec - New package spec.
+ * @param requestId - Installation progress id.
+ * @returns The installation result and whether removal completed.
+ */
+export async function replaceInstalledBundle(
+  manager: BundleUpdateManager,
+  packageName: string,
+  spec: string,
+  requestId: string,
+): Promise<BundleUpdateOutcome> {
+  const direct = await manager.installBundle(spec, { enabled: true, requestId })
+  if (direct.application !== 'failed' || direct.error?.code !== 'already-installed') {
+    return { result: direct, removed: false }
+  }
+  if (manager.removeBundle === undefined) return { result: direct, removed: false }
+  const removal = await manager.removeBundle(packageName)
+  if (removal.application === 'failed' || removal.application === 'cancelled') {
+    return { result: removal, removed: false }
+  }
+  return {
+    result: await manager.installBundle(spec, { enabled: true, requestId }),
+    removed: true,
+  }
 }
 
 const LOCAL_SPEC = /^(?:link:|file:|portal:|\.{1,2}\/|\/|[A-Za-z]:[\\/])/u

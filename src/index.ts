@@ -47,7 +47,14 @@ import {
   type ProfileLocation,
   type ProfileShape,
 } from './profile-migration.js'
-import { fetchLatestRegistryVersion, fetchLatestTag, isNewerVersion, parseUpdateSource, updateSpec } from './update.js'
+import {
+  fetchLatestRegistryVersion,
+  fetchLatestTag,
+  isNewerVersion,
+  parseUpdateSource,
+  replaceInstalledBundle,
+  updateSpec,
+} from './update.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -168,11 +175,13 @@ interface ProfileContextLike {
 
 /**
  * Structural view of the host's plugin manager (`ctx.pluginManager`) — the
- * service behind the Plugins page. The update button hands it the spec the
- * profile already declares, so pnpm resolves and builds the package exactly as
- * it did on install; nothing here downloads or unpacks anything itself.
+ * service behind the Plugins page. An update first hands over the spec the
+ * profile already declares; only a Host that refuses it as already installed
+ * needs the package removed before the same spec is installed. Nothing here
+ * downloads or unpacks anything itself.
  */
 interface PluginManagerLike {
+  removeBundle?(name: string): Promise<PluginChangeResult>
   installBundle(spec: string, options?: {
     enabled?: boolean
     requestId?: string
@@ -770,11 +779,14 @@ export class MobileBridge extends Service {
    *
    * The spec handed over is the profile's own dependency line, so pnpm does
    * exactly what an install does — resolve, fetch, build when the source needs
-   * it — and the running process keeps the code it booted with until dsh
-   * restarts. Two install shapes need a different spec than the one they were
-   * read from: a release asset pins its version in the URL path, and a registry
-   * range names no exact version at all — {@link updateSpec} answers both. That
-   * restart is the answer the owner gets, not a hidden failure.
+   * it. A normal upgrade installs directly and lets HMR replace the running
+   * plugin. dsh 0.2.1 with HMR refuses an install over an installed registry
+   * package with `already-installed`; only then does the update perform the
+   * Host-required replacement internally. The profile patch and its credentials
+   * stay in place. Two install shapes need a different spec than the one they
+   * were read from: a release asset pins its version in the URL path, and a
+   * registry range names no exact version at all — {@link updateSpec} answers
+   * both. A result that needs a restart says so.
    * @returns The report now stored for `/api/status`.
    */
   async applyUpdate(): Promise<UpdateReport> {
@@ -796,17 +808,33 @@ export class MobileBridge extends Service {
     this.updateRequestId = requestId
     this.update = { ...current, phase: 'installing', message: `正在更新到 ${current.latest ?? '最新版本'}…` }
     try {
-      const result = await manager.installBundle(target, { enabled: true, requestId })
+      // Try the normal direct upgrade first. Only a Host that reports
+      // `already-installed` needs its internal remove-then-install replacement;
+      // the profile patch (and its Hub credentials) stays untouched either way.
+      const { result, removed } = await replaceInstalledBundle(manager, PLUGIN_PACKAGE_NAME, target, requestId)
       const failure = updateFailure(result)
-      this.update = failure === null
-        ? {
-            ...this.update,
-            newer: false,
-            updatable: false,
-            phase: 'restart-required',
-            message: `新版本已经装好，重启 dsh 后生效（当前运行的是 ${PLUGIN_VERSION}）。`,
-          }
-        : { ...this.update, newer: true, updatable: true, phase: 'failed', message: failure }
+      if (failure === null) {
+        this.update = {
+          ...this.update,
+          newer: false,
+          updatable: false,
+          phase: result.application === 'applied' ? 'idle' : 'restart-required',
+          message: result.application === 'applied'
+            ? `已升级到 ${current.latest ?? '最新版本'}。`
+            : `新版本已经装好，重启 dsh 后生效（当前运行的是 ${PLUGIN_VERSION}）。`,
+        }
+      } else {
+        const detail = failure.replace(/^更新失败：/u, '')
+        this.update = {
+          ...this.update,
+          newer: true,
+          updatable: true,
+          phase: 'failed',
+          message: removed
+            ? `升级失败：新版本安装失败：${detail}`
+            : `更新失败：${detail}`,
+        }
+      }
       return this.update
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
