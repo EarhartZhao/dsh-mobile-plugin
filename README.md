@@ -1,5 +1,7 @@
 <div align="center">
 
+**简体中文** · [English](README.en.md)
+
 <img src="docs/assets/dsh-mobile-plugin-banner.svg" alt="dsh-mobile-plugin：安全连接手机与本地 dsh" width="100%">
 
 # dsh-mobile-plugin
