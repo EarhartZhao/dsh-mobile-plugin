@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title desc">
+  <title id="title">dsh-mobile-plugin</title>
+  <desc id="desc">通过出站 NATS 桥把手机安全连接到 DeepSeek Harness</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07121d"/>
+      <stop offset="0.55" stop-color="#0a1d2e"/>
+      <stop offset="1" stop-color="#0b2b3a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.76" cy="0.22" r="0.82">
+      <stop offset="0" stop-color="#34d3c8" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#34d3c8" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#9ef4e8" stroke-opacity="0.05"/>
+    </pattern>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#020912" flood-opacity="0.65"/>
+    </filter>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="420" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="420" rx="28" fill="url(#grid)"/>
+  <rect width="1280" height="420" rx="28" fill="url(#glow)"/>
+  <circle cx="1070" cy="104" r="105" fill="#34d3c8" opacity="0.09" filter="url(#soft)"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="82" y="116" fill="#80e7dc" font-size="19" font-weight="650" letter-spacing="3">DEEPSEEK HARNESS · BRIDGE</text>
+    <text x="80" y="208" fill="#f4fffd" font-size="60" font-weight="760" letter-spacing="-2">dsh-mobile-plugin</text>
+    <text x="84" y="263" fill="#c2e6e3" font-size="26">安全连接手机与本地 dsh</text>
+    <text x="84" y="306" fill="#7ca7a7" font-size="18">出站 NATS 桥 · 扫码配对 · 设备令牌 · 能力协商</text>
+
+    <g transform="translate(84 344)">
+      <rect width="118" height="36" rx="18" fill="#0b2934" stroke="#256271"/>
+      <text x="59" y="24" text-anchor="middle" fill="#d8fffb" font-size="15" font-weight="600">Cordis</text>
+      <rect x="132" width="106" height="36" rx="18" fill="#0b2934" stroke="#256271"/>
+      <text x="185" y="24" text-anchor="middle" fill="#d8fffb" font-size="15" font-weight="600">NATS</text>
+      <rect x="252" width="132" height="36" rx="18" fill="#0b2934" stroke="#256271"/>
+      <text x="318" y="24" text-anchor="middle" fill="#d8fffb" font-size="15" font-weight="600">mobileApi 2</text>
+    </g>
+  </g>
+
+  <g transform="translate(725 72)" filter="url(#shadow)">
+    <rect x="0" y="102" width="132" height="82" rx="20" fill="#0a1c2a" stroke="#2b6171"/>
+    <rect x="22" y="120" width="88" height="48" rx="10" fill="#102f3b"/>
+    <path d="M37 158h58M44 147h44M51 136h30" stroke="#79d9d0" stroke-width="3" stroke-linecap="round"/>
+    <text x="66" y="202" text-anchor="middle" fill="#79a9aa" font-size="12" letter-spacing="1">PHONE</text>
+
+    <rect x="196" y="82" width="160" height="122" rx="24" fill="#0a1c2a" stroke="#3c7e8b"/>
+    <circle cx="276" cy="127" r="22" fill="#0f3b43" stroke="#69d4c9" stroke-width="2"/>
+    <path d="M266 127h20M276 117v20" stroke="#9af4e9" stroke-width="3" stroke-linecap="round"/>
+    <rect x="232" y="163" width="88" height="8" rx="4" fill="#78d9cf"/>
+    <rect x="246" y="180" width="60" height="6" rx="3" fill="#356975"/>
+    <text x="276" y="224" text-anchor="middle" fill="#79a9aa" font-size="12" letter-spacing="1">NATS HUB</text>
+
+    <rect x="420" y="102" width="132" height="82" rx="20" fill="#0a1c2a" stroke="#2b6171"/>
+    <rect x="442" y="120" width="88" height="48" rx="10" fill="#102f3b"/>
+    <path d="M456 138h56M456 149h42M456 160h50" stroke="#79d9d0" stroke-width="3" stroke-linecap="round"/>
+    <text x="486" y="202" text-anchor="middle" fill="#79a9aa" font-size="12" letter-spacing="1">DSH HOST</text>
+
+    <path d="M134 143H192M360 143H416" fill="none" stroke="#51bdb4" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M184 137l9 6-9 6M408 137l9 6-9 6" fill="none" stroke="#51bdb4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="#5acfc4">
+      <circle cx="162" cy="143" r="3"/>
+      <circle cx="386" cy="143" r="3"/>
+    </g>
+  </g>
+</svg>

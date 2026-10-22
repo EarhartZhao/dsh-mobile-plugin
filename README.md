@@ -1,348 +1,268 @@
+<div align="center">
+
+<img src="docs/assets/dsh-mobile-plugin-banner.svg" alt="dsh-mobile-plugin：安全连接手机与本地 dsh" width="100%">
+
 # dsh-mobile-plugin
 
-装进本地 deepseek-harness（dsh）`web` profile 的**树外 Cordis 插件**，为 [dsh-mobile](../dsh-mobile) 提供外网接入：插件主动出站连 NATS Hub，把宿主的 Typert Remote（RPC + 实时事件流）桥给手机，外加扫码配对与设备 token 认证。宿主不开任何入站端口、不需要公网 IP。
+**把本地 DeepSeek Harness 安全地带到手机上的 Cordis 插件。**
 
-装好之后手机的链路是：手机 App —`wss://<hub-host>:8443`→ NATS Hub —`leaf:7422`→ 本机 NATS Leaf → 本插件 → 宿主的会话、审批、提问、文件与工具事件。Hub 从零搭到验收的完整教程见 [docs/03-nats-self-host.md](docs/03-nats-self-host.md)。
+插件主动连接 NATS Hub，把 dsh 的 RPC 与实时事件桥接给 [dsh-mobile](https://github.com/EarhartZhao/dsh-mobile)。电脑不需要公网 IP，也不需要开放任何入站端口。
 
-本仓库文档（怎么装、怎么配、为什么这么设计）：
+<p>
+  <a href="https://registry.npmjs.org/%40dsh-earhartzhao%2Fdsh-mobile-plugin"><img src="https://img.shields.io/npm/v/@dsh-earhartzhao/dsh-mobile-plugin?label=npm" alt="npm 最新版本"></a>
+  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/releases/latest"><img src="https://img.shields.io/github/v/release/EarhartZhao/dsh-mobile-plugin?display_name=tag&sort=semver" alt="GitHub Release"></a>
+  <a href="https://github.com/EarhartZhao/dsh-mobile-plugin/actions/workflows/ci.yml"><img src="https://github.com/EarhartZhao/dsh-mobile-plugin/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/dsh-web%20profile-0b7285" alt="dsh web profile">
+  <img src="https://img.shields.io/badge/mobileApi-2-2563eb" alt="mobileApi 2">
+</p>
 
-- [00-plugin-plan.md](docs/00-plugin-plan.md) — 定位（NATS 出站桥）、架构、安装方式与里程碑
-- [01-auth-pairing.md](docs/01-auth-pairing.md) — 双层凭证模型、配对流程、token 存储
-- [02-nats-server.md](docs/02-nats-server.md) — 复用既有 NATS Hub 的改动清单（websocket/TLS/账号/Leaf 部署）
-- [03-nats-self-host.md](docs/03-nats-self-host.md) — 自建 NATS 服务教程（Hub 从零 → 本机 Leaf → 插件配置 → 验收 → 故障排查）
-- [04-ai-onboarding.md](docs/04-ai-onboarding.md) — 新电脑接入清单：装 `nats-server`、写 `leaf.conf`、接上 Hub 并自检（写给 AI 助手读，人也能照做）
+[快速开始](#快速开始) · [安装](#安装) · [首次配置](#首次配置) · [连接 App](https://github.com/EarhartZhao/dsh-mobile) · [自建 Hub](docs/03-nats-self-host.md)
+
+</div>
+
+## 为什么需要它
+
+dsh 通常跑在家用电脑或办公电脑上，没有公网 IP。手机直接访问不到它，而把 dsh 暴露到公网又会扩大攻击面。
+
+本插件把连接方向反过来：电脑和手机都主动连接同一个 NATS Hub。Hub 只负责转发，插件仍运行在 dsh 进程内，因此会话、审批、提问、文件与工具事件都来自同一个宿主。
+
+```mermaid
+flowchart LR
+  Phone["dsh-mobile<br/>Android / iOS"] -->|"WSS 8443<br/>C 端账号 + 设备令牌"| Hub["NATS Hub"]
+  Hub -->|"Leaf 7422"| Local["本机 NATS Leaf"]
+  Local -->|"localhost:4222"| Plugin["dsh-mobile-plugin"]
+  Plugin --> DSH["deepseek-harness<br/>Web / Desktop"]
+```
+
+## 核心能力
+
+| 连接 | 安全 | 移动体验 |
+| --- | --- | --- |
+| 宿主主动出站连接，不开放入站端口 | 扫码配对，设备令牌可单独吊销 | 完整 RPC、实时事件流与历史分页 |
+| 复用 dsh Typert Remote 与事件词汇 | Hub CA 随二维码下发，不内置账号 | 子智能体、审批、提问、队列与文件 |
+| 本机 NATS 探测、启动与链路诊断 | 每台安装自动生成独立 `instanceId` | 插件页与回环控制台使用同一套配置 |
+| 支持 npm、Release tarball、Git 与本地 link | 密钥不进入移动端 wire 或诊断结果 | 控制台内检查更新，升级后提示重启 |
 
 ## 快速开始
 
-先备好三样东西：**能跑 `dsh web` 的这台电脑**、**Hub 地址 + C 端账号密码**（部署 NATS Hub 的人给）、**Hub 的 `ca.crt`**（Hub 用公共 CA 签发就跳过；Hub 是你自己搭的，这份 ca.crt 就是你在服务器上生成的那张——见 [docs/03 §2.3 上 TLS：自签私有 CA](docs/03-nats-self-host.md)）。然后四步：
+开始前准备三样东西：
 
-1. **装。** 侧边栏 →「插件」，在安装框里填包名 `@dsh-earhartzhao/dsh-mobile-plugin`（也可以填 git 地址或本地路径，见[安装](#安装)），宿主先 inspect 再交给 pnpm 安装。
-2. **启用。** 装好后点「启用」——它把包名写进 profile 的 `dsh.profile.bundles`，bundle 自带的 `mobile-bridge` 那一行这才生效（没启用时 `/mobile-bridge` 直接 404）。
-3. **配置。** 打开「插件 → `@dsh-earhartzhao/dsh-mobile-plugin`」的配置区，或直接开回环控制台 `http://127.0.0.1:3080/mobile-bridge`，填 Hub 地址、账号、密码、CA 后保存。
-4. **发码。** 状态显示「已连接」后点「生成配对二维码」，用手机 App 扫。
+1. 能运行 `dsh web` 的电脑。
+2. NATS Hub 地址、C 端账号密码，以及 Hub 的 `ca.crt`。
+3. 本机 `nats-server` 与 `leaf.conf`；没有时按 [AI 接入清单](docs/04-ai-onboarding.md)准备。
 
-顺序不能颠倒：手机用的是**插件里配的那组 Hub 凭证**，它随二维码下发，App 不内置任何账号。每一步的字段与排错见[首次配置](#首次配置顺序不能颠倒)。
+在 dsh 的「插件」页安装并启用：
 
-这台电脑还没有本机 NATS——控制台点「启动本地 NATS」报找不到 `nats-server` 或 `leaf.conf`——就先读
-[docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)：它是一份**交给 AI 的清单**，把整页丢给这台电脑上的助手（或自己照做），
-装好 `nats-server`、写好 `leaf.conf`、取到 CA，再回到上面的第 2 步。
+```text
+@dsh-earhartzhao/dsh-mobile-plugin
+```
+
+然后打开插件配置区，按页面顺序完成：
+
+1. **连接 Hub**：填写 Hub 地址、账号和密码。
+2. **获取 CA**：粘贴 `ca.crt`，或点击「从 Hub 获取 CA」。
+3. **启动本机 NATS**：状态显示已连接后继续。
+4. **配对手机**：生成二维码，用 dsh-mobile 扫码。
+
+> App `0.1.6` 支持插件 `>=0.2.2 <0.3.0`，当前 `mobileApi` 为 `2`。版本或能力不匹配时，App 会在连接阶段明确报错。
 
 ## 安装
 
-本仓库是**树外插件**，不在 dsh 官方 bundle 里。本包声明了 `dsh.bundle`（随包发布的 `cordis.patch.yml` 提供 `mobile-bridge` 那一行），所以安装要做的就是**把包放进 profile 依赖并启用它**。四种装法，按省事程度排：
-
-线上只保留**最新版本**：仓库里只留最新的 tag 与 Release 资产，npm 上更早的版本一律标成 deprecated。所以下面示例里的版本号只是写这份文档时的最新版，**钉版本要用你自己当场装到的那个号**，别照抄文里的数字。
-
-### 方式 A：npm（推荐）
+### npm（推荐）
 
 ```bash
-pnpm add @dsh-earhartzhao/dsh-mobile-plugin
-# 或钉住某个版本：
-pnpm add @dsh-earhartzhao/dsh-mobile-plugin@0.2.41
+pnpm add @dsh-earhartzhao/dsh-mobile-plugin@latest
 ```
 
-registry 上放的是发包时打好的 tarball，里面已经有 `lib/`——`prepare` 只在**发布那一刻**跑，安装时不跑，所以没有任何构建脚本要批准（不需要 `allowBuilds`），也完全不碰 GitHub（registry 还能走镜像）。插件页的「按包名安装」走的就是这条路。控制台的「检查更新」对 registry spec 去问 `dist-tags.latest`，再按 `<包名>@<最新版>` 装（`registrySpec` / `updateSpec`）。更新会优先直接安装；只有 dsh 0.2.1 的 HMR 以 `already-installed` 拒绝 registry 包时，才在后台自动完成宿主要求的替换，用户仍然只点一次。
+发布的 npm 包已经包含 `lib/`，安装时不会运行构建脚本，不需要配置 `allowBuilds`。也可以直接在 dsh 插件页按包名安装。npm 网页可能对部分网络环境返回 403，这不影响 registry 安装；包元数据可以直接从 [npm registry](https://registry.npmjs.org/%40dsh-earhartzhao%2Fdsh-mobile-plugin) 查看。
 
-pnpm 11 默认开着 `minimumReleaseAge`（24 小时）这道发布年龄门禁：**当天刚发的版本它不给你装**，裸包名 `pnpm add @dsh-earhartzhao/dsh-mobile-plugin` 会静默落到 24 小时窗口外的那个旧版本——「重装了一遍，版本号却没变」多半是撞在这里，不是装错了源。两个办法：把**整包名**加进 profile 的 `pnpm-workspace.yaml` 白名单，或者显式点名版本。白名单必须写包名，写成 `@包名@版本` 对裸包名与范围解析都不生效：
+pnpm 11 默认有 24 小时的新版本发布年龄门禁。当天刚发布的版本可能暂时解析不到；需要立即安装时请显式指定版本。长期使用时可以把整包名加入 profile 的 `pnpm-workspace.yaml`：
 
 ```yaml
 minimumReleaseAgeExclude:
   - '@dsh-earhartzhao/dsh-mobile-plugin'
 ```
 
-已经装着旧版想升上来，光改白名单也不够：lockfile 里钉着的那条旧解析不会自己重算，得 `pnpm add @dsh-earhartzhao/dsh-mobile-plugin@latest`（或钉死版本号）逼它重新解析一次。
+### Release 预构建包
 
-### 方式 B：Release 预构建 tarball
+每次发布都会在 [GitHub Releases](https://github.com/EarhartZhao/dsh-mobile-plugin/releases/latest) 提供预构建 tarball：
+
+```text
+https://github.com/EarhartZhao/dsh-mobile-plugin/releases/latest/download/dsh-mobile-plugin.tgz
+```
+
+这种方式同样不运行构建脚本，适合无法访问 npm registry 的机器。
+
+### Git 源码
 
 ```bash
-pnpm add https://github.com/EarhartZhao/dsh-mobile-plugin/releases/download/v0.2.41/dsh-mobile-plugin-0.2.41.tgz
+pnpm add github:EarhartZhao/dsh-mobile-plugin
 ```
 
-打 tag 时 CI（`.github/workflows/release.yml`）会 `pnpm pack` 出带 `lib/` 的包，把 `dsh-mobile-plugin-<version>.tgz` 与版本无关的 `dsh-mobile-plugin.tgz` 一起挂到该 tag 的 Release。装它不需要任何 `allowBuilds`，`…/releases/latest/download/dsh-mobile-plugin.tgz` 永远指向最新稳定版（带 `-rc` 的 tag 标成 pre-release，不会顶掉它）。控制台的「检查更新」认这种装法：更新时把 URL 里的 tag 换成最新版本，文件名里嵌的旧版本号一并替换（`src/update.ts` 的 `releaseAssetSpec`）——不换 URL 就换不掉 pnpm 的 integrity，会拿回旧字节。代价是那台机器得够得着 GitHub（源码 tarball 走 codeload、资产走 releases，两个域名）。
+Git 安装会执行 `prepare` 构建。pnpm 10+ 首次会以 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` 拒绝，并按 commit 给出精确的 `allowBuilds` 键。新机器优先使用 npm 或 Release 包，避免每个 commit 都重新批准构建。
 
-### 方式 C：git 源码（每台机器、每个 commit 都要批准一次构建）
+<details>
+<summary>开发机使用 link: 引用本仓库</summary>
 
-```bash
-pnpm add github:EarhartZhao/dsh-mobile-plugin          # 或 https://github.com/EarhartZhao/dsh-mobile-plugin.git
-```
-
-仓库 `.gitignore` 忽略 `lib/`，所以本包用 `prepare` 在安装时现场编译。pnpm ≥10 默认拦下依赖的构建脚本：第一次装必然失败（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），并打印一条带 spec 与 commit 的精确键，把它抄进 profile 的 `pnpm-workspace.yaml` 再装一次：
-
-```yaml
-# $DSH_HOME/profiles/<profile>/pnpm-workspace.yaml
-allowBuilds:
-  'dsh-mobile-plugin@https://codeload.github.com/<owner>/dsh-mobile-plugin/tar.gz/<sha>': true
-```
-
-这条键跟着 **commit** 走，**每发一个新版本都会再来一次**——所以给别人机器装优先 A 或 B。细节见 [00-plugin-plan.md](docs/00-plugin-plan.md#从-git-安装prepare-补上缺失的构建2026-09-30)。
-
-### 方式 D：开发机用 `link:` 引用本仓库
+在 profile 的 `package.json` 中使用：
 
 ```jsonc
-// $DSH_HOME/profiles/<profile>/package.json
 {
-  "dependencies": { "@dsh-earhartzhao/dsh-mobile-plugin": "link:<本仓库路径>" }
+  "dependencies": {
+    "@dsh-earhartzhao/dsh-mobile-plugin": "link:<本仓库路径>"
+  }
 }
 ```
 
-必须用 `link:` 而不是 `file:`：`file:` 是打包拷贝，源码改动后 pnpm 不重打包，旧副本会静默残留；`link:` 指回仓库活目录（`nats`/`qrcode` 从仓库 `node_modules` 解析，`@deepseek-ai/cordis` 这些 peer 靠 `Symbol.for` 全局符号与宿主互操作）。另外宿主启动时会按 profile 依赖做一次同步安装，pnpm 可能把它物化成**副本**而不是 junction——副本让后续源码改动不生效，症状是插件版本不跟随或 `/mobile-bridge` 404，在 profile 目录里重跑一次 `pnpm install` 即可恢复成 junction。**Windows 上用 `link:` 时本仓库 `node_modules` 必须无符号链接**：profile 的 `nodeLinker` 是 `hoisted`，每次安装都会复制整个仓库目录，复制里遇到符号链接就要重建，而非提权的 dsh 宿主没有建符号链接的权限，会以 `ERR_PNPM_EPERM` 失败（界面只显示「没有写入权限，无法安装」）。本仓库因此在 `pnpm-workspace.yaml` 固定 `nodeLinker: hoisted`，别把它删掉。
+使用 `link:`，不要使用 `file:`。`file:` 会复制当前内容，源码变化后 pnpm 不会自动重打包。Windows 上还要保持本仓库的 `node_modules` 没有符号链接；本仓库因此固定 `nodeLinker: hoisted`。
 
-### 装完必须「启用」
+</details>
 
-bundle 的 patch 层只在包名被列进 profile 的 `dsh.profile.bundles` 时才应用——插件页的「启用」写的就是这个列表，手工装的话就自己加进去。没启用时那一行根本不存在，`/mobile-bridge` 会直接 404，宿主启动日志里则是一句 `skipping profile bundle "@dsh-earhartzhao/dsh-mobile-plugin"`（如果原因写的是 `declares no dsh.bundle`，意味着 profile 里物化的那份包是旧副本，见方式 D）。
+### 安装后必须启用
 
-装好后 `mobile-bridge` 这一行由包自带的 patch 提供（只带非密默认值 `natsUrl`；凭证与 `instanceId` 都留空，实例 ID 留空表示「为这次安装自动生成一个」，见[实例 ID 怎么来的](#实例-id-怎么来的)）。**每个部署的值用 profile patch 按 id 覆盖**：写成 `- id: mobile-bridge` 加 `name: @dsh-earhartzhao/dsh-mobile-plugin` 加 `config:`，**不要再套 `insert:`**——无 id 的 insert 是追加，会和包自带那行变成两行同 id。控制台「保存」写的是**同一个 profile patch** 里那条覆盖行的 `config:`（宿主 `configEditor` 落盘），优先于组合层；因为字段都声明为 schema-volatile，保存不会重启宿主，插件就地重建 NATS 桥。
+包被加入 profile 依赖还不够。插件页里的「启用」会把包名写进 `dsh.profile.bundles`，包内 `cordis.patch.yml` 提供的 `mobile-bridge` 行才会生效。
 
-**旧写法由插件自动修正。** 如果 profile 是用 `insert:` 手工挂的这一行（早期文档和从 `$DSH_HOME/settings.yaml.imported` 搬迁都这么写），宿主的整包与行开关都管不了它：包名不在 `dsh.profile.bundles` 里，所以整包开关是关的；行开关只在整包启用时才渲染，于是也看不到；点卸载则直接报 `bundle-in-use`，因为这一行不是组合包提供的，关掉组合包它仍然在。插件加载时会把这种形态改回组合包形态，分两步、只改 profile 的两个文件、配置值一个不丢：① 把包名补进 `dsh.profile.bundles`（这一条到下**一次启动**才生效，本次不动正在运行的行）；② 重启后行已由组合包提供，再把 profile patch 里的 `insert` 改成按 id 的覆盖行。关掉配置项 `autoMigrateProfile` 可以让插件完全不碰 profile 文件，改由控制台页上的「修复安装形态」按钮手动触发。
+没启用时 `/mobile-bridge` 会直接返回 404。装好后如果仍显示「declares no dsh.bundle」，通常是 profile 里物化了旧副本；在 profile 目录重新执行 `pnpm install`。
 
-### 升级之后要重启 dsh
+<details>
+<summary>从旧裸包名 dsh-mobile-plugin 迁移</summary>
 
-换包在运行中的进程里**不会自动生效**：宿主始终用启动时加载的那份 JavaScript，插件管理器对 profile 里已存在的包一律返回 `restart-required`，而它的 HMR 明确忽略 `node_modules`（`packages/boot/hmr`）。插件页会显示一句「更改将在下次启动生效」，但如果你是在终端里 `pnpm add` 升的版本，那条路上没有任何提示——表现就是「版本号看着是新的，功能却没变」。
+`0.2.27` 起包名改为 `@dsh-earhartzhao/dsh-mobile-plugin`。旧 profile 里按包名断言的覆盖行不会自动匹配新包，Hub 配置会静默失效。
 
-所以升级后请重启 dsh：终端里起的按 Ctrl+C 再运行 `dsh web`；桌面版用菜单「重启应用与 Host」。控制台会在版本对不上时自己说明这件事（见 [0.2.31](#移动端兼容与版本记录)）：「插件版本」那行旁边出现红字「磁盘上已装 X，当前运行的是 Y——重启 dsh 后新版本才生效」。看到它就重启，重启后这行字会消失。
-
-### 从裸包名迁移（0.2.26 及更早装过的话）
-
-0.2.26 之前包名是 `dsh-mobile-plugin`，0.2.27 起是 `@dsh-earhartzhao/dsh-mobile-plugin`（npm 组织只收 scoped 包）。这一步**重装不够**：profile 里那条覆盖行是**按 id 加包名断言**匹配的（宿主 `packages/boot/plugin-manager/README.md`：*Matching uses the entry id and any module-name assertion*），裸名的 `name: 'dsh-mobile-plugin'` 换了包就不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 会**静默失效**——而且插件自己修不了，失配的那一轮里插件根本没被加载。停掉 dsh 后跑一次迁移脚本即可：
+先停止 dsh，再运行：
 
 ```bash
-# 先停掉 dsh；脚本会把 dsh.profile.bundles 里的裸名原地换成 scoped 名
 node scripts/migrate-to-scoped.mjs ~/.dsh/profiles/web
 ```
 
-脚本做四件事：装 scoped 包、把 `dsh.profile.bundles` 里的裸名**原地**换掉（列表顺序就是配置优先级，不能改位置）、改写 profile patch 里每一处 `id: mobile-bridge` 行的 `name`（顶层覆盖行与 `insert:` 里的行都改，注释不丢）、移除旧依赖。改 patch 之前会把原文件备份成 `cordis.patch.yml.bak`（那里面有明文密码）。只改文件、安装自己负责就加 `--no-install`；换安装源用 `--spec <spec>`，默认是 npm 上的 scoped 包。
+脚本会安装新包、原地替换 `dsh.profile.bundles` 中的旧包名、修正 `id: mobile-bridge` 行的 `name`，并移除旧依赖。修改前会备份 `cordis.patch.yml`；备份中含有明文密码，不要提交。
 
-### 手工写 profile（不用插件页）
+</details>
 
-在 `$DSH_HOME/profiles/<profile>` 里做三件事：把本包加成依赖、把包名加进 `dsh.profile.bundles`、在 profile 自己的 `cordis.patch.yml` 写一条**按 id 的覆盖**：
+### 升级后重启 dsh
 
-```jsonc
-// package.json
-{
-  "dependencies": { "@dsh-earhartzhao/dsh-mobile-plugin": "link:<本仓库路径>" },
-  "dsh": { "profile": { "bundles": [
-    "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@dsh-earhartzhao/dsh-mobile-plugin"
-  ] } }
-}
+宿主始终使用启动时加载的 JavaScript。升级插件后，磁盘上的版本可能已经是新版本，但运行中的仍是旧代码。
+
+从 `0.2.45` 起，控制台更新按钮可以直接完成升级；如果宿主返回 `already-installed`，插件会自动执行一次替换，**不需要用户先卸载再安装**。升级完成后仍需重启 dsh：
+
+- 终端启动：按 `Ctrl+C`，重新运行 `dsh web`。
+- 桌面版：使用菜单「重启应用与 Host」。
+
+控制台会在「插件版本」旁提示磁盘版本与运行版本不一致。
+
+## 首次配置
+
+手机使用插件里配置的 Hub 凭证，App 不内置任何账号。因此必须先配置插件，再生成二维码。
+
+### 1. Hub 地址与账号
+
+打开「侧边栏 → 插件 → `@dsh-earhartzhao/dsh-mobile-plugin`」，或访问：
+
+```text
+http://127.0.0.1:3080/mobile-bridge
 ```
 
-```yaml
-# cordis.patch.yml：这一行由组合包提供，这里只覆盖它的配置
-- id: mobile-bridge
-  name: '@dsh-earhartzhao/dsh-mobile-plugin'
-  config:
-    natsUrl: 'nats://127.0.0.1:4222'
-    hubWssUrl: 'wss://<hub-host>:8443'
-    hubUser: '<c-end 账号>'
-    instanceId: 'home-mac'      # 留空 = 自动为这次安装生成一个；同一 Hub 上每台机器必须不同
+Hub 地址可以填写完整的 `wss://<host>:8443`，也可以只填主机或 IP。缺 scheme 时自动补 `wss://`，缺端口时自动补 `8443`。
+
+### 2. Hub CA
+
+手机不内置任何 CA，信任锚来自二维码。自签 Hub 必须配置 `ca.crt`。
+
+- 已经有 `ca.crt`：直接粘贴并保存。
+- 不知道 CA 在哪：点击「从 Hub 获取 CA」。
+- Hub 只发送叶子证书：按钮会给出在 Hub 上拼 fullchain 的命令。
+
+CA 是公开材料，不包含私钥；`ca.key` 应留在管理机，不能上传到 Hub。
+
+### 3. 本机 NATS Leaf
+
+点击「启动本地 NATS」。插件会先探测 `natsUrl`，端口已监听时直接复用；否则启动已经安装好的 `nats-server`。
+
+查找顺序：
+
+1. `NATS_SERVER_PATH` / `NATS_CONFIG_PATH` 环境变量。
+2. 控制台「手动指定路径」。
+3. `$DSH_HOME/mobile-bridge/`、`~/.nats-leaf/`、`~/.config/nats/`。
+4. 平台常见目录与 `PATH`。
+
+新电脑还没有 `nats-server` 和 `leaf.conf` 时，把 [docs/04-ai-onboarding.md](docs/04-ai-onboarding.md) 整页交给这台电脑上的 AI，按清单安装并完成自检。
+
+### 4. 测试与配对
+
+「测试 Hub 账号」会逐段检查：
+
+| 检查项 | 失败时通常意味着 |
+| --- | --- |
+| `local` | 插件没有连上本机 NATS |
+| `credentials` | Hub 账号或密码错误 |
+| `hub-path` | 本机 Leaf 没有桥接到 Hub |
+| `certificate` | 二维码 CA 与 Hub 实际证书不匹配 |
+
+全部通过后点击「生成配对二维码」，用 App 扫码。凭证或 CA 未配置时不会发码，避免手机拿到一个必然失败的二维码。
+
+## 实例 ID
+
+`instanceId` 是这台安装在 Hub 上的命名空间：
+
+```text
+svc.dsh.<instanceId>.<method>
+evt.dsh.<instanceId>.<eventKey>.mux
 ```
 
-依赖用 `link:<本仓库路径>`（开发机）或 git/tarball/npm spec（其它机器）。
+字段留空表示自动生成。第一次启动时会生成 8 位 ID（4 位毫秒时间戳 + 4 位随机），写入 `$DSH_HOME/mobile-bridge/instances.json`。
 
-## 首次配置（顺序不能颠倒）
+- 同一台电脑上的不同 dsh profile 各自拥有独立 ID。
+- 升级、重装、重启不会改变 ID。
+- 修改 ID 或更换安装路径后，已配对手机需要重新扫码。
+- 多个实例共用同一个 ID 会互相抢答，事件也会串流。
 
-手机连 Hub 用的是**插件里配置的 Hub 账号凭证**——它随配对二维码下发，App 不内置任何账号。所以首次必须先配置、再发码：
+## 凭证与配置分层
 
-1. 打开**侧边栏 → 插件 → `@dsh-earhartzhao/dsh-mobile-plugin`** 的配置区（dsh 0.1.7 起插件配置从「设置」搬到了插件页，旧的 `settings.plugin.item` 卡片槽位已退役；也可以直接打开回环控制台 `http://127.0.0.1:3080/mobile-bridge`）。页面最上面是**开箱清单**，四步按顺序排好、做完一步就打个勾：
-   **1 填 Hub 凭证 → 2 拿 CA 证书 → 3 启动本机 NATS → 4 手机扫码**。控制台的清单会点名还差哪几项。
-2. **1 连接 Hub**：填 Hub 地址、账号、密码。密码是 `role('secret')` 字段，明文落在 profile 的 `cordis.patch.yml`；回环控制台会把已保存的密码预填并默认明文显示（带「隐藏」切换），方便当场核对是不是 Hub 上那个值——非本机请求只拿到"是否已配置"（点「显示」时才走一次 `/api/reveal`）。Hub 地址可以直接粘 `wss://<host>:8443`，也可以只填主机或 IP：缺 scheme 补 `wss://`，`wss://` 缺端口补 `8443`。
-3. **同一处的「Hub CA 证书」字段**（二维码要带给手机的信任锚，和 Hub 凭证在一起，不再折叠在别的块里）：手边有 `ca.crt` 就粘进去；没有就点**「从 Hub 获取 CA」**——它从 Hub 的 TLS 链里读出 CA、再用它做一次带校验的握手，验过才填进字段（前提是 Hub 的 `cert_file` 里带着 CA，见 [docs/03 §2.6](docs/03-nats-self-host.md)；只有叶子时按钮会给出 Hub 上的那条命令）。填好保存。
-4. **2 本机 NATS（Leaf）**：点「启动本地 NATS」，状态变「已连接」。这台电脑还没有 `nats-server` 与 `leaf.conf` 时先读 [docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)。
-5. **3 配对新设备**：点「生成配对二维码」，用手机扫码。
+| 层 | 位置 | 用途 |
+| --- | --- | --- |
+| 组合层 | 包内 `cordis.patch.yml` | 非密默认值与 `mobile-bridge` 行 |
+| 用户层 | profile 的 `cordis.patch.yml` | 本机 Hub 地址、账号、CA 与实例名 |
+| 凭据层 | 环境变量或 `dsh-credentials-local` | 推荐的正式密码托管方式 |
 
-任一凭证没配时，「生成配对二维码」按钮会被禁用，`/mobile-bridge/api/pair` 也会直接返回未配置的字段清单。这是刻意的：否则二维码虽然扫得进 App，手机连 Hub 只会拿到 `Authorization Violation`，还白白占掉一个待核销配对码。
-
-### 「测试 Hub 账号」查的是整条链路
-
-配对跨三段，任何一段断了手机都会失败，所以这个按钮逐段检查、分别给结论：
-
-| 段 | 含义 | 断了的表现 |
-|---|---|---|
-| `local` | 本机移动端桥 → 本机 NATS | 手机扫码连不上宿主 |
-| `credentials` | 本机 → Hub（二维码里那组账号） | 手机报 `Authorization Violation` |
-| `hub-path` | Hub → 本机实例（本机 Leaf 是否已桥接到 Hub） | 手机报 `503`（NATS 无人响应） |
-| `certificate` | 二维码要带的 CA ↔ Hub 实际出示的证书 | 手机卡在 TLS 握手，报「无法连接公网 NATS」 |
-
-第三段是**只有凭证检查看不见**的故障：账号密码都对、插件状态也显示「已连接」（那只说明它连上了本机 NATS），但本机 Leaf 没连上 Hub，于是 Hub 上 `svc.dsh.{instance}.pair` 没有订阅者。检查的做法是另开一条直连 Hub 的连接，请 Hub 去请求本机实例的配对主题——复刻手机扫码走的那条路：有应答就是通，`503` 就是 Leaf 那段断了。
-
-第四段是**只有手机能遇到、也只有手机看不见原因**的故障：App 不内置任何 CA，信任完全来自二维码里的 `ca` 字段，所以 Hub 用自签证书而字段是空的，每次扫码都会死在握手上，手机上只显示一句「无法连接公网 NATS」。因此 CA 字段为空时这个按钮不会直接放过：它会拿系统信任库向 Hub 的 WSS 端口做一次握手，公共 CA 签发的报 `public-ca`（二维码不带证书也能连），自签的报告「手机每次扫码都会卡在 TLS 握手上」并把这一行判为失败。
-
-那种情况下的正路是旁边的**「从 Hub 获取 CA」**：一次握手取回链里的 CA，一次校验证明它确实是这个 Hub 用的，然后填进字段——第二台机器不必再手工搬 `ca.crt`。Hub 只发叶子证书时它取不到，这时它会给出 Hub 上要跑的那条命令（把 `ca.crt` 拼进 `cert_file`），而不是让你去猜。
-
-生成二维码时会自动跑这套检查：凭证被拒直接拒绝发码；`hub-path` 不通只警告不拦截，因为 Leaf 可能自行重连，而配对码 120 秒内都还有救。
-
-### 本机 NATS：配置页第 2 步的「启动本地 NATS」
-
-这个按钮先探测 `natsUrl` 的端口，已经在监听就直接复用（本机 Leaf 可能是手工、服务管理器或上一次 dsh 启动的，那种情况根本不需要配置文件）；否则在本机启动 `nats-server -c <配置文件>`，随后插件自动连接 `natsUrl`。**两条路径都不写死**，按 `NATS_CONFIG_PATH` / `NATS_SERVER_PATH` 环境变量 → 控制台「手动指定路径」里的 `leaf.conf 路径` / `nats-server 路径` 字段 → 自动查找的顺序定；自动查找依次看 `$DSH_HOME/mobile-bridge/`、本项目的 `~/.nats-leaf/`（配置与二进制同目录）、`~/.config/nats/`，再按平台补 macOS 的 Homebrew 前缀、Linux 的 `/etc/nats`、Windows 的 `C:\\nats`（可执行文件最后回落到 `PATH`）。控制台状态行显示最终选中的两条路径以及它们是否存在，找不到时报错会列出查找过的全部候选。该操作仅允许回环请求。
-
-新电脑上还没有这两样东西时，这个按钮帮不上忙——它只启动**已经装好**的 `nats-server` 与 `leaf.conf`。
-装法与自检顺序见 [docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)：那份文档就是为「整页交给这台电脑上的
-AI，让它照着做完」写的，控制台第 2 步那一区和开箱清单的第 3 条都放了指向它的链接。
-
-### 实例 ID 怎么来的
-
-`instanceId` 是这台机器在 Hub 上的**命名空间**：RPC 走 `svc.dsh.<id>.<方法>`，事件走 `evt.dsh.<id>.<设备>.mux`，
-配对二维码里带的 `instance` 就是它。**字段留空 = 自动**：
-
-- 这次安装第一次启动时生成一个 **8 位 ID**（4 位毫秒时间戳 + 4 位随机，`[0-9a-z]`，形如 `n4q7x82b`），
-  写进 `$DSH_HOME/mobile-bridge/instances.json`，按「这份包是从哪个 profile 加载的」分键存放；
-- 所以**同一台机器上跑多个 dsh 实例，各自有一个 ID**（它们共享 `$DSH_HOME`，靠这个键区分）；
-- 值不在包里、也不在 profile patch 里，所以**升级、重装、重启都不变**；profile 换目录或那句 `link:` 换路径才会换。
-
-**填了就以填的为准**（也是唯一需要在多实例间手动区分的场景：多个 profile 用 `link:` 指同一个仓库，它们的加载路径相同，
-自动键也一样）。控制台「实例 ID」那行会自动值后面标注「（本次安装自动生成）」。
-
-**为什么每台必须不同**：两个实例用同一个命名空间时，`svc.dsh.<id>.>` 是**普通订阅**——一条请求两边都收到、
-都执行、各自回复，手机只认最先到的那条，可能拿到另一台机器的结果，甚至拿到那台的 `mobile-unauthenticated`；
-事件也会互相串。0.2.34 及更早的默认值是字面量 `home`，等于把每台没改过这个字段的机器塞进同一个命名空间，
-所以 0.2.36 起改为留空自动生成。
-
-改了实例 ID 会让**已配对的手机需要重新扫码**（二维码里的 `instance` 变了，手机还在打旧命名空间）。
-
-### 插件自述与诊断（App 侧）
-
-plugin 0.2 起提供可选的 `mobile.inventory`（需要设备 token），桥接宿主 `pluginInventory.list()`；App 在 `features` 含 `plugin-inventory` 时会在设置页显示只读插件清单。宿主未挂载清单服务时，设置页显示“当前桥未提供插件清单”，不影响连接和其它功能。
-
-`mobile.health` 是需要设备 token 的只读诊断 RPC，返回当前桥连接状态、实际加载路径、构建 ID、实例 ID、有效设备数、启动及最近重连时间。NATS 连接要在 `flush()` 成功后才标记为已连接；Gateway 事件流失败时在同一 NATS generation 内退避重开，避免启动期服务抖动反复重建桥，并在对应流重新取得 ready/baseline 后清除已经恢复的最近错误。Web 设置卡显示同一份状态；响应和复制诊断均不包含 NATS 密码或设备 token。
-
-## 凭证放哪：配置分层与推荐做法
-
-各层各司其职：
-
-| 层 | 位置 | 该放什么 |
-|---|---|---|
-| 组合层 | bundle / profile 的 `cordis.patch.yml` | 结构与非密默认值：`natsUrl`、`hubWssUrl`、`instanceId`、TTL。**不放真实密码** |
-| 用户层 | profile 自己的 `cordis.patch.yml` 里 `- id: mobile-bridge` 覆盖行的 `config:` | 本机用户自己的值；控制台「保存」写的就是这一层（宿主 `configEditor` 落盘） |
-| 引用层（官方推荐） | credentials seam：`dsh-credentials-local`（`.credentials.yaml`）、进程环境或 `.env` | 真正的密文；配置里只留引用名 |
-
-`hubPass` 是 `z.string().role('secret')`（见 `src/config.ts`）。`role('secret')` 只保证**不把默认值带进表单、不下发到 wire**——宿主 `redactSecrets` 会把值换成占位，所以非本机请求只拿得到「是否已配置」。值本身仍以明文写在 profile 的 `cordis.patch.yml`（就是上面那条覆盖行），跟着 profile 一起被备份/搬迁，别把这份文件提交到任何仓库。
-
-dsh 另有一条专门的凭据 seam（`docs/subsystems/credentials.md`），原则是「**secret 不进配置**」：settings 与 `cordis.yml` 只写引用名（环境变量名），值由 `@deepseek-ai/dsh-credentials-local` 这类 provider 持有，消费方按需 `ctx.credentials.resolve(ref)`，配置 UI 只用 `describe(ref)` 报「是否配置 / 来源 / 可写」，永不回显值。需要同步、共享或渲染配置 UI 的部署，官方推荐走这条。
-
-按 seam 迁移的方向（**尚未实现**）：
-
-| 现在 | 迁移后 |
-|---|---|
-| `hubPass: z.string().role('secret')` | `hubPassRef: z.string().default('DSH_MOBILE_HUB_PASS')`，值走 `ctx.credentials.set/unset` |
-| 控制台预填并明文显示密码 | 控制台显示「已配置 / 来源 / 可写」+「设置 / 清除」按钮 |
-| 启动时读一次配置 | 每次发码与 hub-check 前 `resolve` 一次，轮换凭证无需重启 |
-
-代价也要说清楚：现在的回环控制台会把已保存的密码预填、默认明文显示，方便当场核对是不是 Hub 上那个值；改走 seam 之后这条路没有了，只能看到「已配置」，值只能由 bridge 自己在发码时 resolve。
+控制台「保存」写的是 profile 覆盖行。`hubPass` 标记为 `secret`，非本机请求只能得知是否已配置；但当前值仍会以明文保存在 profile 文件中，因此不要提交或公开分享该文件。
 
 ## 已知边界
 
-- **大文件不出网桥。** NATS 单条消息约 1 MiB：`file.read`/`file.bytes` 只传有界的页与窗口，而宿主的 `/api/file` HTTP 路由位于宿主机本地，手机经公网 Hub 够不到。要支持大文件需要 Hub 侧中继或局域网专用下载端点（带设备 token），目前未实现；App 对超出窗口的图片会明确提示，而不是渲染半张图。
-- **目录列表没有游标。** `workspaceFiles/list` 按宿主 `maxEntries`（默认 2000）截断，插件只透传 `truncated`；缓解方式是调大宿主的 `workspaceFiles.maxEntries`。真正的续读需要上游先给文件系统 seam 的 `listDir` 加上限，再给 Remote 加 offset/游标。
-- **CA 指纹没有强制。** 配对二维码里的 `caFp` 会被保存并出现在诊断里，但 RN 的 WebSocket 拿不到对端证书，校验需要原生实现；诊断 payload 显式带 `caFpEnforced: false`，不要把它当作已生效的信任锚。
-- **后台推送未接入。** 审批/提问提醒目前只在 App 前台有效；系统级推送需要 FCM/APNs 凭据与宿主到推送服务的链路，插件只有 NATS 出站，没有可用凭据。
-- **变更流不是文件系统监视器。** 宿主只把它自己 instrumented 的 `fs/observed` 操作（agent 工具读写）变成 `workspace-files/change` 帧，不监听操作系统；别的程序在宿主上直接改文件不会触发刷新。真机联调实测确认，探针见 `scripts/watch-probe.mjs`。
+- **大文件不走 NATS。** Hub 单条消息约 1 MiB，插件只传有界文件窗口；更大的文件需要独立下载端点。
+- **目录列表没有游标。** 宿主默认最多返回 2000 项，超出时只标记 `truncated`。
+- **CA 指纹尚未强制校验。** App 会保存并展示指纹，但 RN WebSocket 暂时拿不到对端证书。
+- **没有系统级后台推送。** 审批与提问提醒目前只在 App 前台有效。
+- **文件变更流不是操作系统监视器。** 只覆盖 dsh 自己记录的读写事件。
 
-## 联调验收
+## 开发与验证
 
-两脚本对**运行中的宿主 + 本地 NATS**做端到端验收（token 用 `DSH_MOBILE_TOKEN` 或 `DSH_MOBILE_TOKEN_FILE`，后者由 `fake-app.mjs` 首次配对后写入，避免反复占用 `maxDevices`）：
+需要 Node.js 22+ 与 pnpm 11。本地集成测试还需要 `nats-server`。
 
-```sh
-node scripts/fake-app.mjs      nats://127.0.0.1:4222 <pairCode> home   # 门控 + mobile.info/goal.get/feedback.list/file.list|read|stat|watch|unwatch
-node scripts/watch-probe.mjs   nats://127.0.0.1:4222 home <scratchPath> # file.watch → ready 转发 → file.unwatch 释放
+```bash
+pnpm install
+pnpm run typecheck
+pnpm run typecheck:client
+pnpm test
+pnpm run build
 ```
 
-## 移动端兼容与版本记录
+对运行中的宿主做端到端验收：
 
-`mobile.info` 是插件自有 RPC（需要设备 token），返回 `pluginVersion`、`mobileApi` 和 `features`。App 0.0.3 起要求 plugin 0.2.2、`mobileApi: 2`，并校验 Typert Remote v2、分页历史、`session/control`、`workspace/follow`、`$events/result` 和 `file-uploads` 等能力。0.2.3 起额外声明可选能力 `workspace-files`、`goal-state`、`open-path`，0.2.4 加 `workspace-watch`，0.2.5 加 `workspace-stat`，0.2.6 加 `message-feedback`，0.2.7 加 `workspace-unarchive`；它们缺席时 App 只隐藏对应入口（例如浏览器不自动刷新、预览不比对版本直接重读、消息动作条不出现评分项），不判不兼容。这个字段独立于 `host.describe.version`——后者表示宿主 dsh 版本，不能用于判断移动桥能力。
+```bash
+node scripts/fake-app.mjs nats://127.0.0.1:4222 <pairCode> home
+node scripts/watch-probe.mjs nats://127.0.0.1:4222 home <scratchPath>
+```
 
-0.2.45 修好 dsh 0.2.1 带 HMR 时的插件更新：宿主不允许对已安装的 registry 包直接调用 `installBundle`，会返回 `already-installed`。现在更新按钮先按正常路径直接安装；只有宿主明确拒绝时才在后台自动完成替换，用户仍然只点一次“更新”，不需要手动卸载。移动端 wire 不变。
+发布由 `v*` tag 触发。CI 会校验 tag、`package.json`、`src/bridge.ts` 的 `PLUGIN_VERSION` 与测试断言一致，然后构建并发布 tarball。发布流程见 [AGENTS.md](AGENTS.md)。
 
-0.2.42 把 0.2.41 的修复补到插件面板上，移动端 wire 不变：0.2.41 让「从 Hub 获取 CA」和「测试连接」把表单里**当前**的值一起发上来，但只改了独立控制台（`/mobile-bridge` 那一页），dsh 插件页里的那份面板仍在裸调这两个接口——于是新机器上最典型的一幕又出现了：地址明明填在框里，点「从 Hub 获取 CA」却回一句「「Hub 地址」还没有填」，而第一次保存又必须要这张证书。现在面板跟独立控制台发同一个形状的 `{ hubWssUrl, hubUser, hubPass }`（`src/client/index.tsx` 的 `hubFormValues`），两条路彻底一致。
+## 文档
 
-0.2.41 修掉新机器第一次配置时卡在「从 Hub 获取 CA」，移动端 wire 不变：这个按钮（和右上角「测试连接」）过去读的是**已保存**的配置，所以在一台还没保存过任何东西的机器上，地址只活在表单里，服务器读到空串，回一句「无法把「」当作 Hub 地址」；而这一步本身是个死循环——没有 CA，「保存并测试」必然报「证书不是公共 CA 签的」，取 CA 又要先保存过。现在两个只读按钮把表单里**当前**的值一起发上来，路由优先用它们，空字段仍回落到已存的值（没点「显示」的密码框发的就是空串，不能因此清掉已存的密码）；写入路径不变，保存写的仍是你点保存的那份。文案上把「一格没填」与「填了但解析不了」分开，前者不再把空字符串引成「」；[docs/03](docs/03-nats-self-host.md) 与 [docs/04](docs/04-ai-onboarding.md) 同步写明按钮拨的就是此刻填的地址、不必先保存，并修掉文档里写作「保存并连接」而控制台实际叫「保存并测试」的漂移。
+| 文档 | 内容 |
+| --- | --- |
+| [00-plugin-plan.md](docs/00-plugin-plan.md) | 定位、架构、安装方式与决策记录 |
+| [01-auth-pairing.md](docs/01-auth-pairing.md) | 双层凭证、配对流程与 token 存储 |
+| [02-nats-server.md](docs/02-nats-server.md) | 复用现有 NATS Hub 的改动清单 |
+| [03-nats-self-host.md](docs/03-nats-self-host.md) | 从零搭建 Hub、TLS、Leaf 与验收 |
+| [04-ai-onboarding.md](docs/04-ai-onboarding.md) | 新电脑接入清单，可直接交给 AI 执行 |
 
-0.2.39 修掉「App 列表一直挂『待处理』、进去还得再选一次，dsh 端却正常」：宿主结掉一个审批/提问时，只把 `cancel` 发给**其他**投递目标——做答的那个客户端会先被移出投递集合，于是手机答完卡以后桥自己也收不到 `question/resolved`／`approval/resolved`。卡片在手机上被乐观地删掉，桥的重放集合却一直留着它，App 每次重连 `hello` 都会把这张已结的卡复活，列表的「待处理」于是永远清不掉。现在桥在自己拿到 `$events/result` 成功回包时补发那条 resolution，App 的 store 与桥的重放集合一起收敛；另外 `$events` 换代（宿主重连、桥重建）时整个重放集合作废——宿主会把仍然挂着的请求重新投递给新注册，所以有效卡片不会漏，只是不再复活已经结掉的。
-
-0.2.37 修掉「手机上只显示一坨 zod 报错」这一类问题，移动端 wire 不变：宿主自己的失败码是带命名空间的（`session/agent-busy`、`gateway/lookup-not-found` …），App 解析失败用的是**冻结**的那套封闭联合（`agent-busy`、`internal` …）。只要有一个码不在那套里，整条响应就解析失败，App 拿到的是 zod 的问题清单，宿主那句真正的说明反而丢了——用户在子智能体会话里点开「命令」看到的就是这个。现在桥在转发前先把宿主的失败投影回冻结词汇：**有对应关系的保住身份与原文**（含 details 字段，缺字段就降级），没有对应关系的落到 `internal` 并把原码写在消息开头（例如 `workspace-file/not-found: no entry at "x"`），所以 App 一定解析得出来、也一定看得见原因。同一套词汇表加了守卫用例，typo 或漏改会在测试里挂掉。
-
-0.2.38 让手机输入框里能切「仅可查看 / 工作区内修改 / 完全权限」，移动端 wire 不变：宿主的 `permissions` 会话投影**只带选中值**（`currentValue`），可选名单与说明是另一个进程级 Remote（`permissionPresets/catalog`）——App 早先把投影当成「值 + 选项」一起读，那个 `options` 字段从来不存在，于是这个控件一次都没显示出来（旧版本只是静默缺一个入口）。白名单与 `remoteCall` 增加 `permissionPreset.catalog` → `permissionPresets/catalog`，能力位 `permission-presets` 让 App 在旧插件上不摆这个控件：读不到名单就不显示，而不是给一个设不上的开关。`/permission` 命令本身早就在白名单里，切换仍走它。
-
-0.2.36 解决「内容多的会话在手机上打不开、也看不出在加载」：`instanceId` 留空时改为**为这次安装自动生成**一个 8 位 ID（4 位毫秒时间戳 + 4 位随机，`[0-9a-z]`），存在 `$DSH_HOME/mobile-bridge/instances.json` 里按 profile 分键，升级、重装、重启都不变；控制台与插件页只读展示它，本机名称照旧可改——0.2.34 及更早的默认值是字面量 `home`，等于让每台没改过这个字段的机器共用一套 subject，同一个 Hub 上会互相抢答、事件互相串（见[实例 ID 怎么来的](#实例-id-怎么来的)）。同一次发布也修掉长会话读不出来：`session.history` / `subagent.history` 的回包按连接的 `max_payload`（Hub 是 1 MiB）裁剪，超出时丢掉**最旧**的记录并把 `hasMore` 置为真，App 从收到的第一条继续往前翻（页落地后自己续拉，顶部有进度与「暂停」），而不是整条读失败；连单条记录都放不下时把这条的长字符串截短再发，只有连截短都超限才回 `mobile-history-too-large`，由 App 显示「加载失败 + 重试」，不再留一个看起来是空的会话。
-
-同一次发布还把**首次配置**这一段重排：控制台与插件页顶部新增**开箱清单**，按 `1 填 Hub 凭证 → 2 拿 CA 证书 → 3 启动本机 NATS → 4 手机扫码` 列出四步，每步按状态打勾、跳转直接落到对应控件，未完成时汇总还差哪几项（那一行的链接做完后变成「查看」）。**Hub CA 证书**从「实例与证书」折叠块里搬到 Hub 表单内、紧跟密码之后，**本机 NATS 与「启动本地 NATS」**从「高级设置与诊断」里搬出来独立成第 2 步（带状态行、查找结果与 docs/04 的链接），两块都不再藏在折叠层或另一个标签页后面；面板标题带序号，配对提示相应改成「请先完成上面第 2 步」。
-
-0.2.35 收拢移动桥的设备身份与运行可靠性，并重做配置页的信息层级。控制台改成「连接 Hub / 配对新设备 / 已配对设备」工作台，把本机 NATS、安装形态、更新和运行诊断收进折叠的高级区；右上角增加运行总开关，停用后不连接 NATS、不发布事件，但本地控制台仍可访问。配对二维码增加 `version` 与 `expiresAt`，并携带持久化的 `gatewayId`、`gatewayName`；同一 App 安装用 `installationId` 重新配对会轮换 token、复用原设备行，不再制造重复设备。设备最近活动时间进入设备表；token 台账的并发写盘改为串行、临时文件原子替换，避免连续吊销/重命名时覆盖。
-
-设备表按 `installationId`（旧记录没有该字段时回退到去空格、忽略大小写的设备名）去重，同一台手机只留一行，吊销与删除都作用于整组，避免同名历史散成多行。已吊销记录的「删除记录」一步删除，不再弹二次确认。两个「刷新」按钮在请求期间显示「刷新中」并禁用，完成后回报刷新时间。高级诊断新增本机 NATS 运行状态：按配置的客户端口做 TCP 探测，直接显示「正在运行 / 未运行」以及是本插件启动还是外部进程，不再只报告配置文件是否存在。
-
-事件下行在保留共享主题兼容期的同时，为每台设备签发随机 `eventKey`，新 App 订阅 `evt.dsh.{instance}.{eventKey}.mux|host`。只有设备在 `hello` 回显正确 key 后才视为迁移完成；只要还有一个旧设备在线，插件继续双发共享主题，全部迁移后自动停止共享发布，避免不同手机之间串看实时会话。身份文件损坏时会明确报错而不是静默换号；设备 token 与 Hub 凭据仍不进入状态接口。
-
-0.2.6 另接入消息反馈：`feedback.list|put|delete` → `messageFeedback/list|put|delete`。宿主把 Like/Dislike 作为 durable 事实写入会话日志（`feedback/message-put|delete` 事件），并返回业务结果而非 Remote 错误；插件只做参数搬运，`ifVersion` 原样透传，冲突重试由 App 按返回的 `current.version` 完成。
-
-0.2.7 接入 `workspace.unarchiveSession` → `workspace/unarchiveSession`（dsh 0.1.6 新增的 Remote），把归档会话恢复到列表；白名单与 direct-request 映射同步更新，能力位 `workspace-unarchive` 让 App 在旧插件上隐藏该入口。
-
-0.2.8 适配 dsh 0.1.6-alpha.2 删除的 `session/control` 队列帧：宿主改为只发布会话的 `inbox` 投影（Web 端就读它），插件把该投影翻译回既有的 `session/queue` 帧，App 的队列 UI 与冻结 wire 都不用改；`inbox` 投影只在会话挂着活动 Agent 时存在，与 alpha.1 的 `queues[session]` 语义一致。同时把宿主 0.1.6-alpha.2 新增转发的 `plugin-manager/changed|install-state|install-log` 事件透传到既有的 `host/remote-event`（本身无需改动，只是登记在案），App 插件页据此免手动刷新。
-
-0.2.9 适配 dsh 0.1.7（`dsh-v0.1.7-rc.2` 及之后的 dev）四处破坏性变更，全部收在桥内，移动 wire 不变：
-
-1. `TypertGatewayWireStream.open` 在 signal 之前新增了 Client uplink 与 Peer，第三个位置参数从 signal 变成 uplink。插件按声明 arity 选择调用形状（`openEventStream`），旧宿主仍走三参数形式——否则宿主会拿 AbortSignal 当 uplink，`$events` 报 `signals[0] must be an instance of AbortSignal`，审批、提问与全部转发事件一起失效。
-2. `workspaceFiles/readBytes` 把字节窗口从顶层 `range` 移进 `options`，并把 `data` 从 base64 字符串改成原生字节；`readRelated` 被折进 `readBytes` 的 `options.baseFile`。插件改用新形状并把 `data` 重新编码成 base64，宿主回 `gateway/arguments-invalid` 或 `gateway/invocation-unavailable` 时自动退回旧形状（`readBytes` 顶层 range / `readRelated`）。
-3. `workspaceFiles/changes` 现在按**单个目标**（文件或某目录自身）watch，`path` 必填。`file.watch`/`file.unwatch` 因此接受可选的 workspace 相对 `path`（默认工作区根），桥按 (session, path) 保留最多 4 条流、LRU 释放；App 浏览目录时会带着当前目录重新挂流。
-4. `subagents/list` 被删除：子代理目录改为父会话的 `subagentCatalog` 投影（durable 事件 `subagent/catalog`），可由 `session/projections` 在不激活 Agent 的情况下读取。插件把投影行与 `session/list` 的 `running`/`agentAvailable`/`parentSessionId` 合成 App 冻结的目录（`kind`/`mode`/`label`/`activity`/`hasChildren`/`parentAvailable`）；宿主不认识 `session/projections` 时回退到旧的 `subagents/list`。
-5. `session/control` 的 jobs 基线表与 `{type:'jobs'}` 帧被删除，改为 `job` 命名空间（Service 名 `jobController`）的 `list` 流：整集替换、开流即首帧。插件在 App 打开某个会话时（`session.history`）挂一条 roster 流，翻译回既有的 `session/jobs` 帧，旧宿主仍走 control 帧。
-
-0.2.10 开始填 `session/event` 帧的 `view` 槽（`src/tool-views.ts`）：宿主进程内按 Agent scope 调用每个工具声明的 `presentCall`/`presentResult`，把 Terminal/Diff/Read/Search/Web 这些声明式卡片真正送给 App。此前该槽无人填——Web 端用自己的 `ui-tool` 卡片模型从工具名、参数与结果 `meta` 现场推导，手机没有工具定义，于是所有工具卡在真机上都退化成了原文。要点有二：
-
-1. 工具注册表按 **Agent scope** 注册（内置 `read`/`pwsh` 等都在 scope 层），只查 `ctx.tools.get(name)` 会得到"未注册"；桥用 `ctx.agents.get(sessionId)` 取该会话的 Agent 作为 scope，全局层仅作兜底。
-2. 不猜：无注册表、未注册、无 presenter、参数不是 JSON、presenter 抛错，一律返回"无 view"，App 回退原文；每种原因在宿主日志里各打一行（首次出现才打），便于定位"某个工具为什么显示成原文"。
-
-0.2.22 修好「控制台保存后不落盘、重启就回到空配置」的真 bug，移动端 wire 不变：
-
-1. 写入路径原来是 `settings.register(ns, schema, { base })`。dsh 0.2.0-rc.2 的 `settings` 服务（`SettingsForms`）没有这个方法——它按 profile entry 的 Config schema 自动派生命名空间——所以那句在 `ctx.inject` 回调里抛错被吞掉，插件退回内存分支，保存只改内存。现在走宿主既有的面：schema 里每个字段声明 `.volatile()`，保存改成 `settings.update('mobile-bridge', patch)`，由宿主 `configEditor` 写进 profile 的 `cordis.patch.yml`（按 id 的覆盖行）。
-2. 保存不再重启宿主插件：字段是 schema-volatile，宿主把新值**就地**提交进运行实例的配置引用并发 `loader/volatile-update`，插件重读引用、只重建 NATS 桥。`configure({ auto: false })` 让这个实例不出现在自动生成的设置页上——回环控制台仍是唯一表单，避免两份配置界面。
-3. 配置落盘位置随之改变：不再写 `$DSH_HOME/settings.yaml`（那是宿主早期版本的行为），而是 profile 自己的 `cordis.patch.yml`。
-4. 依赖面抬到宿主真正实现这条路径的版本：`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`@deepseek-ai/cosmokit ^1.8.5`（`.volatile()` / `isVolatile`）。
-
-0.2.14 在 dsh **0.2.0-rc.2**（2026-09-30 核对）上复核通过，**零破坏**：冻结移动 wire（36 文件）与 51 个 Remote endpoint 全部命中，移动端相关包无删除/重命名，durable 事件词汇表（`known-event-types.ts`）、宿主可转发事件名单（`remote-events.ts`）、会话格式（仍是 v4）与 `agent-tool-presentation` 均未变；`api/gateway` 只新增 `hasLiveClient()`，移动侧不依赖。区间内唯一实质变化在宿主 interaction：新增 `questions` 会话投影与 `ask_user_question` 的 timed 模式（`mode: 'legacy' | 'timed'`，默认 legacy；请求多一个可选 `wait`；超时后工具返回 `{ pending: true, callId }`，答复改为进 inbox 的 `user-question-reply`），当前没有 bundle 打开它，故移动端行为不变——若要接投影或补手机端倒计时 UI，见 dsh-mobile 的 `docs/04-feature-gap.md`。
-
-plugin 0.2.6 通过 `connection.createSharedFetchHandler('/api')` 与 `typertGateway` 接入 dsh 0.1.5-rc.1（0.1.3-alpha.1 起接入面未变）；一元调用映射到当前 Remote，`session/follow`/`page` 提供主会话和完整 subagent address 历史，`session/follow` 额外适配 assistant stream，`session/control`/`workspace/follow` 提供实时 baseline，审批与提问通过同一 `$events` generation 的 `$events/result` 核销。`file.upload` 将移动端的小文件 base64 请求映射到 `fileUploads/upload`，返回 Agent-scoped receipt 供后续 prompt 使用。0.2.3 起接入三组 0.1.5 新面：`goal.get` → `goals/get`（进程内 activation）、`file.list|read|bytes|stat|related` → `workspaceFiles/list|read|readBytes|stat|readRelated`（workspace 相对路径，作用域由 `workspaceFileScopeId` 解析到会话 workspace root；`readRelated` 以某文件目录为基准，`stat` 只取版本与大小）、`file.reveal` 与 `host.openPath` → `session/openWorkspacePath`（`reveal` 定位 / 默认应用打开）。0.2.4 再接入 `file.watch` → `workspaceFiles/changes` 流：插件为会话保持一条变更流，并把它作为 `workspace-files/ready|change|watch-error` 转发事件投到宿主域下行帧（复用已发布的 `host/remote-event`，因为新增 mux 帧类型会被 App 的冻结 schema 丢弃）；开流前用 `session/list` 的 `cwd` 把变更的绝对路径补成 workspace 相对 `path`，App 据此只刷新受影响目录，取不到 `cwd` 时该字段缺省、客户端按"位置未知"一律重列。变更流按 LRU 上限 4 条管理：超限时释放最早接入的会话，`file.unwatch` 供 App 关闭浏览器时显式释放，Host generation 结束时统一释放并在重连后按最近接入顺序重武装。宿主未挂载 `workspaceFiles` 时这些方法按 Gateway 错误原样回传，App 侧按可选能力隐藏入口。
-
-0.2.14 让这个包成为可被插件页管理的组合包（bundle），移动端 wire 不变：
-
-1. 包内新增 `cordis.patch.yml`，声明 `mobile-bridge` 那一行（只带非密的 `natsUrl` 与 `instanceId`，凭证留空）；package.json 补 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`，并把该文件加进 `files`。此前宿主在插件页 inspect 时会以「这个包没有声明组合包，不能作为插件管理」拒掉。
-2. 每个部署的 Hub 凭证仍由部署方提供：profile patch 按 id 覆盖这一行（`- id: mobile-bridge` + `name` + `config:`，不要用 `insert:`），或者装好后在控制台里填（同样写进 profile patch 的那条覆盖行）。
-
-0.2.13 三处收口，移动端 wire 不变：
-
-1. Hub 密码不再随每 5 秒的状态轮询下发：`/api/status` 只回「是否已配置」，新增 `POST /api/reveal`（走改状态那道门）供控制台点「显示」时按需取一次。密码此前常年挂在后台响应里，本机任意进程随时可以读到。
-2. 迟到回答的消解帧改成回真实结果：审批按 App 的词表回 `allowed-once`/`rejected`/`cancelled`/`unavailable`（此前一律 `cancelled`，把「允许一次」标成了取消），提问按 `answered`/`cancelled`；词表外的值仍降级为 `cancelled`，避免 App 的 schema 拒帧。
-3. 下行流重试改成指数退避（1 秒起、逐次翻倍、上限 30 秒），且一次故障只发一帧 `stream/error`（原来每次重试都发，流长期挂掉时每秒刷一帧）；流恢复后再次故障会重新计一次。
-
-0.2.12 收口一轮评审发现的问题，移动端 wire 不变：
-
-1. 回环控制台的每个 JSON 路由都要过统一的门：peer 必须是回环、`Host` 必须是本机名（挡 DNS rebinding）、`Origin` 必须同源；改状态的请求还要带 `x-dsh-mobile-console: 1` 和 JSON body（浏览器里属非简单请求，跨站页面无法盲发）。此前只有「启动本地 NATS」检查来源，改配置、吊销设备、发配对码三条路都没有。
-2. 「启动本地 NATS」改成按端口就绪判定：先探测客户端端口是否已在监听（已有 NATS 就不再起第二个进程），启动后等它真正开始监听；子进程提前退出会带回退出码和排查提示，不再把「进程随后退出」报成成功。
-3. 删掉配对码里从未自增的 `failures` 计数——`MAX_PAIRING_FAILURES` 是一道不存在的保护。实际保护是 32^8 的码空间、120 秒有效期、同时最多 3 个待用码。
-4. `session/follow` 流加上 16 条上限（LRU，按最近打开淘汰）：此前浏览大量会话与子代理会一直累积宿主流，文件（4）和作业（8）本来就有上限。
-5. `$events` 打开的 arity 嗅探补了兜底：声明参数个数骗人时（例如 rest 参数报 0），第一种调用形状被拒就改用另一种，不再让审批、提问和全部转发事件一起失效。
-6. 设备台账上限 200 条（吊销/过期记录仍保留作历史，只是不再无限增长）、历史游标上限 64 条、子代理目录改成一次遍历加 Map（原来是每个子项扫一遍会话列表）、`host.describe` 的版本改读宿主 `package.json`（之前恒为 `dev`）。
-
-0.2.11 修两处跟宿主演进有关的接入问题，移动端 wire 不变：
-
-1. dsh 0.1.7 起把插件配置从「设置」搬到了侧边栏的「插件」页，`settings.plugin.item` 槽位退役。浏览器半边改为注册进 `plugins.bundle.config`（以包名为 key），渲染在 bundle 详情页的配置区；`dsh.client.inject` 相应改为 `@deepseek-ai/dsh-client-ui-plugin-manager`。
-2. profile 用 `nodeLinker: hoisted` 加 `link:` 引用本仓库时，pnpm 会把整个目录复制进 profile，本仓库 `node_modules` 里的符号链接在非提权的 dsh 宿主上无法重建，安装会以 `ERR_PNPM_EPERM` 失败。本仓库因此改用 `nodeLinker: hoisted`，保持目录无符号链接。
-
-0.2.27 把这个包发到 npm（组织 `dsh-earhartzhao`），包名随之从 `dsh-mobile-plugin` 改成 `@dsh-earhartzhao/dsh-mobile-plugin`，移动端 wire 不变：npm 组织只收 scoped 包，而「装 npm 包」是别的机器最省事的一条路——git 源要 `allowBuilds`，Release 资产要那台机器够得着 GitHub，registry 两者都不用。改名对已装的 profile 不是无痛的：那条覆盖行按「id + 包名断言」匹配，裸名的 `name:` 行换了包就不再匹配任何条目，它下面的 Hub 地址、账号、密码、CA 会**静默失效**，而插件在失配的那一轮里根本没被加载、无从自愈——所以换法是迁移 profile（`scripts/migrate-to-scoped.mjs`），见上文「从裸包名迁移」。
-
-0.2.28 修好 npm 装法下控制台「刷新」报「从 `^0.2.27` 看不出 GitHub 仓库或 npm 包名，无法查询最新版本」，移动端 wire 不变：pnpm 装 registry 依赖时清单里只记版本范围（`"@dsh-earhartzhao/dsh-mobile-plugin": "^0.2.27"`），而读依赖时只把**值**当 spec 交给 `parseUpdateSource`，丢掉了清单的 key（也就是包名）——于是一次普普通通的 npm 安装被当成「没说要装什么」，检查更新只能拒绝。现在读依赖时用 `dependencySpec(name, declared)` 把 key 和值拼回完整 spec（`@scope/name@^0.2.27`），值里自带来源的（`github:`、`link:`、URL、路径）原样透传；顺带放宽 registry spec，允许 range 带空格（`>=0.2.0 <0.3.0`）。旧版本只是查不了更新，装法和运行时都没问题。
-
-0.2.29 让第二台及以后的电脑不必再手工搬 `ca.crt`：控制台 CA 字段旁新增**「从 Hub 获取 CA」**，一次 TLS 握手取回 Hub 链里的 CA，再用这张证书做一次**带校验**的握手证明确实是它在签这个 Hub，验过才填进字段（指纹、主体、有效期一起显示），保存即生效。移动端 wire 不变。
-
-- Hub 侧要配合一件事：nats-server 的 `cert_file` 里除了叶子还要带上 CA（`cat server.crt ca.crt > …`，即标准的 fullchain；Go 只把第一张当身份，其余原样发给客户端）。`cert_file` 只放叶子时，客户端从握手里拿不到任何签发者信息——这不是算法能补的，所以按钮会直接给出 Hub 上要跑的命令，而不是含糊地失败。dsh-mobile 的 `scripts/setup-hub.sh` 现在同目录有 `ca.crt` 就自动拼链（并数一遍链里有几张证书），`rotate-hub-tls.sh` 的 runbook 同步改了。
-- 取回的证书不会直接信：`fetchHubCertificate` 会把它当 `ca` 再握一次手，验不过就报 `mismatch` 且不填。链里带的是中间证书、`cert_file` 配错、地址被劫持，都会挡在这一步。
-- 顺带修掉 `rotate-hub-tls.sh --apply` 里的两条死拷贝：它还在往 `apps/mobile/.../dsh_root_ca.crt` 写 CA，而 App 早已不打包任何 CA（信任只来自二维码），那两个路径都不存在，`set -e` 下会直接把轮换脚本打断。
-
-0.2.30 改正 0.2.29 那句补链命令的方向，移动端 wire 不变：0.2.29 让「从 Hub 获取 CA」在 Hub 只发叶子时给出 Hub 上要跑的命令，但那条命令是**新建 `fullchain.crt` 再改 `nats.conf` 的 `cert_file`**——新文件是 root 属主，而 nats-server 常以 `nats` 用户运行，证书读不到、websocket 监听会直接起不来（服务启动成功、只有那一段端口不通，报错也不指向权限）。现在改成 `cd /etc/nats/tls` 之后**就地重写 `server.crt`**（先 `cp -p` 存一份叶子）：属主、权限、SELinux 上下文都保持原样，`cert_file` 一直指着这个文件名，配置文件一个字都不用动。按钮文案与 [docs/03 §2.6](docs/03-nats-self-host.md) 给了同一套幂等命令；dsh-mobile 的 `scripts/setup-hub.sh` 本来就是就地拼、`rotate-hub-tls.sh` 的 runbook 同步改成这条。
-
-0.2.31 让控制台自己说出「该重启了」，移动端 wire 不变：升级插件在运行中的进程里**不可能自动生效**——宿主一直用启动时加载的那份 JavaScript，插件管理器对 profile 里已存在的包一律回 `restart-required`，HMR 又明确忽略 `node_modules`。于是升完包、功能没变、按钮没出现，而唯一的提示只有插件页那行小字（`pnpm add` 那条路一个字都不说）。现在控制台在每次轮询里比较**磁盘上装的版本**和**正在运行的版本**，不一致就在「插件版本」那行旁边用红字写明「磁盘上已装 X，当前运行的是 Y——重启 dsh 后新版本才生效」，并给出两种启动方式各自的重启动作。读不到清单（缺文件、安装写到一半、最近的那份 manifest 不是本包）时保持沉默，不误报。
-
-0.2.32 修掉 0.2.30 那条会毁证书的补链命令，移动端 wire 不变：0.2.30 把「从 Hub 获取 CA」在 Hub 只发叶子时给出的命令改成就地重写，方向是对的（新建文件是 root 属主，以 `nats` 用户运行的服务读不到），但写成了 `cat server.crt /root/dsh-mobile-setup/ca.crt > server.crt` ——**输出和输入是同一个文件**，shell 会在 `cat` 读到它之前先把它清空，跑完 `server.crt` 里只剩 CA、叶子没了，Hub 的 websocket 当场起不来。现在改成先 `cp -p server.crt server.leaf.crt` 再从那一份拼（与 [docs/03 §2.6](docs/03-nats-self-host.md) 完全一致），幂等、属主与权限不变，并在提示里点明「输出不能指向输入」。测试加了一条回归守卫：文案里任何 `cat … > x` 都不得把 `x` 同时当输入。
-
-0.2.33 补上「CA 从哪来」这一问，移动端 wire 不变：控制台原有的提示都默认 Hub 与 `ca.crt` 已经存在——CA 字段标签指向「从 Hub 获取 CA」，拼链命令默认你手里有那份 ca.crt，唯一提到自建流程的地方藏在「测试 Hub 账号」密码被拒的文案里，而页面本身一个链接都没有。于是站在零起点的人（Hub 还没搭，或搭了但没人给过 ca.crt）在界面上问不出答案。现在 CA 区下面常驻一行小字，把两种情况讲清楚：Hub 是别人搭的就向对方要（ca.crt 是公开材料，不含私钥）；Hub 是自己搭的就得先在服务器上生成自己的 CA，私钥 `ca.key` 留在管理机、绝不进服务器，只有 `ca.crt` 要填进这个字段——并给出 [docs/03](docs/03-nats-self-host.md) 的「2.3 上 TLS：自签私有 CA」与「2.6 让新机器一键取到 CA」直达链接（GitHub 上的同一份文件）。
-
-0.2.34 补上新电脑「本机 NATS 还没有」这一段空白，移动端 wire 不变：控制台的「启动本地 NATS」只启动**已经装好**的 `nats-server` 与 `leaf.conf`，而这台机器上两样都没有时，界面只会说「找不到 + 查找范围」——对着一台新电脑，那是死路，缺的正是「怎么装」。新增 **[docs/04-ai-onboarding.md](docs/04-ai-onboarding.md)**：一份写给 AI 助手读的接入清单（要问用户哪三组值、三平台怎么装 `nats-server`、`leaf.conf` 模板与放置顺序、前台试跑的判定日志、常驻方案、插件里接 Hub 的六步、症状对照表、以及四条硬约束），把整页交给那台电脑上的 AI 就能照做，人也可以照着走。控制台本地 NATS 区常驻一行指向它的链接（GitHub 上的同一份文件），状态行在缺文件时除「查找范围」外再点名缺了哪一样；`nats-server` / 配置文件都找不到时返回的那两条错误也各自带上这份清单的路径。README 的文档索引与 [docs/03 §3](docs/03-nats-self-host.md) 同步加了指路。
+历史版本说明见 [GitHub Releases](https://github.com/EarhartZhao/dsh-mobile-plugin/releases)。
